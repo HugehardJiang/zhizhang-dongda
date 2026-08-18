@@ -51,6 +51,7 @@ globalThis.__auditTest = {
   normalizeLocalScheduleItem, localScheduleItemToCourseRow, mergedPersonalScheduleRows,
   compareScheduleItemsOverlap, filterCoursesForDate, overviewTodayCourses, overviewNextCourse, schoolScheduleOccurrenceKey,
   findLocalScheduleConflicts,
+  matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
   scheduleCsvHasRows, renderPersonal, renderOverview, renderSettings, renderCourseDetailModal,
   state,
@@ -70,6 +71,20 @@ const t = global.__auditTest;
     year: 2026, month: 2, day: 28, dateKey: '2026-02-28', timestamp: new Date(2026, 1, 28).getTime()
   });
   assert.strictEqual(t.normalizeCalendarDate('2026-02-30'), null);
+
+  // Academic-term defaults must follow the current-term marker/value returned
+  // by the school system; a plain term list without a marker must not make the
+  // first row look current just because of array order.
+  const detectedTerms = [
+    { code: '2025-2026-1', name: '2025-2026学年秋季学期' },
+    { code: '2025-2026-2', name: '2025-2026学年春季学期' },
+    { code: '2026-2027-1', name: '2026-2027学年秋季学期' }
+  ];
+  assert.strictEqual(t.officialCurrentTermCode({ XNXQDM: '2026-2027-1' }, detectedTerms), '2026-2027-1');
+  assert.strictEqual(t.officialCurrentTermCode({ currentTerm: '2025-2026学年春季学期' }, detectedTerms), '2025-2026-2');
+  assert.strictEqual(t.findExplicitTermCode({ datas: detectedTerms }, detectedTerms), '');
+  assert.strictEqual(t.findExplicitTermCode({ datas: [{ XNXQDM: '2025-2026-1', isCurrent: false }, { XNXQDM: '2026-2027-1', isCurrent: true }] }, detectedTerms), '2026-2027-1');
+  assert.strictEqual(t.chooseCurrentTerm(detectedTerms, [{ currentTermCode: '2025-2026-2' }]).code, '2025-2026-2');
 
   // Configured first-week Sunday drives only the personal schedule default.
   const today = new Date();

@@ -88,6 +88,10 @@ const state = {
   view: "overview",
   terms: [],
   termCode: "",
+  // 教务系统返回的当前学期。它只用于初始化各个学期选择器；用户手动
+  // 切换后的 state.termCode 不会反过来覆盖这个检测结果。
+  detectedTermCode: "",
+  detectedTermSource: "",
   studentId: "",
   connected: false,
   loading: false,
@@ -1072,7 +1076,10 @@ function mapTerm(raw) {
 
 function matchingTermCode(value, terms) {
   const text = String(value ?? "").trim();
-  return terms.find((term) => term.code === text)?.code || "";
+  if (!text) return "";
+  return terms.find((term) => term.code === text || term.name === text)?.code
+    || terms.find((term) => termCodeFromName(text) === term.code)?.code
+    || "";
 }
 
 function findExplicitTermCode(payload, terms, depth = 0) {
@@ -1088,7 +1095,8 @@ function findExplicitTermCode(payload, terms, depth = 0) {
 
   const directKeys = [
     "selectedXNXQCode", "selectedTermCode", "currentTermCode", "currentXNXQDM",
-    "defaultTermCode", "defaultXNXQDM", "DQXNXQDM", "dqxnxqdm"
+    "defaultTermCode", "defaultXNXQDM", "DQXNXQDM", "dqxnxqdm",
+    "selectedXNXQ", "currentXNXQ", "currentTerm", "defaultTerm", "selectedTerm"
   ];
   for (const key of directKeys) {
     const found = matchingTermCode(payload[key], terms);
@@ -1110,6 +1118,27 @@ function findExplicitTermCode(payload, terms, depth = 0) {
   return "";
 }
 
+function findFirstExplicitTermCode(terms, payloads = []) {
+  for (const payload of payloads) {
+    const code = findExplicitTermCode(payload, terms);
+    if (code) return code;
+  }
+  return "";
+}
+
+function officialCurrentTermCode(payload, terms) {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const direct = matchingTermCode(valueOf(payload, [
+      "selectedXNXQCode", "selectedTermCode", "currentTermCode", "currentXNXQDM",
+      "defaultTermCode", "defaultXNXQDM", "DQXNXQDM", "dqxnxqdm",
+      "XNXQDM", "xnxqdm", "termCode", "itemCode", "DM", "code",
+      "selectedXNXQ", "currentXNXQ", "currentTerm", "defaultTerm", "selectedTerm"
+    ], ""), terms);
+    if (direct) return direct;
+  }
+  return findExplicitTermCode(payload, terms);
+}
+
 function termStartDate(code) {
   const match = String(code ?? "").match(/^(\d{4})-(\d{4})-([12])$/);
   if (!match) return null;
@@ -1127,11 +1156,27 @@ function chooseCalendarTerm(terms) {
 }
 
 function chooseCurrentTerm(terms, payloads = []) {
-  for (const payload of payloads) {
-    const explicitCode = findExplicitTermCode(payload, terms);
-    if (explicitCode) return terms.find((term) => term.code === explicitCode) || terms[0];
-  }
+  const explicitCode = findFirstExplicitTermCode(terms, payloads);
+  if (explicitCode) return terms.find((term) => term.code === explicitCode) || terms[0];
   return chooseCalendarTerm(terms) || terms[0];
+}
+
+async function loadOfficialCurrentTermPayload() {
+  // 这是原系统课表模块使用的当前学期接口。不同登录会话可能只允许其中
+  // 一个上下文；两种调用都失败时由调用方继续使用已经读取到的学期列表。
+  const requests = [
+    () => getKbContext("modules/qxkbcx/cxdqxnxq.do"),
+    () => getKb("modules/qxkbcx/cxdqxnxq.do")
+  ];
+  for (const request of requests) {
+    try {
+      const payload = await request();
+      if (payload !== null && payload !== undefined) return payload;
+    } catch {
+      // 当前学期探测失败不应阻断主学期列表和缓存数据。
+    }
+  }
+  return null;
 }
 
 function findStudentId(payload, depth = 0) {
@@ -1177,6 +1222,8 @@ async function loadTerms() {
   } catch {
     // 当前用户接口只用于读取学号，不影响其他成绩、考试和课表查询。
   }
+  const listDetectedCode = findExplicitTermCode(payload, rowsOf(payload).map(mapTerm).filter((term) => term.code));
+  const currentPayload = listDetectedCode ? null : await loadOfficialCurrentTermPayload();
   const terms = rowsOf(payload).map(mapTerm).filter((term) => term.code);
   if (!terms.length) throw new ApiError("没有读取到可查询的学期", "xnxq.do 返回为空");
   state.terms = terms;
@@ -1190,7 +1237,12 @@ async function loadTerms() {
     state.data = emptyPersonalData();
   }
   state.studentId = discoveredStudentId || state.studentId;
-  const selected = chooseCurrentTerm(terms, [payload, configPayload]);
+  const explicitCode = officialCurrentTermCode(currentPayload, terms)
+    || findFirstExplicitTermCode(terms, [payload, configPayload, currentUserPayload]);
+  const selected = terms.find((term) => term.code === explicitCode)
+    || chooseCurrentTerm(terms, [payload, configPayload, currentUserPayload]);
+  state.detectedTermCode = explicitCode || selected.code;
+  state.detectedTermSource = explicitCode ? "教务系统" : "兼容兜底";
   state.termCode = selected.code;
   updatePersonalTermSelect();
 }
@@ -1215,21 +1267,21 @@ async function loadAllTerms() {
     let terms = termRowsFromPayload(listPayload);
     if (!terms.length) terms = state.terms.slice();
 
-    // 当前账号对原系统的“当前学期”探测接口返回 403；课表模块学期列表
-    // 已包含完整可选项，直接使用学期列表/个人模块当前学期即可，避免每次
-    // 打开全校课表时制造两条无意义的 WebVPN 错误。
-    const currentPayload = null;
-    const currentValue = "";
-    const currentCode = matchingTermCode(currentValue, terms)
-      || findExplicitTermCode(currentPayload, terms)
+    // 全校课表使用自己的学期列表，但默认学期仍必须来自教务系统当前学期
+    // 探测；若该模块不返回当前值，则复用主学期列表已经检测到的当前代码。
+    const currentPayload = await loadOfficialCurrentTermPayload();
+    const currentCode = officialCurrentTermCode(currentPayload, terms)
+      || matchingTermCode(state.detectedTermCode, terms)
       || chooseCalendarTerm(terms)?.code
-      || state.termCode;
+      || "";
     state.allTerms = terms;
-    state.allTermCode = terms.some((term) => term.code === currentCode) ? currentCode : terms[0]?.code || state.termCode;
+    state.allTermCode = terms.some((term) => term.code === currentCode) ? currentCode : "";
   } catch (error) {
     state.allTermError = error.message || "课表学期列表读取失败";
     state.allTerms = state.terms.slice();
-    state.allTermCode = chooseCalendarTerm(state.allTerms)?.code || state.termCode;
+    state.allTermCode = matchingTermCode(state.detectedTermCode, state.allTerms)
+      || chooseCalendarTerm(state.allTerms)?.code
+      || "";
   }
   render();
 }
