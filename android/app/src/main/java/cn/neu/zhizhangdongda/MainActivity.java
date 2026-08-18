@@ -56,6 +56,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.List;
@@ -71,6 +73,8 @@ import java.util.concurrent.Executors;
  * - AndroidBridge 负责把 WebVPN Cookie 带到原生网络请求中；
  * - CookieManager 和 SharedPreferences 共同保证登录会话可跨次启动复用；
  * - 应用内部 personal-cache 文件只保存按学号隔离的个人查询结果，供失效会话时离线展示。
+ * - 应用内部 local-schedule 文件只保存按学号隔离的本地课程/日程覆盖层，
+ *   不会混入教务缓存，也不会回写学校接口。
  */
 public class MainActivity extends Activity {
     private static final String LOG_TAG = "ZhizhangEcode";
@@ -80,7 +84,7 @@ public class MainActivity extends Activity {
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.37";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.38";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -365,9 +369,12 @@ public class MainActivity extends Activity {
     private static final int WRITE_DASHBOARD_CSV_REQUEST = 2203;
     private static final String PERSONAL_CACHE_LAST_KEY = "personal_cache_last_key";
     private static final String PERSONAL_CACHE_DIRECTORY = "personal-cache";
+    private static final String LOCAL_SCHEDULE_LAST_KEY = "local_schedule_last_key";
+    private static final String LOCAL_SCHEDULE_DIRECTORY = "local-schedule";
     // JavascriptInterface 参数和返回值会经过 Binder；控制在 900 KiB 内，
     // 避免大号成绩历史在部分 Android 版本上触发事务大小限制。
     private static final int PERSONAL_CACHE_MAX_BYTES = 900 * 1024;
+    private static final int LOCAL_SCHEDULE_MAX_BYTES = 900 * 1024;
     private static final int ECODE_COLLAPSED_HEIGHT_DP = 112;
 
     /**
@@ -642,7 +649,7 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.37");
+        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.38");
         webView.setBackgroundColor(Color.rgb(246, 247, 249));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setVerticalScrollBarEnabled(false);
@@ -914,6 +921,126 @@ public class MainActivity extends Activity {
         String key = preferences.getString(PERSONAL_CACHE_LAST_KEY, "");
         if (!key.isEmpty()) personalCacheFile(key).delete();
         preferences.edit().remove(PERSONAL_CACHE_LAST_KEY).apply();
+    }
+
+    private File localScheduleDirectory() {
+        File directory = new File(getFilesDir(), LOCAL_SCHEDULE_DIRECTORY);
+        if (!directory.exists()) directory.mkdirs();
+        return directory;
+    }
+
+    private String localScheduleKeyForProfile(String profileKey) {
+        String value = profileKey == null ? "" : profileKey.trim();
+        if (value.isEmpty()) value = "anonymous";
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder key = new StringBuilder(digest.length * 2);
+            for (byte item : digest) key.append(String.format("%02x", item & 0xff));
+            return key.toString();
+        } catch (Exception ignored) {
+            return Integer.toHexString(value.hashCode());
+        }
+    }
+
+    private String localScheduleKey(String payload) {
+        String profileKey = "";
+        try {
+            JSONObject object = new JSONObject(payload == null ? "" : payload);
+            profileKey = object.optString("studentId", "").trim();
+            if (profileKey.isEmpty()) profileKey = object.optString("profileKey", "").trim();
+        } catch (Exception ignored) {
+            // 页面只提交 JSON；坏数据不覆盖已有文件。
+        }
+        return profileKey.isEmpty() ? "" : localScheduleKeyForProfile(profileKey);
+    }
+
+    private File localScheduleFile(String key) {
+        return new File(localScheduleDirectory(), key + ".json");
+    }
+
+    private boolean replaceLocalScheduleFile(File temporary, File target) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return replaceLocalScheduleFileWithNio(temporary, target);
+        }
+        // Android 7 及以下没有 java.nio.file.Files；临时文件与目标文件位于
+        // 同一目录，renameTo 在这些设备上仍是最安全的可用替换方式。
+        return temporary.renameTo(target);
+    }
+
+    @android.annotation.TargetApi(Build.VERSION_CODES.O)
+    private boolean replaceLocalScheduleFileWithNio(File temporary, File target) {
+        try {
+            Files.move(
+                    temporary.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+            );
+            return true;
+        } catch (Exception ignored) {
+            // 部分 Android 文件系统不支持 ATOMIC_MOVE；继续尝试同文件系统替换。
+        }
+        try {
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (Exception ignored) {
+            // 最后才使用 File.renameTo 兼容旧设备，仍然不主动删除旧文件。
+            return temporary.renameTo(target);
+        }
+    }
+
+    private String loadLocalSchedulePayload(String profileKey) {
+        if (preferences == null) return "";
+        String normalized = profileKey == null ? "" : profileKey.trim();
+        String key = localScheduleKeyForProfile(normalized);
+        if (normalized.isEmpty()) {
+            String last = preferences.getString(LOCAL_SCHEDULE_LAST_KEY, "");
+            if (!last.isEmpty()) key = last;
+        }
+        File file = localScheduleFile(key);
+        if (!file.isFile()) return "";
+        try (InputStream input = new java.io.FileInputStream(file)) {
+            return readResponse(input);
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private void saveLocalSchedulePayload(String payload) {
+        if (payload == null || payload.isEmpty() || preferences == null) return;
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > LOCAL_SCHEDULE_MAX_BYTES) return;
+        String key = localScheduleKey(payload);
+        if (key.isEmpty()) return;
+        File directory = localScheduleDirectory();
+        File target = localScheduleFile(key);
+        File temporary = new File(directory, key + ".tmp");
+        try (FileOutputStream output = new FileOutputStream(temporary)) {
+            output.write(bytes);
+            output.flush();
+            output.getFD().sync();
+        } catch (Exception ignored) {
+            temporary.delete();
+            return;
+        }
+        if (!replaceLocalScheduleFile(temporary, target)) {
+            temporary.delete();
+            return;
+        }
+        preferences.edit().putString(LOCAL_SCHEDULE_LAST_KEY, key).apply();
+    }
+
+    private void clearLocalSchedulePayload(String profileKey) {
+        if (preferences == null) return;
+        String normalized = profileKey == null ? "" : profileKey.trim();
+        String key = normalized.isEmpty()
+                ? preferences.getString(LOCAL_SCHEDULE_LAST_KEY, "")
+                : localScheduleKeyForProfile(normalized);
+        if (!key.isEmpty()) localScheduleFile(key).delete();
+        if (key.equals(preferences.getString(LOCAL_SCHEDULE_LAST_KEY, ""))) {
+            preferences.edit().remove(LOCAL_SCHEDULE_LAST_KEY).apply();
+        }
     }
 
     private boolean isPortalPageUrl(String url) {
@@ -2151,6 +2278,32 @@ public class MainActivity extends Activity {
         @android.webkit.JavascriptInterface
         public void clearPersonalCache() {
             clearPersonalCachePayload();
+        }
+
+        @android.webkit.JavascriptInterface
+        public String loadLocalSchedule(String profileKey) {
+            // local-schedule 与 personal-cache 分目录、分文件名索引，清除教务缓存不会触碰这里。
+            return loadLocalSchedulePayload(profileKey);
+        }
+
+        @android.webkit.JavascriptInterface
+        public String loadLocalSchedule() {
+            return loadLocalSchedulePayload("");
+        }
+
+        @android.webkit.JavascriptInterface
+        public void saveLocalSchedule(String payload) {
+            networkExecutor.execute(() -> saveLocalSchedulePayload(payload));
+        }
+
+        @android.webkit.JavascriptInterface
+        public void clearLocalSchedule(String profileKey) {
+            clearLocalSchedulePayload(profileKey);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void clearLocalSchedule() {
+            clearLocalSchedulePayload("");
         }
 
         @android.webkit.JavascriptInterface

@@ -1731,3 +1731,37 @@ rows.sort((a, b) => collator.compare(a.courseName, b.courseName));
 6. 课程名称、教师、地点只用于展示和辅助判断，不替代周次、星期、节次的时间交集判断。
 
 撞课功能只读当前全校课表明细内存数据和导入文本，不调用写接口、不修改选课或教务数据。
+
+## 15. 本地课表覆盖层
+
+本地课程和一次性日程是个人课表的独立覆盖层，不是教务接口的写入模型。学校接口返回的数据仍只进入 `state.data.courses`、`state.data.scheduleDetail` 和个人教务缓存；本地数据保存在 `state.localSchedule`，渲染前由 `mergedPersonalScheduleRows()` 组合。
+
+### 15.1 数据结构与存储
+
+持久化顶层结构固定为 `zhizhang-local-schedule/v1`：
+
+```json
+{
+  "schema": "zhizhang-local-schedule/v1",
+  "schemaVersion": 1,
+  "profileKey": "学号或 anonymous",
+  "studentId": "学号",
+  "savedAt": "2026-08-18T06:00:00.000Z",
+  "items": [],
+  "hiddenSchoolEntries": []
+}
+```
+
+`items` 中的记录使用 `source: "local"`，`type` 为 `course` 或 `event`。重复课程使用 `course.weekNumbers`、`weekdayIndex`、节次和可选的起止时间；一次性日程使用 `event.date`，可以是全天、具体时间或可选节次。`excludedWeeks` 和 `excludedDates` 只表示本地例外，不会改变学校原始记录。
+
+Chrome 写入 `chrome.storage.local`，键名由稳定哈希后的 profile key 生成；非扩展测试/文件环境才回退到 localStorage。Android 写入应用内部 `local-schedule/`，文件名为 profile key 的 SHA-256；写入先保存到同目录临时文件，再进行原子替换。个人教务缓存仍位于独立的 `personal-cache/`，两个清除操作互不影响。
+
+### 15.2 合并与冲突
+
+合并顺序是“未被本地隐藏的学校排课 + 当前学期启用的本地记录”。刷新、切换学期和读取缓存都不应删除 `state.localSchedule`。当用户选择“仅保留新安排”时，只新增 `hiddenSchoolEntries` 的稳定排课键；学校数组和学校缓存永远不被删除或修改，管理页可以恢复隐藏记录。
+
+冲突判断复用 `compareCourseScheduleOverlap()` 的星期、周次、节次和具体时间逻辑，并扩展实际日期事件：全天日程默认不参与冲突；有具体日期的事件无需先设置第一周日期即可显示和参与日期判断；若重复课程无法由当前学周映射到事件日期，则标记“可能冲突”并列出缺失的教学周，而不是声称确定冲突。不同学期不参与比较。
+
+### 15.3 展示与导出边界
+
+总览、个人课表日视图、周表、搜索、PNG 和 CSV 都读取合并层。没有节次的一次性日程进入周表下方的“其他日程”区域和 PNG 的未定位区域；CSV 的 WakeUp 格式无法表达没有教学周或节次的日期事件时，不伪造周次/节次，而是在导出提示中报告跳过数量。Android 继续隐藏培养计划入口，但本地课表覆盖层保留。

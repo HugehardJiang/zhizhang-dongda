@@ -207,6 +207,25 @@ const state = {
     allScores: [],
     scoreDetails: {}
   },
+  // 用户手动创建的课程/日程是独立的本地 Overlay，永远不写入 data.courses
+  // 或 data.scheduleDetail。它和个人教务缓存使用不同的 schema、不同的
+  // Android 文件目录，并按当前 studentId 分开保存。
+  localSchedule: {
+    hydrated: false,
+    loading: false,
+    items: [],
+    hiddenSchoolEntries: [],
+    profileKey: "",
+    editorOpen: false,
+    managerOpen: false,
+    editingId: "",
+    draft: null,
+    editorError: "",
+    conflict: null,
+    filter: "all",
+    corrupted: false,
+    lastCsvSkipped: 0
+  },
   scoreDetail: null,
   filters: {
     scores: "",
@@ -4491,6 +4510,7 @@ async function loadTermData(requestId = refreshRequestSequence) {
   if (liveStudentId) {
     state.studentId = liveStudentId;
     state.personalCache.studentId = liveStudentId;
+    await switchLocalScheduleProfile(liveStudentId);
   }
 
   // 空数组可能只是接口暂时没有把结果页返回完整；已有缓存时不要因为
@@ -5328,12 +5348,713 @@ function courseDataAttributes(course, scope = "personal") {
   return `data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
 }
 
+function localScheduleSourceBadge(itemOrRow) {
+  const type = itemOrRow?.localType || itemOrRow?.type;
+  return `<span class="local-source-badge local-source-${type === "event" ? "event" : "course"}">${type === "event" ? "日程" : "自定义"}</span>`;
+}
+
 function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
-  const clockText = extractClockText(course.time);
-  const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter(Boolean).join(" ") || "时间待识别";
+  const clockText = extractClockText(course.time) || localScheduleClockText(course);
+  const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
   const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
-  const className = ["course-chip", extraClass].filter(Boolean).join(" ");
-  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
+  const className = ["course-chip", extraClass, course.source === "local" ? "local-schedule-chip" : ""].filter(Boolean).join(" ");
+  const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
+}
+
+function localScheduleFilterText(row) {
+  return [row?.name, row?.teacher, row?.location, row?.detail, row?.weeks, row?.weekday, row?.time, row?.localDate].filter(Boolean).join(" ");
+}
+
+function localScheduleItemDisplayText(item) {
+  const row = localScheduleItemToCourseRow(item);
+  const schedule = item.type === "event"
+    ? [item.event.date && localScheduleDateText(item.event.date), localScheduleClockText(item), localScheduleSectionText(item)].filter(Boolean).join(" · ")
+    : [item.course.weekNumbers.length ? formatWeeksValue(item.course.weekNumbers.join(",")) : "周次待设置", localScheduleWeekdayText(item.course.weekdayIndex), localScheduleSectionText(item), localScheduleClockText(item)].filter(Boolean).join(" · ");
+  return { row, schedule };
+}
+
+function localScheduleActionButtons(item) {
+  const id = escapeHtml(item.id);
+  return `<div class="local-item-actions"><button class="button button-ghost button-small" type="button" data-action="edit-local-schedule" data-local-schedule-id="${id}">编辑</button><button class="button button-ghost button-small" type="button" data-action="copy-local-schedule" data-local-schedule-id="${id}">复制</button>${item.enabled ? `<button class="button button-soft button-small" type="button" data-action="toggle-local-schedule" data-local-schedule-id="${id}">停用</button>` : `<button class="button button-soft button-small" type="button" data-action="toggle-local-schedule" data-local-schedule-id="${id}">启用</button>`}<button class="button button-danger button-small" type="button" data-action="delete-local-schedule" data-local-schedule-id="${id}">删除</button></div>`;
+}
+
+function renderLocalScheduleRecords(items = localScheduleItemsForTerm(state.termCode, true)) {
+  const rows = (items || []).map((item) => {
+    const display = localScheduleItemDisplayText(item);
+    const disabled = item.enabled ? "" : " is-disabled";
+    return `<article class="local-schedule-record local-schedule-color-${escapeHtml(item.colorKey || "blue")}${disabled}"><button class="local-record-main" type="button" data-action="show-local-schedule" data-course-source="local" data-local-schedule-id="${escapeHtml(item.id)}"><div class="local-record-head"><strong>${escapeHtml(item.title || "未命名安排")}</strong>${localScheduleSourceBadge(item)}${!item.enabled ? `<span class="tag">已停用</span>` : ""}</div><span>${escapeHtml(display.schedule || "时间待设置")}</span><small>${escapeHtml([item.location, item.teacher, item.note].filter(Boolean).join(" · ") || "没有补充信息")}</small></button>${localScheduleActionButtons(item)}</article>`;
+  }).join("");
+  return rows ? `<div class="local-schedule-records">${rows}</div>` : `<div class="local-schedule-empty"><strong>本学期还没有自定义安排</strong><span>可以添加一门重复课程或一次性日程。</span></div>`;
+}
+
+function localScheduleTermOptionsMarkup(selected = state.termCode) {
+  const terms = localScheduleTerms();
+  if (!terms.length && selected) return `<option value="${escapeHtml(selected)}" selected>${escapeHtml(localScheduleTermName(selected))}</option>`;
+  return terms.map((term) => `<option value="${escapeHtml(term.code)}" ${term.code === selected ? "selected" : ""}>${escapeHtml(term.name || term.code)}</option>`).join("");
+}
+
+function localScheduleSectionOptions(selected = null, placeholder = "不指定") {
+  const max = Math.max(12, ...schoolPersonalScheduleRows(state.data.courses || []).map((course) => courseSectionRange(course)?.end || 0));
+  return `<option value="" ${selected === null || selected === "" ? "selected" : ""}>${placeholder}</option>${Array.from({ length: max }, (_, index) => index + 1).map((value) => `<option value="${value}" ${Number(selected) === value ? "selected" : ""}>第${value}节</option>`).join("")}`;
+}
+
+function localScheduleEditorMarkup() {
+  if (!state.localSchedule.editorOpen) return "";
+  const draft = state.localSchedule.draft || localScheduleDraftFromItem(null, "course");
+  const type = draft.type === "event" ? "event" : "course";
+  const course = draft.course || {};
+  const event = draft.event || {};
+  const weeks = new Set(course.weekNumbers || []);
+  const minWeek = course.weekNumbers?.length ? Math.min(...course.weekNumbers) : 1;
+  const maxWeek = course.weekNumbers?.length ? Math.max(...course.weekNumbers) : 16;
+  const isContiguous = course.weekNumbers?.length === maxWeek - minWeek + 1 && course.weekNumbers.every((week) => week >= minWeek && week <= maxWeek);
+  const isOdd = course.weekNumbers?.length && course.weekNumbers.every((week) => week % 2 === 1) && course.weekNumbers.length === Math.ceil((maxWeek - minWeek + 1) / 2);
+  const isEven = course.weekNumbers?.length && course.weekNumbers.every((week) => week % 2 === 0) && course.weekNumbers.length === Math.floor((maxWeek - minWeek + 1) / 2);
+  const repeatValue = isContiguous ? "every" : isOdd ? "odd" : isEven ? "even" : "custom";
+  const weekCheckboxes = Array.from({ length: 20 }, (_, index) => index + 1)
+    .map((week) => `<label class="local-week-option"><input type="checkbox" data-local-week value="${week}" ${weeks.has(week) ? "checked" : ""} />${week}</label>`).join("");
+  const termOptions = localScheduleTermOptionsMarkup(draft.termCode || state.termCode);
+  const colorOptions = LOCAL_SCHEDULE_COLOR_KEYS.map((key) => `<label class="local-color-option local-color-${key}"><input type="radio" name="localColorKey" value="${key}" ${draft.colorKey === key ? "checked" : ""} /><span></span></label>`).join("");
+  const courseForm = `<div class="local-editor-section"><h4>上课时间</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>课程名称 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：自动控制补课" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>星期 <em>*</em></span><select id="localWeekday"><option value="">请选择星期</option>${["周日", "周一", "周二", "周三", "周四", "周五", "周六"].map((name, index) => `<option value="${index}" ${course.weekdayIndex === index ? "selected" : ""}>${name}</option>`).join("")}</select></label><label class="local-form-field"><span>开始节次 <em>*</em></span><select id="localStartSection">${localScheduleSectionOptions(course.startSection, "请选择")}</select></label><label class="local-form-field"><span>结束节次 <em>*</em></span><select id="localEndSection">${localScheduleSectionOptions(course.endSection, "请选择")}</select></label></div><div class="local-week-builder"><strong>重复周次 <em>*</em></strong><div class="local-week-range"><label>起始周<input id="localWeekStart" type="number" min="1" max="60" value="${escapeHtml(minWeek)}" /></label><label>结束周<input id="localWeekEnd" type="number" min="1" max="60" value="${escapeHtml(maxWeek)}" /></label><label>重复<select id="localWeekRepeat"><option value="every" ${repeatValue === "every" ? "selected" : ""}>每周</option><option value="odd" ${repeatValue === "odd" ? "selected" : ""}>单周</option><option value="even" ${repeatValue === "even" ? "selected" : ""}>双周</option><option value="custom" ${repeatValue === "custom" ? "selected" : ""}>自定义周次</option></select></label></div><details class="local-custom-weeks" ${repeatValue === "custom" ? "open" : ""}><summary>自定义周次（可选）</summary><div class="local-week-options">${weekCheckboxes}</div></details></div></div><div class="local-editor-section"><h4>课程信息</h4><div class="local-form-grid"><label class="local-form-field"><span>教师</span><input id="localTeacher" value="${escapeHtml(draft.teacher)}" placeholder="可选" /></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(course.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(course.endTime || "")}" /></label><label class="local-form-field local-form-wide"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label></div></div>`;
+  const eventForm = `<div class="local-editor-section"><h4>日程信息</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>标题 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：摄影社例会" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>日期 <em>*</em></span><input id="localEventDate" type="date" value="${escapeHtml(event.date || "")}" /></label><label class="local-form-check local-form-wide"><input id="localEventAllDay" type="checkbox" ${event.allDay ? "checked" : ""} /><span>全天日程（不参与时间冲突判断）</span></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(event.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(event.endTime || "")}" /></label><label class="local-form-field"><span>开始节次（可选）</span><select id="localStartSection">${localScheduleSectionOptions(event.startSection, "不指定")}</select></label><label class="local-form-field"><span>结束节次（可选）</span><select id="localEndSection">${localScheduleSectionOptions(event.endSection, "不指定")}</select></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label><p class="local-form-help local-form-wide">一次性日程会按日期显示，即使尚未设置教学周。</p></div></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-editor-modal" role="dialog" aria-modal="true" aria-label="${type === "event" ? "编辑本地日程" : "编辑本地课程"}"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${draft.id && state.localSchedule.editingId ? "编辑安排" : "添加安排"}</h3><p class="muted">内容只保存在本机，不会写入教务系统或上传到服务器。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-editor">关闭</button></div><div class="local-editor-tabs"><button class="button button-small ${type === "course" ? "button-primary" : "button-ghost"}" type="button" data-action="local-editor-type" data-local-type="course">课程</button><button class="button button-small ${type === "event" ? "button-primary" : "button-ghost"}" type="button" data-action="local-editor-type" data-local-type="event">日程</button></div>${type === "course" ? courseForm : eventForm}<div class="local-editor-section"><h4>颜色</h4><div class="local-color-options">${colorOptions}</div></div>${state.localSchedule.editorError ? `<p class="local-form-error" role="alert">${escapeHtml(state.localSchedule.editorError)}</p>` : ""}<div class="schedule-export-actions"><button class="button button-ghost" type="button" data-action="close-local-editor">取消</button><button class="button button-primary" type="button" data-action="save-local-schedule">保存安排</button></div></section></div>`;
+}
+
+function localScheduleManagerMarkup() {
+  if (!state.localSchedule.managerOpen) return "";
+  const allItems = localScheduleItemsForTerm(state.termCode, true);
+  const filter = state.localSchedule.filter || "all";
+  const items = allItems.filter((item) => filter === "all" || filter === item.type || (filter === "disabled" && !item.enabled));
+  const hidden = (state.localSchedule.hiddenSchoolEntries || []).filter((entry) => !entry.termCode || entry.termCode === state.termCode);
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-manager-modal" role="dialog" aria-modal="true" aria-label="管理自定义安排"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>管理自定义安排</h3><p class="muted">当前学期 · ${allItems.filter((item) => item.enabled).length} 项启用安排；学校课程仍保存在教务数据层。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-manager">关闭</button></div><div class="local-manager-toolbar"><select id="localManagerFilter"><option value="all" ${filter === "all" ? "selected" : ""}>全部本地安排</option><option value="course" ${filter === "course" ? "selected" : ""}>自定义课程</option><option value="event" ${filter === "event" ? "selected" : ""}>自定义日程</option><option value="disabled" ${filter === "disabled" ? "selected" : ""}>已停用</option></select><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button></div>${renderLocalScheduleRecords(items)}<section class="local-hidden-school-section"><div class="local-manager-section-head"><strong>本地隐藏的教务排课</strong><span>${hidden.length} 条</span></div>${hidden.length ? hidden.map((entry) => `<div class="local-hidden-school-row"><div><strong>${escapeHtml(entry.label || "教务排课")}</strong><small>只在本地组合课表中隐藏，不会修改教务系统</small></div><button class="button button-ghost button-small" type="button" data-action="restore-hidden-school" data-hidden-school-key="${escapeHtml(entry.key)}" data-hidden-school-term="${escapeHtml(entry.termCode || "")}">恢复显示</button></div>`).join("") : `<p class="muted">没有本地隐藏的教务排课。</p>`}</section><div class="local-manager-danger"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button><small>只删除你手动创建的数据，不影响教务系统课程。</small></div></section></div>`;
+}
+
+function localScheduleConflictMarkup() {
+  const conflict = state.localSchedule.conflict;
+  if (!conflict) return "";
+  const candidate = conflict.candidate;
+  const candidateText = localScheduleItemDisplayText(candidate).schedule;
+  const list = conflict.conflicts.map((item) => {
+    const existing = item.existingItem || item.existing;
+    const label = existing?.source === "local" ? "自定义安排" : "教务课程";
+    return `<article class="local-conflict-row"><div><strong>${escapeHtml(existing?.name || existing?.title || "未命名安排")}</strong><span>${escapeHtml(label)} · ${escapeHtml(item.certain ? "确定冲突" : `可能冲突：${(item.missing || []).join("、")}`)}</span></div><small>${escapeHtml(existing?.source === "local" ? localScheduleItemDisplayText(existing).schedule : courseTransferScheduleText(existing))}</small></article>`;
+  }).join("");
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-conflict-modal" role="dialog" aria-modal="true" aria-label="发现时间冲突"><div class="detail-modal-head"><div><p class="eyebrow">SCHEDULE CONFLICT</p><h3>发现 ${conflict.conflicts.length} 项时间冲突</h3><p class="muted">你添加的安排：${escapeHtml(candidate.title)} · ${escapeHtml(candidateText)}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-conflict">关闭</button></div><div class="local-conflict-list">${list}</div><div class="local-conflict-choice"><strong>如何处理？</strong><p>默认不会自动隐藏任何课程；“仅保留新安排”只会在本地组合课表隐藏教务排课。</p><div class="local-conflict-actions"><button class="button button-ghost" type="button" data-action="resolve-local-conflict" data-conflict-choice="existing">保留现有安排</button><button class="button button-primary" type="button" data-action="resolve-local-conflict" data-conflict-choice="both">同时保留</button><button class="button button-soft" type="button" data-action="resolve-local-conflict" data-conflict-choice="new">仅保留新安排<br /><small>本地隐藏冲突教务课程</small></button></div></div></section></div>`;
+}
+
+function localScheduleModalMarkup() {
+  return `${localScheduleEditorMarkup()}${localScheduleManagerMarkup()}${localScheduleConflictMarkup()}`;
+}
+
+function localScheduleRowHasConflict(row, rows = mergedPersonalScheduleRows()) {
+  return rows.some((candidate) => candidate !== row && compareScheduleItemsOverlap(row, candidate).overlap);
+}
+
+function renderDailyScheduleWithLocalOverlay(rows, scope = "personal") {
+  const availability = courseFieldAvailability(rows, scope);
+  const today = localDateOnly(new Date());
+  const dates = [today, addCalendarDays(today, 1)];
+  const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
+  const calendarHint = firstWeekDate
+    ? `第一周从 ${calendarDateText(firstWeekDate)}（周日）开始；自定义日程按真实日期显示。`
+    : "尚未设置第一周的周日；一次性日程仍会按真实日期显示，重复课程需要设置教学周后才能判断。";
+  const cards = dates.map((date, index) => {
+    const info = academicDayInfo(date);
+    const courses = filterCoursesForDate(rows, date);
+    const period = index === 0 ? "今天" : "明天";
+    const weekText = info.week ? `第${info.week}周` : "教学周未设置";
+    const courseMarkup = courses.length
+      ? courses.map((course) => {
+        const sectionText = [courseSectionLabel(course) === "节次待识别" ? "" : courseSectionLabel(course), extractClockText(course.time) || localScheduleClockText(course)].filter(Boolean).join(" · ") || (course.localAllDay ? "全天" : "时间待识别");
+        const placeText = course.location || course.detail || "地点待识别";
+        const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+        const conflict = localScheduleRowHasConflict(course, rows);
+        return `<button class="daily-course-card ${course.source === "local" ? `local-schedule-card local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><div class="daily-course-title"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(sectionText)}</span></div><div class="daily-course-tags">${badge}${courseTagsMarkup(course, availability)}</div><p class="daily-course-teacher">${escapeHtml(course.teacher || (course.localType === "event" ? "自定义日程" : "教师待识别"))}</p><p class="daily-course-location">${escapeHtml(placeText)}</p><small class="daily-course-meta">${escapeHtml(course.localDate ? `${course.localDate}${course.localAllDay ? " · 全天" : ""}` : `${course.weeks || "周次待识别"} · ${course.code || "无课程号"}`)}${conflict ? " · ⚠ 时间冲突" : ""}</small></button>`;
+      }).join("")
+      : info.week === null
+        ? `<div class="daily-empty"><strong>教学周未设置</strong><span>一次性日程仍会显示；设置第一周周日后才能加入重复课程。</span><button class="button button-link" type="button" data-action="view-settings">设置学周 →</button></div>`
+        : `<div class="daily-empty"><strong>这天没有安排</strong><span>可以安心安排自己的时间</span></div>`;
+    return `<section class="daily-day-card ${index === 0 ? "is-today" : ""}"><header class="daily-day-header"><div><span class="daily-day-badge">${period}</span><h4>${SUNDAY_FIRST_DAY_NAMES[info.weekdayIndex]} · ${calendarDateText(date)}</h4></div><span class="tag ${info.week ? "pass" : "warn"}">${weekText}</span></header><div class="daily-course-list">${courseMarkup}</div></section>`;
+  }).join("");
+  return `<div class="daily-schedule"><div class="daily-schedule-note"><span class="hero-dot" aria-hidden="true"></span><span>${escapeHtml(calendarHint)}</span><button class="button button-ghost button-small" type="button" data-action="view-settings">设置学周</button></div><div class="daily-schedule-grid">${cards}</div></div>`;
+}
+
+function renderOverviewPriority(next) {
+  if (next.state === "unknown") {
+    return `<div class="overview-week-unknown"><strong>教学周未设置</strong><p>一次性日程可以正常显示；重复课程需要设置第一周日期后才能准确判断今天。</p><div class="overview-inline-actions"><button class="button button-link" type="button" data-action="view-settings">设置学周 →</button><button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div></div>`;
+  }
+  if (next.state === "none") {
+    const tomorrow = next.tomorrow;
+    return `<div class="overview-no-class"><strong>今天没有安排</strong><span>${tomorrow ? `明日第一项：${escapeHtml(tomorrow.name || "未命名安排")}` : "可以安心安排自己的时间。"}</span><button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
+  }
+  if (next.state === "all-day") {
+    return `<div class="overview-no-class local-priority"><strong>今天有全天安排</strong><span>${escapeHtml(next.course?.name || "未命名日程")} · 不计入下一项时间提醒</span><button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
+  }
+  if (next.state === "ended") {
+    const tomorrow = next.tomorrow;
+    return `<div class="overview-ended"><strong>今天的安排已结束</strong><span>今天的课程与日程已全部结束。</span>${tomorrow ? `<div class="overview-tomorrow"><span>明日第一项</span><strong>${escapeHtml(tomorrow.name || "未命名安排")}</strong><small>${escapeHtml([overviewCourseTime(tomorrow), overviewCoursePlace(tomorrow)].filter(Boolean).join(" · "))}</small></div>` : `<div class="overview-tomorrow is-muted"><span>明日安排</span><small>暂未读取到已排安排</small></div>`}</div>`;
+  }
+  const course = next.course;
+  const range = localScheduleClockRange(course);
+  const isActive = next.state === "active";
+  const isEvent = course?.source === "local" && course?.localType === "event";
+  const stateLabel = isActive ? (isEvent ? "正在进行" : "正在上课") : next.state === "started" ? "已开始" : isEvent ? "下一项安排" : "下一节课";
+  const stateMeta = isActive ? `已开始 ${overviewDurationText(next.elapsed)}` : next.until !== undefined ? `还有 ${overviewDurationText(next.until)}` : "时间已到";
+  const badge = isEvent || course?.source === "local" ? localScheduleSourceBadge(course) : "";
+  return `<div class="overview-priority-main ${isActive ? "is-active" : ""} ${isEvent ? "local-priority" : ""}"><div class="overview-priority-time"><strong>${escapeHtml(range.startText || (course?.localAllDay ? "全天" : overviewCourseTime(course)))}</strong><span>${escapeHtml(range.endText ? `至 ${range.endText}` : overviewCourseMeta(course))}</span></div><div class="overview-priority-copy"><strong>${escapeHtml(course?.name || "未命名安排")} ${badge}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></div><div class="overview-priority-status"><strong>${escapeHtml(stateLabel)}</strong><span>${escapeHtml(stateMeta)}</span></div></div>`;
+}
+
+function renderOverview() {
+  const dateLabel = overviewDateLabel();
+  const scheduleRows = mergedPersonalScheduleRows(state.data.courses || []);
+  const next = overviewNextCourse(scheduleRows);
+  const todayRows = overviewTodayCourses(scheduleRows);
+  const todayMarkup = todayRows.length
+    ? `<div class="overview-timeline">${todayRows.map((course) => {
+      const range = localScheduleClockRange(course);
+      const active = next.state === "active" && next.course === course;
+      const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+      const conflict = localScheduleRowHasConflict(course, scheduleRows);
+      return `<button class="overview-timeline-row ${active ? "is-active" : ""} ${course.source === "local" ? `local-overview-row local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time">${escapeHtml(range.startText || (course.localAllDay ? "全天" : overviewCourseTime(course)))}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名安排")} ${badge}${conflict ? `<em class="overview-conflict-mark">⚠ 冲突</em>` : ""}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span></button>`;
+    }).join("")}</div>`
+    : dateLabel.weekNumber === null
+      ? `<div class="overview-today-unknown">设置第一周日期后，这里会按教学周显示重复课程；本地一次性日程不受影响。</div>`
+      : `<div class="overview-empty">今天没有安排。<button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
+  const exams = sortExamRows(state.data.exams.filter((exam) => !/已结束/.test(exam.status))).slice(0, 3);
+  const examMarkup = exams.length
+    ? `<div class="overview-list">${exams.map((exam) => `<div class="overview-list-row"><span class="overview-list-date">${escapeHtml(exam.date || "—")}</span><span class="overview-list-copy"><strong>${escapeHtml(exam.name)}</strong><span>${escapeHtml([exam.time, exam.place, exam.seat ? `${exam.seat}号` : ""].filter(Boolean).join(" · ") || "信息待发布")}</span></span><span class="overview-list-status">${escapeHtml(exam.countdown)}</span></div>`).join("")}</div>`
+    : `<div class="overview-empty">暂无近期考试</div>`;
+  const scoreMarkup = state.data.scores.length
+    ? `<div class="overview-list">${state.data.scores.slice(0, 3).map((score) => `<div class="overview-score-row"><strong>${escapeHtml(score.name)}</strong><span class="${scoreSemanticClass(score)}">${escapeHtml(score.score || "—")}</span></div>`).join("")}</div>`
+    : `<div class="overview-empty">暂无成绩</div>`;
+  const cacheNote = personalCacheStatusText() ? `<p class="overview-cache-note">${escapeHtml(personalCacheStatusText())}</p>` : "";
+  const localNote = state.localSchedule.corrupted ? `<p class="overview-cache-note">部分本地自定义安排无法读取，学校课表不受影响。</p>` : "";
+  const weekContext = dateLabel.weekNumber === null
+    ? `<span class="overview-week-context">教学周未设置 <button class="button button-link" type="button" data-action="view-settings">设置 →</button></span>`
+    : `<span class="overview-week-context">${escapeHtml(dateLabel.week)}</span>`;
+  return `<div class="overview-page">${sectionHeading("总览", "") }<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>今日安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天安排</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}${localNote}</div>`;
+}
+
+function renderLocalScheduleDetailModal(row) {
+  const item = (state.localSchedule.items || []).find((candidate) => candidate.id === row.localId);
+  if (!item) return "";
+  const display = localScheduleItemDisplayText(item);
+  const scheduleDetails = item.type === "event"
+    ? [["日期", localScheduleDateText(item.event.date)], ["时间", item.event.allDay ? "全天" : localScheduleClockText(item) || "时间待设置"], ["对应节次", localScheduleSectionText(item) || "未指定"]]
+    : [["学期", item.termName || item.termCode || "—"], ["周次", formatWeeksValue(item.course.weekNumbers.join(",")) || "—"], ["星期", localScheduleWeekdayText(item.course.weekdayIndex)], ["节次", localScheduleSectionText(item) || "—"], ["时间", localScheduleClockText(item) || "—"]];
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-detail-modal" role="dialog" aria-modal="true" aria-label="自定义安排详情"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${escapeHtml(item.title || "未命名安排")}</h3><p>${localScheduleSourceBadge(item)} ${item.enabled ? "" : "已停用"}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid">${scheduleDetails.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}<div><span>地点</span><strong>${escapeHtml(item.location || "—")}</strong></div>${item.teacher ? `<div><span>教师</span><strong>${escapeHtml(item.teacher)}</strong></div>` : ""}</div>${item.note ? `<div class="detail-copy"><span>备注</span><p>${escapeHtml(item.note)}</p></div>` : ""}<div class="local-detail-actions"><button class="button button-primary" type="button" data-action="edit-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">编辑</button><button class="button button-ghost" type="button" data-action="copy-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">复制</button><button class="button button-danger" type="button" data-action="delete-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">删除</button></div></section></div>`;
+}
+
+function renderCourseDetailWithLocalOverlay() {
+  if (state.selectedCourse?.source === "local") return renderLocalScheduleDetailModal(state.selectedCourse);
+  const course = state.selectedCourse;
+  if (!course) return "";
+  const scope = state.selectedCourseScope || "personal";
+  const rows = courseRowsForScope(scope);
+  const availability = courseFieldAvailability(rows, scope);
+  const rawText = course.raw && typeof course.raw === "object" ? JSON.stringify(course.raw, null, 2) : "";
+  const sport = courseIsSport(course);
+  const catalogCode = courseCatalogCodeValue(course);
+  const sportEntries = sport && !course.sportProjectLoading ? courseIncludedEntries(course) : [];
+  const catalogField = sport && catalogCode ? `<div><span>课程代码</span><strong>${escapeHtml(catalogCode)}</strong></div>` : "";
+  const assessmentField = availability.assessment ? `<div><span>考核方式</span><strong>${escapeHtml(courseAssessmentValue(course) || "—")}</strong></div>` : "";
+  const requirementField = availability.requirement ? `<div><span>课程性质</span><strong>${escapeHtml(courseRequirementValue(course) || "—")}</strong></div>` : "";
+  const categoryField = availability.category ? `<div><span>课程类别</span><strong>${escapeHtml(courseCategoryValue(course) || "—")}</strong></div>` : "";
+  const sportDetails = sport
+    ? `<div class="course-included-panel sport-project-panel"><div class="sport-project-head"><span>原系统体育课“列表”</span>${sportEntries.length ? `<em>${escapeHtml(`${sportEntries.length} 个项目/教学班`)}</em>` : ""}</div>${course.sportProjectLoading ? `<p class="sport-project-status">正在读取原系统弹窗中的项目名称、教师和排课信息…</p>` : ""}${course.sportProjectError ? `<p class="sport-project-status sport-project-error">${escapeHtml(course.sportProjectError)}</p>` : ""}${sportEntries.length ? `<ul>${sportEntries.map((entry) => `<li><strong>${escapeHtml(entry.project || entry.name || entry.text || "体育课程")}</strong><span>${escapeHtml([entry.name !== entry.project && entry.name ? `课程：${entry.name}` : "", entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`, entry.weeks, entry.weekday, entry.section, entry.teacher && `教师：${entry.teacher}`, entry.location && `地点：${entry.location}`].filter(Boolean).join(" ｜ "))}</span></li>`).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统项目列表；原系统没有提供的字段会自动留空。</small></div>`
+    : "";
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(course.location || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
+}
+
+function personalScheduleActions() {
+  return `<div class="button-row schedule-export-action-row"><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button><button class="button button-soft button-small" type="button" data-action="open-local-manager">管理自定义安排</button>${scheduleExportActions("personal").replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "")}</div>`;
+}
+
+function renderPersonalWithLocalOverlay() {
+  const filterKeys = ["name", "code", "teacher", "location", "time", "weeks", "weekday", "category", "nature", "requirement", "assessment", "examType", "detail", "localDate"];
+  const schoolCourses = filterRows(state.data.courses || [], filterKeys, state.filters.personal);
+  const mergedRows = mergedPersonalScheduleRows(state.data.courses || []);
+  const scheduleRows = filterRows(mergedRows, filterKeys, state.filters.personal);
+  const localItems = localScheduleItemsForTerm(state.termCode, true).filter((item) => !state.filters.personal || localScheduleFilterText(localScheduleItemToCourseRow(item)).toLowerCase().includes(state.filters.personal.toLowerCase()));
+  const schoolCount = state.data.courses?.length || 0;
+  const localCount = localScheduleItemsForTerm(state.termCode, true).length;
+  const sourceText = state.data.scheduleSource === "网格" ? "数据来源：课表网格（优先）" : state.data.scheduleSource === "列表" ? "数据来源：课程列表（已整理）" : localCount ? "学校数据 + 本地安排" : "数据来源：未读取到课表数据";
+  const sourceClass = state.data.scheduleSource === "网格" || localCount ? "pass" : "";
+  const counts = `教务课程 ${schoolCount} 门 · 自定义 ${localCount} 项 · 共 ${scheduleRows.length} 条当前排课`;
+  const localSummary = localCount ? `<section class="local-schedule-inline"><div class="local-inline-head"><div><strong>本地自定义安排</strong><span>${localCount} 项；不会被教务刷新覆盖</span></div><button class="button button-ghost button-small" type="button" data-action="open-local-manager">管理</button></div>${renderLocalScheduleRecords(localItems)}</section>` : `<div class="local-add-hint"><strong>想把旁听课、社团或预约加入课表？</strong><button class="button button-link" type="button" data-action="open-local-editor">+ 添加本地安排</button></div>`;
+  if (state.scheduleDisplay.personal !== "week") {
+    const records = schoolCourses.length
+      ? `<details class="course-records-details"><summary>查看本学期教务课程记录（${schoolCourses.length} 条）</summary>${renderCourseRowsTable(schoolCourses, false, "personal")}</details>`
+      : "";
+    return `<div>${sectionHeading("课表", "今天 / 明天会把教务课程、自定义课程和一次性日程放进同一条时间线。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderDailySchedule(scheduleRows, "personal")}${localSummary}${records}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}</div>`;
+  }
+  const weekRows = filterScheduleWeekRows(scheduleRows, "personal");
+  const grid = renderScheduleGrid(weekRows, "personal");
+  const selectedWeek = scheduleWeekValue("personal");
+  const gridNotice = scheduleRows.length && !grid
+    ? `<div class="schedule-note">当前没有可铺入周表网格的节次；带具体时间的一次性日程会在周表下方的其他日程区域显示。</div>`
+    : "";
+  return `<div>${sectionHeading("课表", "周表同时显示教务课程、自定义课程和日程；没有节次的一次性日程会列在网格下方。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderScheduleWeekControls(scheduleRows, "personal")}${grid}${gridNotice}${localSummary}${schoolCourses.length ? `<details class="course-records-details" open><summary>本学期教务课程记录（${schoolCourses.length} 门课 · ${schoolPersonalScheduleRows(schoolCourses).length} 条排课）</summary>${renderCourseRowsTable(schoolCourses, false, "personal")}</details>` : ""}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}</div>`;
+}
+
+function renderSettingsWithLocalOverlay() {
+  const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
+  const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
+  const currentText = firstWeekDate ? `${calendarDateText(firstWeekDate)} · ${SUNDAY_FIRST_DAY_NAMES[firstWeekDate.getDay()]}` : "尚未设置";
+  const configuredLoginMethod = IS_ANDROID_APP ? androidLoginMethod() : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
+  const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
+  const localCount = (state.localSchedule.items || []).filter((item) => item.termCode === state.termCode || !state.termCode).length;
+  const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
+  const cacheBlock = `<section class="settings-section"><div class="settings-intro"><h3>教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。只保存页面展示所需的查询结果，教务系统暂时不可用时仍可查看上次结果。</p></div>${IS_ANDROID_APP ? `<div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除教务缓存</button></div>` : ""}<div class="settings-callout"><strong>隐私</strong><span>缓存按学号隔离，只保存页面展示所需查询结果；不会保存密码、验证码、Cookie 或令牌。</span></div></section>`;
+  const localBlock = `<section class="settings-section"><div class="settings-intro"><h3>自定义课表</h3><p>${localCount} 条本地安排。手动创建的课程和日程仅保存在本机，并与教务缓存分开存储。</p></div><div class="settings-actions"><button class="button button-primary" type="button" data-action="open-local-manager">管理自定义安排</button><button class="button button-ghost" type="button" data-action="open-local-editor">+ 添加安排</button></div><div class="settings-actions"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button></div><div class="settings-callout"><strong>不会影响教务数据</strong><span>清除教务缓存不会删除自定义安排；清除自定义安排也不会删除成绩、考试或学校课表。</span></div></section>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>下次打开教务系统登录页时默认进入所选方式。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option></select><small>应用不会保存账号、密码或验证码。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}${localBlock}</div></div>`;
+}
+
+function updatePersonalTermSelect() {
+  if (!elements.termSelect) return;
+  const terms = localScheduleTerms();
+  if (!terms.length) {
+    elements.termSelect.innerHTML = `<option value="">暂无缓存学期</option>`;
+    elements.termSelect.disabled = true;
+    return;
+  }
+  elements.termSelect.innerHTML = terms.map((term) => `<option value="${escapeHtml(term.code)}">${escapeHtml(term.name || term.code)}</option>`).join("");
+  elements.termSelect.value = state.termCode;
+  elements.termSelect.disabled = false;
+}
+
+function scheduleExportRows(scope = "personal") {
+  const source = scope === "all-detail"
+    ? (state.allDetail?.courses || [])
+    : mergedPersonalScheduleRows(state.data.courses || []);
+  const normalized = normalizedScheduleCourses(source);
+  const expanded = scope === "all-detail" ? normalized.flatMap((course) => expandMappedCourse(course)) : normalized;
+  const seen = new Set();
+  return expanded.filter((course) => {
+    const range = courseSectionRange(course);
+    const key = [course.source || "school", course.localId || course.code, course.name, courseDayIndex(course), range ? `${range.start}-${range.end}` : course.section, [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","), course.localDate, course.teacher, course.location].map((value) => String(value ?? "").trim()).join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function scheduleExportFilteredRows(rows, selectedWeek) {
+  if (selectedWeek === "all") return rows;
+  const week = Number(selectedWeek);
+  if (!Number.isInteger(week) || week <= 0) return rows;
+  return (rows || []).filter((course) => {
+    if (course.localDate && normalizeCalendarDate(course.localDate)) {
+      const info = academicDayInfo(normalizeCalendarDate(course.localDate));
+      return info.week === null || info.week === week;
+    }
+    const weeks = courseWeekNumbers(course);
+    return !weeks.size || weeks.has(week);
+  });
+}
+
+function scheduleCsvSchoolRows() {
+  const courses = Array.isArray(state.data.courses) ? state.data.courses : [];
+  const detailRows = Array.isArray(state.data.scheduleDetail) ? state.data.scheduleDetail : [];
+  const source = detailRows.length ? [...detailRows, ...courses.filter((course) => !detailRows.some((detail) => courseIdentityMatches(detail, course)))] : courses;
+  const hiddenKeys = new Set((state.localSchedule.hiddenSchoolEntries || []).filter((entry) => !entry.termCode || entry.termCode === state.termCode).map((entry) => entry.key));
+  return source.filter((course) => course?.source !== "local" && !hiddenKeys.has(schoolScheduleOccurrenceKey(course)));
+}
+
+function localScheduleCsvEntries(scope = "personal") {
+  if (scope !== "personal") {
+    const source = scope === "all-detail" ? (state.allDetail?.courses || state.allDetail?.rawRows || []) : (state.allRows || []).filter(isCourseDetailRow);
+    const seen = new Set();
+    return source.flatMap((row) => expandMappedCourse(row?.raw ? row : mapCourse(row))).map((course) => {
+      const range = courseSectionRange(course);
+      return { courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: course.location || "", weekText: scheduleCsvWeekText(course) };
+    }).filter((entry) => entry.courseName).filter((entry) => {
+      const key = Object.values(entry).join("\u001f");
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+  const mapped = scheduleCsvSchoolRows().flatMap((row) => expandMappedCourse(row?.raw ? row : mapCourse(row)));
+  const localItems = localScheduleItemsForTerm(state.termCode);
+  const entries = [];
+  let skipped = 0;
+  const seen = new Set();
+  const add = (entry) => {
+    if (!entry.courseName) return;
+    const key = Object.values(entry).join("\u001f");
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push(entry);
+  };
+  mapped.forEach((course) => {
+    const range = courseSectionRange(course);
+    add({ courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: course.location || "", weekText: scheduleCsvWeekText(course) });
+  });
+  localItems.forEach((item) => {
+    const row = localScheduleItemToCourseRow(item);
+    if (item.type === "event") {
+      const info = normalizeCalendarDate(item.event.date) ? academicDayInfo(normalizeCalendarDate(item.event.date)) : null;
+      const range = scheduleItemSectionRange(row);
+      if (!info || info.week === null || !range) {
+        skipped += 1;
+        return;
+      }
+      add({ courseName: item.title, weekday: String(info.weekdayIndex === 0 ? 7 : info.weekdayIndex), startSection: String(range.start), endSection: String(range.end), teacher: item.teacher || "", location: item.location || "", weekText: `${info.week}周` });
+      return;
+    }
+    const range = scheduleItemSectionRange(row);
+    add({ courseName: item.title, weekday: row.weekday && courseDayIndex(row) >= 0 ? String(courseDayIndex(row) === 0 ? 7 : courseDayIndex(row)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: item.teacher || "", location: item.location || "", weekText: formatWeeksValue(item.course.weekNumbers.join(",")) });
+  });
+  entries.skippedCount = skipped;
+  state.localSchedule.lastCsvSkipped = skipped;
+  return entries;
+}
+
+function localScheduleCsvHasRows(scope = "personal") {
+  return localScheduleCsvEntries(scope).length > 0;
+}
+
+function localExportScheduleCsv(scope = "personal") {
+  const entries = localScheduleCsvEntries(scope);
+  if (!entries.length) {
+    if (entries.skippedCount) setNotice(`当前没有可用的 WakeUp 课程格式记录；${entries.skippedCount} 条一次性日程缺少教学周或节次。`, "error");
+    else setNotice("当前没有可导出的课表记录，请先查询或刷新课表。", "error");
+    return false;
+  }
+  const saved = downloadScheduleCsv(buildScheduleCsv(entries), scheduleCsvFileName(scope));
+  if (saved && entries.skippedCount) setNotice(`CSV 已导出；${entries.skippedCount} 条仅含具体时间或缺少教学周/节次的一次性日程无法用 WakeUp 课程格式表示，因此未包含。`, "success");
+  return saved;
+}
+
+function scheduleExportCourseBadge(course, scope = "personal") {
+  if (course?.source === "local") return course.localType === "event" ? "自定义日程" : "自定义课程";
+  if (scope === "personal") return scheduleExportIsPracticeCourse(course) ? "实验实践课程" : "普通课程";
+  return scheduleExportCategoryLabel(course);
+}
+
+function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
+  const range = courseSectionRange(course);
+  const section = range ? (range.start === range.end ? `第${range.start}节` : `第${range.start}-${range.end}节`) : "";
+  const clock = extractClockText(course.time) || localScheduleClockText(course);
+  const weekText = selectedWeek === "all" ? (course.weeks || (course.localDate ? localScheduleDateText(course.localDate) : "周次待识别")) : `第${selectedWeek}周`;
+  return {
+    title: course.name || "未命名安排",
+    schedule: [weekText, course.weekday || (course.localDate ? localScheduleDateText(course.localDate) : "星期待识别"), section, clock || (course.localAllDay ? "全天" : "")].filter(Boolean).join(" · "),
+    teacher: course.teacher || (course.source === "local" ? "自定义安排" : "教师待识别"),
+    location: course.location || course.detail || "地点待识别",
+    code: course.source === "local" ? "本地安排" : course.code || "无课程号",
+    tags: [courseAssessmentValue(course), courseRequirementValue(course), course.source === "local" ? (course.localType === "event" ? "日程" : "自定义") : scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
+  };
+}
+
+function localScheduleInputValue(id) {
+  return document.getElementById(id)?.value || "";
+}
+
+function localScheduleFormCandidate() {
+  const draft = state.localSchedule.draft || localScheduleDraftFromItem(null, "course");
+  const type = draft.type === "event" ? "event" : "course";
+  const title = localScheduleTrim(localScheduleInputValue("localTitle"), 160);
+  const termCode = localScheduleTrim(localScheduleInputValue("localTermCode") || state.termCode, 80);
+  const termName = localScheduleTermName(termCode);
+  const teacher = localScheduleTrim(localScheduleInputValue("localTeacher"), 120);
+  const location = localScheduleTrim(localScheduleInputValue("localLocation"), 180);
+  const note = localScheduleTrim(localScheduleInputValue("localNote"), 1000);
+  const colorKey = document.querySelector("input[name='localColorKey']:checked")?.value || draft.colorKey || "blue";
+  const startTime = localScheduleTime(localScheduleInputValue("localStartTime"));
+  const endTime = localScheduleTime(localScheduleInputValue("localEndTime"));
+  const startSection = localScheduleInputValue("localStartSection");
+  const endSection = localScheduleInputValue("localEndSection");
+  if (type === "event") {
+    const allDay = Boolean(document.getElementById("localEventAllDay")?.checked);
+    return normalizeLocalScheduleItem({
+      id: draft.id,
+      type,
+      termCode,
+      termName,
+      title,
+      teacher,
+      location,
+      note,
+      colorKey,
+      createdAt: draft.createdAt,
+      event: { date: localScheduleDate(localScheduleInputValue("localEventDate")), allDay, startTime: allDay ? "" : startTime, endTime: allDay ? "" : endTime, startSection: startSection ? Number(startSection) : null, endSection: endSection ? Number(endSection) : null }
+    });
+  }
+  const checkedWeeks = [...document.querySelectorAll("[data-local-week]:checked")].map((input) => Number(input.value)).filter((week) => week > 0);
+  const repeat = document.getElementById("localWeekRepeat")?.value || "every";
+  const weekStart = Math.max(1, Math.min(60, Number(localScheduleInputValue("localWeekStart")) || 1));
+  const weekEnd = Math.max(weekStart, Math.min(60, Number(localScheduleInputValue("localWeekEnd")) || weekStart));
+  const weekNumbers = repeat === "custom" && checkedWeeks.length
+    ? checkedWeeks
+    : Array.from({ length: weekEnd - weekStart + 1 }, (_, index) => weekStart + index).filter((week) => repeat === "odd" ? week % 2 === 1 : repeat === "even" ? week % 2 === 0 : true);
+  return normalizeLocalScheduleItem({
+    id: draft.id,
+    type,
+    termCode,
+    termName,
+    title,
+    teacher,
+    location,
+    note,
+    colorKey,
+    createdAt: draft.createdAt,
+    course: { weekNumbers, weekdayIndex: localScheduleInputValue("localWeekday") === "" ? null : Number(localScheduleInputValue("localWeekday")), startSection: startSection ? Number(startSection) : null, endSection: endSection ? Number(endSection) : null, startTime, endTime }
+  });
+}
+
+function localScheduleValidate(item) {
+  if (!item.title) return item.type === "event" ? "请填写日程标题" : "请填写课程名称";
+  if (!item.termCode) return "请选择学期";
+  if (item.type === "course") {
+    if (!item.course.weekNumbers.length) return "请选择至少一个教学周";
+    if (!Number.isInteger(item.course.weekdayIndex)) return "请选择星期";
+    if (!item.course.startSection || !item.course.endSection) return "请选择开始和结束节次";
+    if (item.course.endSection < item.course.startSection) return "结束节次不能早于开始节次";
+    if ((item.course.startTime && !item.course.endTime) || (!item.course.startTime && item.course.endTime)) return "开始时间和结束时间需要同时填写";
+    if (item.course.startTime && item.course.endTime && overviewClockMinutes(item.course.startTime) >= overviewClockMinutes(item.course.endTime)) return "结束时间必须晚于开始时间";
+  } else {
+    if (!item.event.date) return "请选择日程日期";
+    if (item.event.startSection && item.event.endSection && item.event.endSection < item.event.startSection) return "结束节次不能早于开始节次";
+    if (!item.event.allDay && ((item.event.startTime && !item.event.endTime) || (!item.event.startTime && item.event.endTime))) return "开始时间和结束时间需要同时填写";
+    if (!item.event.allDay && item.event.startTime && item.event.endTime && overviewClockMinutes(item.event.startTime) >= overviewClockMinutes(item.event.endTime)) return "结束时间必须晚于开始时间";
+  }
+  return "";
+}
+
+function findLocalScheduleConflicts(candidate) {
+  const candidateRow = localScheduleItemToCourseRow(candidate);
+  const hidden = new Set((state.localSchedule.hiddenSchoolEntries || [])
+    .filter((entry) => !entry.termCode || entry.termCode === candidate.termCode)
+    .map((entry) => entry.key));
+  const conflicts = [];
+  const schoolRows = !state.termCode || candidate.termCode === state.termCode
+    ? schoolPersonalScheduleRows(state.data.courses || [])
+    : [];
+  schoolRows.filter((row) => !hidden.has(schoolScheduleOccurrenceKey(row))).forEach((existing) => {
+    const overlap = compareScheduleItemsOverlap(candidateRow, existing);
+    if (overlap.overlap) conflicts.push({ existing, existingItem: null, certain: overlap.certain, missing: overlap.missing || [] });
+  });
+  (state.localSchedule.items || [])
+    .filter((item) => item.termCode === candidate.termCode && item.id !== candidate.id && item.enabled !== false)
+    .forEach((existingItem) => {
+      const existing = localScheduleItemToCourseRow(existingItem);
+      const overlap = compareScheduleItemsOverlap(candidateRow, existing);
+      if (overlap.overlap) conflicts.push({ existing, existingItem, certain: overlap.certain, missing: overlap.missing || [] });
+    });
+  return conflicts;
+}
+
+async function commitLocalSchedule(candidate, choice = "both") {
+  const conflicts = state.localSchedule.conflict?.conflicts || [];
+  if (choice === "existing") {
+    state.localSchedule.conflict = null;
+    state.localSchedule.editorOpen = false;
+    state.localSchedule.editorError = "";
+    setNotice("已保留现有安排，本次自定义安排未保存。", "success");
+    render();
+    return false;
+  }
+  const nextItems = (state.localSchedule.items || []).filter((item) => item.id !== candidate.id);
+  if (choice === "new") {
+    conflicts.forEach((conflict) => {
+      if (conflict.existingItem) {
+        const old = nextItems.find((item) => item.id === conflict.existingItem.id);
+        if (old) old.enabled = false;
+      } else if (conflict.existing) {
+        const key = schoolScheduleOccurrenceKey(conflict.existing);
+        if (!state.localSchedule.hiddenSchoolEntries.some((entry) => entry.key === key && (!entry.termCode || entry.termCode === candidate.termCode))) {
+          state.localSchedule.hiddenSchoolEntries.push({ key, termCode: candidate.termCode, label: conflict.existing.name || "教务排课", hiddenByLocalId: candidate.id, createdAt: localScheduleNow() });
+        }
+      }
+    });
+  }
+  nextItems.push(candidate);
+  state.localSchedule.items = nextItems;
+  state.localSchedule.conflict = null;
+  state.localSchedule.editorOpen = false;
+  state.localSchedule.editingId = "";
+  state.localSchedule.draft = null;
+  state.localSchedule.editorError = "";
+  await persistLocalSchedule();
+  updatePersonalTermSelect();
+  setNotice(choice === "new" ? "已保存；冲突教务排课仅在本地组合课表中隐藏。" : "自定义安排已保存。", "success");
+  render();
+  return true;
+}
+
+async function saveLocalScheduleFromEditor() {
+  const candidate = localScheduleFormCandidate();
+  state.localSchedule.draft = candidate;
+  const error = localScheduleValidate(candidate);
+  if (error) {
+    state.localSchedule.editorError = error;
+    render();
+    return;
+  }
+  const conflicts = findLocalScheduleConflicts(candidate);
+  if (conflicts.length) {
+    state.localSchedule.conflict = { candidate, conflicts };
+    render();
+    return;
+  }
+  await commitLocalSchedule(candidate, "both");
+}
+
+function openLocalScheduleEditor(item = null, type = "course") {
+  state.selectedCourse = null;
+  state.localSchedule.editingId = item?.id || "";
+  state.localSchedule.draft = localScheduleDraftFromItem(item, type);
+  state.localSchedule.editorError = "";
+  state.localSchedule.conflict = null;
+  state.localSchedule.editorOpen = true;
+  state.localSchedule.managerOpen = false;
+  render();
+}
+
+async function clearAllLocalSchedule() {
+  const confirmed = typeof window.confirm === "function"
+    ? window.confirm("确定清除全部自定义安排？\n只删除你手动创建的数据，不影响教务系统课程。")
+    : true;
+  if (!confirmed) return;
+  await clearLocalSchedule(state.localSchedule.profileKey || localScheduleProfileKey());
+  state.localSchedule.items = [];
+  state.localSchedule.hiddenSchoolEntries = [];
+  state.localSchedule.editorOpen = false;
+  state.localSchedule.managerOpen = false;
+  state.localSchedule.conflict = null;
+  state.localSchedule.draft = null;
+  state.localSchedule.lastCsvSkipped = 0;
+  setNotice("已清除全部自定义安排；教务数据未受影响。", "success");
+  render();
+}
+
+elements.content.addEventListener("click", async (event) => {
+  const button = event.target.closest?.("[data-action]");
+  if (!button) return;
+  const action = button.dataset.action;
+  if (!["open-local-editor", "open-local-manager", "close-local-editor", "local-editor-type", "save-local-schedule", "close-local-conflict", "resolve-local-conflict", "show-local-schedule", "edit-local-schedule", "copy-local-schedule", "delete-local-schedule", "toggle-local-schedule", "restore-hidden-school", "close-local-manager", "clear-local-schedule"].includes(action)) return;
+  event.stopImmediatePropagation?.();
+  if (action === "open-local-editor") return openLocalScheduleEditor();
+  if (action === "open-local-manager") {
+    state.localSchedule.managerOpen = true;
+    state.localSchedule.editorOpen = false;
+    state.localSchedule.conflict = null;
+    render();
+    return;
+  }
+  if (action === "close-local-editor") {
+    state.localSchedule.editorOpen = false;
+    state.localSchedule.editingId = "";
+    state.localSchedule.draft = null;
+    state.localSchedule.editorError = "";
+    render();
+    return;
+  }
+  if (action === "local-editor-type") {
+    const nextType = button.dataset.localType === "event" ? "event" : "course";
+    const previous = state.localSchedule.draft || localScheduleDraftFromItem(null, nextType);
+    const next = localScheduleDraftFromItem(null, nextType);
+    next.id = previous.id;
+    next.createdAt = previous.createdAt;
+    next.title = previous.title;
+    next.termCode = previous.termCode || state.termCode;
+    next.termName = previous.termName || localScheduleTermName(next.termCode);
+    next.teacher = previous.teacher;
+    next.location = previous.location;
+    next.note = previous.note;
+    next.colorKey = previous.colorKey;
+    state.localSchedule.draft = next;
+    state.localSchedule.editorError = "";
+    render();
+    return;
+  }
+  if (action === "save-local-schedule") return saveLocalScheduleFromEditor();
+  if (action === "close-local-conflict") {
+    state.localSchedule.conflict = null;
+    render();
+    return;
+  }
+  if (action === "resolve-local-conflict") {
+    const choice = button.dataset.conflictChoice || "both";
+    const candidate = state.localSchedule.conflict?.candidate;
+    if (candidate) await commitLocalSchedule(candidate, choice);
+    return;
+  }
+  if (action === "show-local-schedule") {
+    const item = (state.localSchedule.items || []).find((candidate) => candidate.id === button.dataset.localScheduleId);
+    if (!item) return;
+    state.selectedCourse = localScheduleItemToCourseRow(item);
+    state.selectedCourseScope = "personal";
+    state.localSchedule.managerOpen = false;
+    render();
+    return;
+  }
+  const item = (state.localSchedule.items || []).find((candidate) => candidate.id === button.dataset.localScheduleId);
+  if (action === "edit-local-schedule" && item) return openLocalScheduleEditor(item, item.type);
+  if (action === "copy-local-schedule" && item) {
+    const copy = localScheduleDraftFromItem(item, item.type);
+    copy.id = localScheduleId();
+    copy.title = `${copy.title}（副本）`;
+    copy.createdAt = localScheduleNow();
+    copy.updatedAt = copy.createdAt;
+    return openLocalScheduleEditor(copy, copy.type);
+  }
+  if (action === "delete-local-schedule" && item) {
+    const confirmed = typeof window.confirm === "function" ? window.confirm(`删除“${item.title}”？\n删除后无法自动恢复。`) : true;
+    if (!confirmed) return;
+    state.localSchedule.items = state.localSchedule.items.filter((candidate) => candidate.id !== item.id);
+    state.localSchedule.hiddenSchoolEntries = state.localSchedule.hiddenSchoolEntries.filter((entry) => entry.hiddenByLocalId !== item.id);
+    if (state.selectedCourse?.localId === item.id) state.selectedCourse = null;
+    await persistLocalSchedule();
+    setNotice(`已删除“${item.title}”。`, "success");
+    render();
+    return;
+  }
+  if (action === "toggle-local-schedule" && item) {
+    item.enabled = !item.enabled;
+    item.updatedAt = localScheduleNow();
+    await persistLocalSchedule();
+    setNotice(item.enabled ? "自定义安排已启用。" : "自定义安排已停用。", "success");
+    render();
+    return;
+  }
+  if (action === "restore-hidden-school") {
+    const key = button.dataset.hiddenSchoolKey || "";
+    const termCode = button.dataset.hiddenSchoolTerm || "";
+    state.localSchedule.hiddenSchoolEntries = state.localSchedule.hiddenSchoolEntries.filter((entry) => entry.key !== key || (termCode && entry.termCode !== termCode));
+    await persistLocalSchedule();
+    setNotice("已恢复显示这条教务排课。", "success");
+    render();
+    return;
+  }
+  if (action === "close-local-manager") {
+    state.localSchedule.managerOpen = false;
+    render();
+    return;
+  }
+  if (action === "clear-local-schedule") return clearAllLocalSchedule();
+});
+
+elements.content.addEventListener("change", (event) => {
+  if (event.target.id !== "localManagerFilter") return;
+  event.stopImmediatePropagation?.();
+  state.localSchedule.filter = event.target.value || "all";
+  render();
+});
+
+
+
+
+function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
+  const clockText = extractClockText(course.time) || localScheduleClockText(course);
+  const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
+  const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
+  const className = ["course-chip", extraClass, course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""].filter(Boolean).join(" ");
+  const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
 }
 
 function courseWeekNumbers(course) {
@@ -5771,10 +6492,11 @@ function analyzeCourseTransferCollisions(importedCourses) {
 
 function courseGroupChipMarkup(courses, scope = "personal", style = "", availability = null) {
   const variants = courses.map((course) => {
-    const clockText = extractClockText(course.time);
-    const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter(Boolean).join(" ") || "时间待识别";
+    const clockText = extractClockText(course.time) || localScheduleClockText(course);
+    const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
     const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
-    return `<button class="course-chip course-chip-variant" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
+    const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+    return `<button class="course-chip course-chip-variant ${course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
   }).join("");
   return `<div class="schedule-course-group-chip" style="${style}">${variants}</div>`;
 }
@@ -6810,7 +7532,7 @@ function buildScheduleExportCanvas(rows, scope, selectedWeek) {
     context.fill();
     context.fillStyle = "#476da9";
     context.font = "700 20px -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif";
-    context.fillText("未识别星期或节次的课程", outer + cellPadding, y + 38);
+    context.fillText(unplaced.some((course) => course.source === "local" && course.localType === "event") ? "本周其他日程 / 未识别节次的安排" : "未识别星期或节次的课程", outer + cellPadding, y + 38);
     unplaced.forEach((course, index) => {
       const row = Math.floor(index / 4);
       const column = index % 4;
@@ -7665,6 +8387,7 @@ function renderAndroidLoginEntry() {
 
 function render() {
   if (IS_ANDROID_APP && state.view === "curriculum") state.view = "overview";
+  try { updatePersonalTermSelect(); } catch { /* 初始化阶段元素可能尚未准备好 */ }
   const pageTitles = { overview: "总览", personal: "课表", exams: "考试", scores: "成绩", all: "全校课表", curriculum: "培养计划", settings: "设置" };
   document.querySelectorAll("[data-view]").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === state.view));
   if (elements.pageTitle) elements.pageTitle.textContent = pageTitles[state.view] || "执掌东大";
@@ -7672,11 +8395,11 @@ function render() {
   // content.innerHTML 会随路由切换重建，但 Campus Header 属于外层
   // Mobile Shell；每次 render 只重新套用已有状态，绝不默认显示。
   applyNativeEcodePlaceholderState();
-  if (state.fatalError && state.view !== "settings") {
+  if (state.fatalError && state.view !== "settings" && !localScheduleItemsForTerm(state.termCode).length) {
     elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(state.fatalError)}。插件不会保存账号或密码，只会复用浏览器当前的登录会话。登录完成后点击“刷新数据”即可。</p><button class="button button-primary" type="button" data-action="open-portal">打开教务系统</button></div>`;
     return;
   }
-  if (state.loading && !state.data.scores.length && !state.data.exams.length && !state.data.courses.length && state.view === "overview") {
+  if (state.loading && !state.data.scores.length && !state.data.exams.length && !state.data.courses.length && !localScheduleItemsForTerm(state.termCode).length && state.view === "overview") {
     elements.content.innerHTML = loadingCard();
     return;
   }
@@ -7725,8 +8448,9 @@ async function openCurriculumPortal() {
 async function refresh(forceTerms = false) {
   const requestId = ++refreshRequestSequence;
   const hasCache = hydratePersonalCache();
+  const hasLocalSchedule = await hydrateLocalSchedule();
   state.fatalError = "";
-  setNotice(hasCache ? "正在尝试刷新教务接口，页面先显示上次缓存…" : "正在读取教务接口…");
+  setNotice(hasCache ? "正在尝试刷新教务接口，页面先显示上次缓存…" : hasLocalSchedule && state.localSchedule.items.length ? "正在读取教务接口，页面先显示本地安排…" : "正在读取教务接口…");
   setConnection(hasCache ? "正在刷新 · 已显示本地缓存" : "正在读取数据", "loading");
   render();
   try {
@@ -7762,6 +8486,11 @@ async function refresh(forceTerms = false) {
       state.personalCache.source = "cache";
       setConnection("离线 · 使用本地缓存", "ready");
       setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "");
+    } else if (localScheduleItemsForTerm(state.termCode).length) {
+      state.fatalError = "";
+      state.personalCache.source = "";
+      setConnection("仅显示本地安排", "ready");
+      setNotice("教务系统暂时不可用，当前仍显示本机自定义安排。登录后刷新会自动补充学校课表。", "");
     } else {
       state.fatalError = error.message || "无法读取教务系统";
       setConnection(error.message || "连接失败", "error");
@@ -7769,6 +8498,781 @@ async function refresh(forceTerms = false) {
     }
   }
   if (requestId === refreshRequestSequence) render();
+}
+
+/* -------------------------------------------------------------------------
+ * Local schedule overlay
+ *
+ * The school response remains the source of truth in state.data. Everything
+ * below is a presentation/data-management layer for items created locally by
+ * the user. Keep this block independent from mapCourse() and the school cache.
+ * ---------------------------------------------------------------------- */
+const LOCAL_SCHEDULE_SCHEMA = "zhizhang-local-schedule/v1";
+const LOCAL_SCHEDULE_STORAGE_PREFIX = "zhizhang.local-schedule.v1.";
+const LOCAL_SCHEDULE_MAX_BYTES = 900 * 1024;
+const LOCAL_SCHEDULE_COLOR_KEYS = ["blue", "teal", "green", "violet", "orange", "rose"];
+
+function localScheduleTrim(value, max = 500) {
+  return String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function localScheduleNow() {
+  return new Date().toISOString();
+}
+
+function localScheduleStableHash(value) {
+  let hash = 2166136261;
+  for (const char of String(value ?? "")) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function localScheduleId() {
+  try {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  } catch {
+    // file:// 页面和较旧的 Android WebView 可能没有 randomUUID。
+  }
+  return `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function localScheduleProfileKey(value = "") {
+  const explicit = String(value ?? "").trim();
+  if (explicit) return explicit;
+  return String(state.studentId || state.personalCache.studentId || "anonymous").trim() || "anonymous";
+}
+
+function localScheduleStorageKey(profileKey = localScheduleProfileKey()) {
+  return `${LOCAL_SCHEDULE_STORAGE_PREFIX}${localScheduleStableHash(profileKey)}`;
+}
+
+function localScheduleChromeStorageAvailable() {
+  return Boolean(globalThis.chrome?.storage?.local);
+}
+
+function chromeLocalScheduleGet(key) {
+  return new Promise((resolve) => {
+    try {
+      const getter = globalThis.chrome.storage.local.get;
+      if (getter.length >= 2) {
+        getter.call(globalThis.chrome.storage.local, key, (result) => resolve(result?.[key] ?? null));
+        return;
+      }
+      const result = getter.call(globalThis.chrome.storage.local, key);
+      if (result && typeof result.then === "function") result.then((value) => resolve(value?.[key] ?? null)).catch(() => resolve(null));
+      else resolve(result?.[key] ?? null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function chromeLocalScheduleSet(key, value) {
+  return new Promise((resolve, reject) => {
+    try {
+      const setter = globalThis.chrome.storage.local.set;
+      if (setter.length >= 2) {
+        setter.call(globalThis.chrome.storage.local, { [key]: value }, () => {
+          const error = globalThis.chrome.runtime?.lastError;
+          if (error) reject(new Error(error.message || "Chrome 本地存储失败"));
+          else resolve(true);
+        });
+        return;
+      }
+      const result = setter.call(globalThis.chrome.storage.local, { [key]: value });
+      if (result && typeof result.then === "function") result.then(() => resolve(true)).catch(reject);
+      else resolve(true);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function chromeLocalScheduleRemove(key) {
+  return new Promise((resolve, reject) => {
+    try {
+      const remover = globalThis.chrome.storage.local.remove;
+      if (remover.length >= 2) {
+        remover.call(globalThis.chrome.storage.local, key, () => {
+          const error = globalThis.chrome.runtime?.lastError;
+          if (error) reject(new Error(error.message || "Chrome 本地存储失败"));
+          else resolve(true);
+        });
+        return;
+      }
+      const result = remover.call(globalThis.chrome.storage.local, key);
+      if (result && typeof result.then === "function") result.then(() => resolve(true)).catch(reject);
+      else resolve(true);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function loadLocalSchedule(profileKey = localScheduleProfileKey()) {
+  const key = localScheduleStorageKey(profileKey);
+  if (IS_ANDROID_APP && typeof globalThis.AndroidApi?.loadLocalSchedule === "function") {
+    try {
+      let raw = "";
+      try {
+        raw = globalThis.AndroidApi.loadLocalSchedule(profileKey) || "";
+      } catch {
+        raw = globalThis.AndroidApi.loadLocalSchedule() || "";
+      }
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  }
+  if (localScheduleChromeStorageAvailable()) {
+    return await chromeLocalScheduleGet(key);
+  }
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveLocalSchedule(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const serialized = JSON.stringify(payload);
+  if (new Blob([serialized]).size > LOCAL_SCHEDULE_MAX_BYTES) throw new Error("本地自定义安排过多，暂时无法保存");
+  const profileKey = localScheduleProfileKey(payload.profileKey || payload.studentId);
+  const key = localScheduleStorageKey(profileKey);
+  if (IS_ANDROID_APP && typeof globalThis.AndroidApi?.saveLocalSchedule === "function") {
+    globalThis.AndroidApi.saveLocalSchedule(serialized);
+    return true;
+  }
+  if (localScheduleChromeStorageAvailable()) {
+    await chromeLocalScheduleSet(key, payload);
+    return true;
+  }
+  try {
+    window.localStorage.setItem(key, serialized);
+    return true;
+  } catch (error) {
+    throw new Error(error?.message || "本地存储不可用");
+  }
+}
+
+async function clearLocalSchedule(profileKey = localScheduleProfileKey()) {
+  const key = localScheduleStorageKey(profileKey);
+  if (IS_ANDROID_APP && typeof globalThis.AndroidApi?.clearLocalSchedule === "function") {
+    try {
+      globalThis.AndroidApi.clearLocalSchedule(profileKey);
+    } catch {
+      try { globalThis.AndroidApi.clearLocalSchedule(); } catch { /* ignore */ }
+    }
+  } else if (localScheduleChromeStorageAvailable()) {
+    await chromeLocalScheduleRemove(key);
+  } else {
+    try { window.localStorage.removeItem(key); } catch { /* ignore */ }
+  }
+  return true;
+}
+
+function localScheduleTime(value) {
+  const match = String(value ?? "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return "";
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59
+    ? `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`
+    : "";
+}
+
+function localScheduleDate(value) {
+  const date = normalizeCalendarDate(value);
+  if (!date) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function localScheduleInteger(value, fallback = null) {
+  const number = Number(value);
+  return Number.isInteger(number) ? number : fallback;
+}
+
+function localScheduleWeekNumbers(value) {
+  const source = Array.isArray(value) ? value : String(value ?? "").split(/[,，、;；\s]+/);
+  return [...new Set(source
+    .flatMap((part) => String(part ?? "").match(/\d+/g) || [])
+    .map(Number)
+    .filter((week) => Number.isInteger(week) && week > 0 && week <= 60))].sort((a, b) => a - b);
+}
+
+function localScheduleTermName(code) {
+  const value = String(code ?? "");
+  return state.terms.find((term) => term.code === value)?.name
+    || state.localSchedule.termOptions?.find((term) => term.code === value)?.name
+    || value;
+}
+
+function normalizeLocalScheduleItem(raw = {}, options = {}) {
+  const type = raw.type === "event" ? "event" : "course";
+  const now = localScheduleNow();
+  const course = raw.course && typeof raw.course === "object" ? raw.course : {};
+  const event = raw.event && typeof raw.event === "object" ? raw.event : {};
+  const termCode = localScheduleTrim(raw.termCode || options.termCode || state.termCode, 80);
+  const sourceWeeks = course.weekNumbers ?? raw.weekNumbers ?? raw.weeks;
+  const weekdayValue = course.weekdayIndex ?? raw.weekdayIndex ?? raw.weekday;
+  let weekdayIndex = localScheduleInteger(weekdayValue, null);
+  if (weekdayIndex === null || weekdayIndex < 0 || weekdayIndex > 6) {
+    const parsedDay = parseDay(weekdayValue);
+    weekdayIndex = parsedDay ? (parsedDay === 7 ? 0 : parsedDay) : null;
+  }
+  const startSection = localScheduleInteger(course.startSection ?? raw.startSection ?? event.startSection, null);
+  const endSection = localScheduleInteger(course.endSection ?? raw.endSection ?? event.endSection, null);
+  const normalizedStartSection = startSection && startSection > 0 ? startSection : null;
+  const normalizedEndSection = endSection && endSection > 0 ? endSection : null;
+  const startTime = localScheduleTime(course.startTime ?? event.startTime ?? raw.startTime);
+  const endTime = localScheduleTime(course.endTime ?? event.endTime ?? raw.endTime);
+  const item = {
+    id: localScheduleTrim(raw.id, 120) || localScheduleId(),
+    source: "local",
+    type,
+    termCode,
+    termName: localScheduleTrim(raw.termName || options.termName || localScheduleTermName(termCode), 120),
+    title: localScheduleTrim(raw.title || raw.name, 160),
+    teacher: localScheduleTrim(raw.teacher, 120),
+    location: localScheduleTrim(raw.location, 180),
+    note: localScheduleTrim(raw.note, 1000),
+    createdAt: localScheduleTrim(raw.createdAt, 80) || now,
+    updatedAt: localScheduleTrim(raw.updatedAt, 80) || now,
+    enabled: raw.enabled !== false,
+    colorKey: LOCAL_SCHEDULE_COLOR_KEYS.includes(raw.colorKey) ? raw.colorKey : "blue",
+    excludedWeeks: localScheduleWeekNumbers(raw.excludedWeeks),
+    excludedDates: Array.isArray(raw.excludedDates) ? raw.excludedDates.map(localScheduleDate).filter(Boolean) : [],
+    course: {
+      weekNumbers: localScheduleWeekNumbers(sourceWeeks),
+      weekdayIndex,
+      startSection: normalizedStartSection,
+      endSection: normalizedEndSection,
+      startTime,
+      endTime
+    },
+    event: {
+      date: localScheduleDate(event.date ?? raw.date),
+      allDay: Boolean(event.allDay ?? raw.allDay),
+      startTime,
+      endTime,
+      startSection: normalizedStartSection,
+      endSection: normalizedEndSection
+    }
+  };
+  if (type === "course") item.event = { date: "", allDay: false, startTime: "", endTime: "", startSection: null, endSection: null };
+  if (type === "event") item.course = { weekNumbers: [], weekdayIndex: null, startSection: normalizedStartSection, endSection: normalizedEndSection, startTime, endTime };
+  return item;
+}
+
+function localScheduleDraftFromItem(item = null, type = "course") {
+  if (!item) {
+    return normalizeLocalScheduleItem({
+      type,
+      termCode: state.termCode,
+      termName: localScheduleTermName(state.termCode),
+      course: { weekNumbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], weekdayIndex: 1, startSection: 1, endSection: 2 },
+      event: { date: localScheduleDate(new Date()), allDay: false }
+    });
+  }
+  return normalizeLocalScheduleItem(JSON.parse(JSON.stringify(item)));
+}
+
+function localSchedulePayload() {
+  const profileKey = localScheduleProfileKey(state.localSchedule.profileKey);
+  const studentId = state.studentId || state.personalCache.studentId || "";
+  return {
+    schema: LOCAL_SCHEDULE_SCHEMA,
+    schemaVersion: 1,
+    profileKey,
+    studentId: String(studentId),
+    savedAt: localScheduleNow(),
+    items: (state.localSchedule.items || []).map((item) => normalizeLocalScheduleItem(item)),
+    hiddenSchoolEntries: (state.localSchedule.hiddenSchoolEntries || []).map((entry) => ({
+      key: localScheduleTrim(entry.key, 240),
+      termCode: localScheduleTrim(entry.termCode, 80),
+      label: localScheduleTrim(entry.label, 300),
+      hiddenByLocalId: localScheduleTrim(entry.hiddenByLocalId, 120),
+      createdAt: localScheduleTrim(entry.createdAt, 80) || localScheduleNow()
+    })).filter((entry) => entry.key)
+  };
+}
+
+async function persistLocalSchedule() {
+  try {
+    await saveLocalSchedule(localSchedulePayload());
+    state.localSchedule.profileKey = localScheduleProfileKey(state.localSchedule.profileKey);
+    return true;
+  } catch (error) {
+    setNotice(`自定义安排保存失败：${error.message || "本地存储不可用"}`, "error");
+    return false;
+  }
+}
+
+function localScheduleTerms() {
+  const byCode = new Map((state.terms || []).map((term) => [term.code, { code: term.code, name: term.name }]));
+  (state.localSchedule.items || []).forEach((item) => {
+    if (item.termCode && !byCode.has(item.termCode)) byCode.set(item.termCode, { code: item.termCode, name: item.termName || item.termCode });
+  });
+  return [...byCode.values()];
+}
+
+async function hydrateLocalSchedule(profileKey = localScheduleProfileKey(), force = false) {
+  const normalizedProfile = localScheduleProfileKey(profileKey);
+  if (!force && state.localSchedule.hydrated && state.localSchedule.profileKey === normalizedProfile) return true;
+  state.localSchedule.loading = true;
+  state.localSchedule.profileKey = normalizedProfile;
+  let payload = null;
+  try {
+    payload = await loadLocalSchedule(normalizedProfile);
+  } catch {
+    payload = null;
+  }
+  state.localSchedule.items = [];
+  state.localSchedule.hiddenSchoolEntries = [];
+  state.localSchedule.termOptions = [];
+  state.localSchedule.corrupted = false;
+  if (payload) {
+    if (payload.schema !== LOCAL_SCHEDULE_SCHEMA || Number(payload.schemaVersion || 0) !== 1) {
+      state.localSchedule.corrupted = true;
+    } else {
+      state.localSchedule.items = Array.isArray(payload.items)
+        ? payload.items.map((item) => normalizeLocalScheduleItem(item)).filter((item) => item.title)
+        : [];
+      state.localSchedule.hiddenSchoolEntries = Array.isArray(payload.hiddenSchoolEntries)
+        ? payload.hiddenSchoolEntries.filter((entry) => entry && entry.key).map((entry) => ({ ...entry }))
+        : [];
+      state.localSchedule.termOptions = [...new Map(state.localSchedule.items
+        .filter((item) => item.termCode)
+        .map((item) => [item.termCode, { code: item.termCode, name: item.termName || item.termCode }])).values()];
+    }
+  }
+  state.localSchedule.hydrated = true;
+  state.localSchedule.loading = false;
+  if (!state.termCode && state.localSchedule.termOptions.length) state.termCode = state.localSchedule.termOptions[0].code;
+  try { updatePersonalTermSelect(); } catch { /* renderer may not be ready in smoke tests */ }
+  return !state.localSchedule.corrupted;
+}
+
+async function switchLocalScheduleProfile(studentId) {
+  const nextProfile = localScheduleProfileKey(studentId);
+  if (state.localSchedule.profileKey === nextProfile && state.localSchedule.hydrated) return;
+  await hydrateLocalSchedule(nextProfile, true);
+}
+
+function localScheduleItemsForTerm(termCode = state.termCode, includeDisabled = false) {
+  const code = String(termCode || "");
+  return (state.localSchedule.items || []).filter((item) => {
+    if (!includeDisabled && !item.enabled) return false;
+    return !code || !item.termCode || item.termCode === code;
+  });
+}
+
+function localScheduleDateText(date) {
+  const normalized = normalizeCalendarDate(date);
+  return normalized ? `${normalized.getMonth() + 1}月${normalized.getDate()}日` : "日期待设置";
+}
+
+function localScheduleWeekdayText(index) {
+  return Number.isInteger(index) && index >= 0 && index <= 6
+    ? `星期${["日", "一", "二", "三", "四", "五", "六"][index]}`
+    : "星期待设置";
+}
+
+function localScheduleClockText(item) {
+  const value = item?.type === "event" ? item.event : item?.course;
+  if (!value) return "";
+  if (value.startTime && value.endTime) return `${value.startTime}–${value.endTime}`;
+  return value.startTime || "";
+}
+
+function localScheduleSectionText(item) {
+  const value = item?.type === "event" ? item.event : item?.course;
+  if (!value?.startSection) return "";
+  return value.endSection && value.endSection !== value.startSection
+    ? `第${value.startSection}-${value.endSection}节`
+    : `第${value.startSection}节`;
+}
+
+function localScheduleItemToCourseRow(item) {
+  const normalized = normalizeLocalScheduleItem(item);
+  const event = normalized.type === "event";
+  const date = event ? normalizeCalendarDate(normalized.event.date) : null;
+  const dateInfo = date ? academicDayInfo(date) : null;
+  const weekdayIndex = event
+    ? date?.getDay() ?? normalized.event.weekdayIndex
+    : normalized.course.weekdayIndex;
+  const sectionValue = event ? normalized.event : normalized.course;
+  const weeks = event
+    ? dateInfo?.week ? `${dateInfo.week}周` : ""
+    : formatWeeksValue(normalized.course.weekNumbers.join(","));
+  const weekday = localScheduleWeekdayText(weekdayIndex);
+  const section = sectionValue?.startSection ? localScheduleSectionText(normalized) : "";
+  const clock = localScheduleClockText(normalized);
+  return {
+    name: normalized.title,
+    code: `LOCAL-${normalized.id.slice(0, 8)}`,
+    catalogCode: "",
+    teacher: normalized.teacher,
+    location: normalized.location,
+    time: clock || [weeks, weekday, section].filter(Boolean).join(" "),
+    weeks,
+    weekday,
+    section,
+    detail: normalized.note,
+    category: "",
+    nature: "",
+    requirement: "",
+    assessment: "",
+    examType: "",
+    credit: "",
+    raw: null,
+    source: "local",
+    localId: normalized.id,
+    localType: normalized.type,
+    localDate: event ? normalized.event.date : "",
+    localAllDay: event ? normalized.event.allDay : false,
+    localColorKey: normalized.colorKey,
+    termCode: normalized.termCode,
+    termName: normalized.termName,
+    startTime: sectionValue?.startTime || "",
+    endTime: sectionValue?.endTime || ""
+  };
+}
+
+function schoolPersonalScheduleRows(rows = state.data.courses) {
+  const sourceRows = (Array.isArray(rows) ? rows : []).filter((row) => row?.source !== "local");
+  const detailRows = (Array.isArray(state.data.scheduleDetail) ? state.data.scheduleDetail : []).filter((row) => row?.source !== "local");
+  if (!detailRows.length) return sourceRows.filter(hasSchedulePlacement);
+  const allowedIndexes = new Set(sourceRows
+    .map((course) => state.data.courses.indexOf(course))
+    .filter((index) => index >= 0));
+  return detailRows.filter((course) => {
+    if (courseDayIndex(course) < 0) return false;
+    if (Number.isInteger(course?.sourceCourseIndex)) return allowedIndexes.has(course.sourceCourseIndex);
+    return sourceRows.some((source) => courseIdentityMatches(source, course));
+  });
+}
+
+function schoolScheduleOccurrenceKey(course) {
+  const raw = course?.raw && typeof course.raw === "object" ? course.raw : {};
+  const rawId = valueOf(raw, ["JXBID", "teachClassId", "teachClassCode", "classCode", "courseSerialNo"], "");
+  const range = courseSectionRange(course);
+  const signature = [
+    rawId,
+    course?.code,
+    course?.catalogCode,
+    course?.name,
+    courseDayIndex(course),
+    range ? `${range.start}-${range.end}` : course?.section,
+    [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","),
+    course?.teacher,
+    course?.location
+  ].map((value) => String(value ?? "").trim()).join("|");
+  return `school:${localScheduleStableHash(signature)}`;
+}
+
+function mergedPersonalScheduleRows(rows = state.data.courses) {
+  const hiddenKeys = new Set((state.localSchedule.hiddenSchoolEntries || [])
+    .filter((entry) => !entry.termCode || entry.termCode === state.termCode)
+    .map((entry) => entry.key));
+  const schoolRows = schoolPersonalScheduleRows(rows).filter((course) => !hiddenKeys.has(schoolScheduleOccurrenceKey(course)));
+  const localRows = localScheduleItemsForTerm(state.termCode).map(localScheduleItemToCourseRow);
+  return [...schoolRows, ...localRows];
+}
+
+function normalizedScheduleCourses(rows) {
+  return (rows || []).map((row) => row?.source === "local" || row?.raw ? row : mapCourse(row));
+}
+
+function personalScheduleRows(rows = state.data.courses) {
+  return mergedPersonalScheduleRows(rows);
+}
+
+function localScheduleRowById(id) {
+  const item = (state.localSchedule.items || []).find((candidate) => candidate.id === String(id || ""));
+  return item ? localScheduleItemToCourseRow(item) : null;
+}
+
+function resolveScheduleItemFromAction(element) {
+  const source = element?.dataset?.courseSource || element?.dataset?.source || "school";
+  if (source === "local" || element?.dataset?.localScheduleId) {
+    return localScheduleRowById(element.dataset.localScheduleId);
+  }
+  const scope = element?.dataset?.courseScope || "personal";
+  const index = Number(element?.dataset?.courseIndex);
+  const detailIndex = Number(element?.dataset?.courseDetailIndex);
+  if (scope === "personal" && Number.isInteger(detailIndex) && detailIndex >= 0) return state.data.scheduleDetail[detailIndex] || courseAtScopeIndex(scope, index);
+  return Number.isInteger(index) ? courseAtScopeIndex(scope, index) : null;
+}
+
+function localScheduleClockRange(item) {
+  const row = item?.source === "local" ? item : localScheduleItemToCourseRow(item);
+  const value = row?.startTime && row?.endTime
+    ? `${row.startTime}-${row.endTime}`
+    : row?.time;
+  const match = String(value || "").match(/(\d{1,2}:\d{2})[-–](\d{1,2}:\d{2})/);
+  if (!match) return { start: null, end: null, startText: "", endText: "" };
+  return { start: overviewClockMinutes(match[1]), end: overviewClockMinutes(match[2]), startText: match[1], endText: match[2] };
+}
+
+function scheduleItemIsEvent(item) {
+  return item?.source === "local" && item?.localType === "event";
+}
+
+function scheduleItemDate(item) {
+  if (!scheduleItemIsEvent(item)) return null;
+  return normalizeCalendarDate(item.localDate);
+}
+
+function scheduleItemSectionRange(item) {
+  return courseSectionRange(item);
+}
+
+function compareScheduleClockOverlap(left, right) {
+  const leftRange = localScheduleClockRange(left);
+  const rightRange = localScheduleClockRange(right);
+  if (leftRange.start !== null && leftRange.end !== null && rightRange.start !== null && rightRange.end !== null) {
+    return { overlap: leftRange.start < rightRange.end && rightRange.start < leftRange.end, certain: true, missing: [] };
+  }
+  return { overlap: true, certain: false, missing: ["具体时间"] };
+}
+
+function compareScheduleItemsOverlap(left, right) {
+  const leftEvent = scheduleItemIsEvent(left);
+  const rightEvent = scheduleItemIsEvent(right);
+  if ((leftEvent && left.localAllDay) || (rightEvent && right.localAllDay)) {
+    return { overlap: false, certain: true, missing: [] };
+  }
+  const missing = [];
+  let dayKnown = false;
+  let weeksKnown = true;
+  if (leftEvent || rightEvent) {
+    const event = leftEvent ? left : right;
+    const recurring = leftEvent ? right : left;
+    const eventDate = scheduleItemDate(event);
+    if (!eventDate) return { overlap: true, certain: false, missing: ["日期"] };
+    const info = academicDayInfo(eventDate);
+    const recurringDay = courseDayIndex(recurring);
+    dayKnown = recurringDay >= 0;
+    if (dayKnown && recurringDay !== eventDate.getDay()) return { overlap: false, certain: true, missing: [] };
+    if (!dayKnown) missing.push("星期");
+    const weeks = courseWeekNumbers(recurring);
+    if (info.week !== null && weeks.size) {
+      weeksKnown = true;
+      if (!weeks.has(info.week)) return { overlap: false, certain: true, missing: [] };
+    } else if (info.week === null) {
+      weeksKnown = false;
+      missing.push("教学周");
+    } else if (!weeks.size) {
+      weeksKnown = false;
+      missing.push("周次");
+    }
+    const leftSection = scheduleItemSectionRange(left);
+    const rightSection = scheduleItemSectionRange(right);
+    if (leftSection && rightSection) {
+      const overlap = leftSection.start <= rightSection.end && rightSection.start <= leftSection.end;
+      return { overlap, certain: overlap ? dayKnown && weeksKnown : true, missing: overlap ? missing : [] };
+    }
+    const clock = compareScheduleClockOverlap(left, right);
+    return { ...clock, certain: clock.overlap ? dayKnown && weeksKnown && clock.certain : true, missing: clock.overlap ? [...missing, ...clock.missing] : [] };
+  }
+
+  const leftDay = courseDayIndex(left);
+  const rightDay = courseDayIndex(right);
+  dayKnown = leftDay >= 0 && rightDay >= 0;
+  if (dayKnown && leftDay !== rightDay) return { overlap: false, certain: true, missing: [] };
+  if (!dayKnown) missing.push("星期");
+  const leftWeeks = courseWeekNumbers(left);
+  const rightWeeks = courseWeekNumbers(right);
+  weeksKnown = leftWeeks.size > 0 && rightWeeks.size > 0;
+  if (weeksKnown && ![...leftWeeks].some((week) => rightWeeks.has(week))) return { overlap: false, certain: true, missing: [] };
+  if (!weeksKnown) missing.push("周次");
+  const leftSection = scheduleItemSectionRange(left);
+  const rightSection = scheduleItemSectionRange(right);
+  if (leftSection && rightSection) {
+    const overlap = leftSection.start <= rightSection.end && rightSection.start <= leftSection.end;
+    return { overlap, certain: overlap ? dayKnown && weeksKnown : true, missing: overlap ? missing : [] };
+  }
+  const clock = compareScheduleClockOverlap(left, right);
+  return { ...clock, certain: clock.overlap ? dayKnown && weeksKnown && clock.certain : true, missing: clock.overlap ? [...missing, ...clock.missing] : [] };
+}
+
+function compareCourseScheduleOverlap(left, right) {
+  return compareScheduleItemsOverlap(left, right);
+}
+
+function filterCoursesForDate(rows, date) {
+  const normalizedDate = localDateOnly(date);
+  const info = academicDayInfo(normalizedDate);
+  return (rows || [])
+    .filter((course) => {
+      if (scheduleItemIsEvent(course)) return course.localDate === localScheduleDate(normalizedDate);
+      if (info.week === null) return false;
+      if (courseDayIndex(course) !== info.weekdayIndex) return false;
+      const weeks = courseWeekNumbers(course);
+      return !weeks.size || weeks.has(info.week);
+    })
+    .filter((course) => {
+      if (course?.source !== "local") return true;
+      const item = (state.localSchedule.items || []).find((candidate) => candidate.id === course.localId);
+      if (!item) return true;
+      if (item.excludedDates?.includes(localScheduleDate(normalizedDate))) return false;
+      const week = info.week;
+      return !Number.isInteger(week) || !item.excludedWeeks?.includes(week);
+    })
+    .sort((left, right) => {
+      const leftClock = localScheduleClockRange(left).start;
+      const rightClock = localScheduleClockRange(right).start;
+      return (leftClock ?? 9999) - (rightClock ?? 9999)
+        || (courseSectionRange(left)?.start || 99) - (courseSectionRange(right)?.start || 99)
+        || String(left.name || "").localeCompare(String(right.name || ""), "zh-CN");
+    });
+}
+
+function overviewTodayCourses(rows, date = new Date()) {
+  return filterCoursesForDate(rows, date);
+}
+
+function overviewNextCourse(rows, date = new Date()) {
+  const todayRows = overviewTodayCourses(rows, date);
+  const todayInfo = academicDayInfo(date);
+  const hasRecurringTodayCandidate = todayInfo.week === null && (rows || []).some((course) => !scheduleItemIsEvent(course) && courseDayIndex(course) === todayInfo.weekdayIndex);
+  if (!todayRows.length && hasRecurringTodayCandidate) {
+    return { course: null, state: "unknown", tomorrow: null };
+  }
+  const now = date.getHours() * 60 + date.getMinutes();
+  const timedRows = todayRows.filter((course) => !course.localAllDay);
+  const active = timedRows.find((course) => {
+    const range = localScheduleClockRange(course);
+    return range.start !== null && range.end !== null && now >= range.start && now < range.end;
+  });
+  if (active) return { course: active, state: "active", elapsed: now - localScheduleClockRange(active).start };
+  const upcoming = timedRows.find((course) => {
+    const start = localScheduleClockRange(course).start;
+    return start !== null && start >= now;
+  });
+  if (upcoming) return { course: upcoming, state: "next", until: localScheduleClockRange(upcoming).start - now };
+  const started = timedRows.find((course) => localScheduleClockRange(course).start !== null && localScheduleClockRange(course).start < now && localScheduleClockRange(course).end === null);
+  if (started) return { course: started, state: "started", elapsed: now - localScheduleClockRange(started).start };
+  if (!timedRows.length && todayRows.length) return { course: todayRows[0], state: "all-day", allDayCount: todayRows.length };
+  const tomorrow = overviewTodayCourses(rows, addCalendarDays(date, 1));
+  if (todayRows.length) return { course: null, state: "ended", tomorrow: tomorrow[0] || null };
+  if (tomorrow.length) return { course: null, state: "none", tomorrow: tomorrow[0] };
+  return { course: null, state: "none", tomorrow: null };
+}
+
+function courseIndexForScope(course, scope = "personal") {
+  if (scope === "all-detail") return (state.allDetail?.courses || []).indexOf(course);
+  if (scope === "all") return state.allRows.indexOf(course?.raw || course);
+  return Number.isInteger(course?.sourceCourseIndex) && course.sourceCourseIndex >= 0
+    ? course.sourceCourseIndex
+    : state.data.courses.indexOf(course);
+}
+
+function courseActionAttributes(course, scope = "personal") {
+  if (course?.source === "local" && course.localId) {
+    return `type="button" data-action="show-local-schedule" data-course-source="local" data-local-schedule-id="${escapeHtml(course.localId)}"`;
+  }
+  const index = courseIndexForScope(course, scope);
+  const detailIndex = scope === "personal" ? state.data.scheduleDetail.indexOf(course) : -1;
+  if (index < 0 && detailIndex < 0) return "";
+  const sourceIndex = index >= 0 ? index : course.sourceCourseIndex;
+  return `type="button" data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
+}
+
+function courseDataAttributes(course, scope = "personal") {
+  if (course?.source === "local" && course.localId) return `data-course-source="local" data-local-schedule-id="${escapeHtml(course.localId)}"`;
+  const index = courseIndexForScope(course, scope);
+  const detailIndex = scope === "personal" ? state.data.scheduleDetail.indexOf(course) : -1;
+  if (index < 0 && detailIndex < 0) return "";
+  const sourceIndex = index >= 0 ? index : course.sourceCourseIndex;
+  return `data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
+}
+
+// Final presentation-layer overrides. The legacy export helpers are kept for
+// full-school pages; personal exports must use the merged school + local rows.
+function scheduleExportRows(scope = "personal") {
+  const source = scope === "all-detail" ? (state.allDetail?.courses || []) : mergedPersonalScheduleRows(state.data.courses || []);
+  const normalized = normalizedScheduleCourses(source);
+  const expanded = scope === "all-detail" ? normalized.flatMap((course) => expandMappedCourse(course)) : normalized;
+  const seen = new Set();
+  return expanded.filter((course) => {
+    const range = courseSectionRange(course);
+    const key = [course.source || "school", course.localId || course.code, course.name, courseDayIndex(course), range ? `${range.start}-${range.end}` : course.section, [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","), course.localDate, course.teacher, course.location].map((value) => String(value ?? "").trim()).join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function scheduleExportFilteredRows(rows, selectedWeek) {
+  if (selectedWeek === "all") return rows;
+  const week = Number(selectedWeek);
+  if (!Number.isInteger(week) || week <= 0) return rows;
+  return (rows || []).filter((course) => {
+    if (course.localDate) {
+      const info = academicDayInfo(normalizeCalendarDate(course.localDate));
+      return info.week === null || info.week === week;
+    }
+    const weeks = courseWeekNumbers(course);
+    return !weeks.size || weeks.has(week);
+  });
+}
+
+function scheduleCsvEntries(scope = "personal") {
+  return localScheduleCsvEntries(scope);
+}
+
+function scheduleCsvHasRows(scope = "personal") {
+  return scheduleCsvEntries(scope).length > 0;
+}
+
+function exportScheduleCsv(scope = "personal") {
+  return localExportScheduleCsv(scope);
+}
+
+function scheduleExportCourseBadge(course, scope = "personal") {
+  if (course?.source === "local") return course.localType === "event" ? "自定义日程" : "自定义课程";
+  if (scope === "personal") return scheduleExportIsPracticeCourse(course) ? "实验实践课程" : "普通课程";
+  return scheduleExportCategoryLabel(course);
+}
+
+function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
+  const range = courseSectionRange(course);
+  const section = range ? (range.start === range.end ? `第${range.start}节` : `第${range.start}-${range.end}节`) : "";
+  const clock = extractClockText(course.time) || localScheduleClockText(course);
+  const weekText = selectedWeek === "all" ? (course.weeks || (course.localDate ? localScheduleDateText(course.localDate) : "周次待识别")) : `第${selectedWeek}周`;
+  return {
+    title: course.name || "未命名安排",
+    schedule: [weekText, course.weekday || (course.localDate ? localScheduleDateText(course.localDate) : "星期待识别"), section, clock || (course.localAllDay ? "全天" : "")].filter(Boolean).join(" · "),
+    teacher: course.teacher || (course.source === "local" ? "自定义安排" : "教师待识别"),
+    location: course.location || course.detail || "地点待识别",
+    code: course.source === "local" ? "本地安排" : course.code || "无课程号",
+    tags: [courseAssessmentValue(course), courseRequirementValue(course), course.source === "local" ? (course.localType === "event" ? "日程" : "自定义") : scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
+  };
+}
+
+// Keep the local overlay renderer at the end of the file so legacy renderer
+// declarations above cannot accidentally replace the merged schedule UI.
+function renderDailySchedule(rows, scope = "personal") {
+  return renderDailyScheduleWithLocalOverlay(rows, scope);
+}
+
+function renderCourseDetailModal() {
+  if (state.selectedCourse?.source === "local") return renderLocalScheduleDetailModal(state.selectedCourse);
+  return renderCourseDetailWithLocalOverlay();
+}
+
+function renderPersonal() {
+  return renderPersonalWithLocalOverlay();
+}
+
+function renderSettings() {
+  return renderSettingsWithLocalOverlay();
 }
 
 document.querySelectorAll("[data-view]").forEach((tab) => {
@@ -8156,9 +9660,9 @@ elements.content.addEventListener("click", async (event) => {
     const scope = button.dataset.courseScope || "personal";
     const index = Number(button.dataset.courseIndex);
     const detailIndex = Number(button.dataset.courseDetailIndex);
-    state.selectedCourse = scope === "personal" && Number.isInteger(detailIndex) && detailIndex >= 0
+    state.selectedCourse = resolveScheduleItemFromAction(button) || (scope === "personal" && Number.isInteger(detailIndex) && detailIndex >= 0
       ? state.data.scheduleDetail[detailIndex] || courseAtScopeIndex(scope, index)
-      : courseAtScopeIndex(scope, index);
+      : courseAtScopeIndex(scope, index));
     state.selectedCourseScope = scope;
     if (state.selectedCourse && courseIsSport(state.selectedCourse)) {
       return loadSportProjectsForCourse(state.selectedCourse, scope);

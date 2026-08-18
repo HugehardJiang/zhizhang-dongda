@@ -48,6 +48,11 @@ globalThis.__auditTest = {
   curriculumTreeKeys, curriculumTreeIsFullyExpanded, curriculumProgressMap, curriculumProgressOverviewMarkup, curriculumRequirementOverviewMarkup,
   curriculumExportMarkup, curriculumExportDocument, curriculumExportFileName,
   curriculumPdfDocumentModel, curriculumPdfPaginateBlocks,
+  normalizeLocalScheduleItem, localScheduleItemToCourseRow, mergedPersonalScheduleRows,
+  compareScheduleItemsOverlap, filterCoursesForDate, overviewTodayCourses, overviewNextCourse, schoolScheduleOccurrenceKey,
+  findLocalScheduleConflicts,
+  localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
+  scheduleCsvHasRows, renderPersonal, renderOverview, renderSettings, renderCourseDetailModal,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -410,6 +415,133 @@ const t = global.__auditTest;
   releaseFirst();
   await firstQuery;
   assert.strictEqual(t.state.allRows[0].BJDM, 'NEW');
+
+  // Local schedule overlay: school data remains untouched and local data has
+  // its own compact schema/adapter instead of being pushed into courses.
+  const savedLocalState = JSON.parse(JSON.stringify({
+    data: t.state.data,
+    termCode: t.state.termCode,
+    studentId: t.state.studentId,
+    localSchedule: t.state.localSchedule,
+    calendar: t.state.calendar
+  }));
+  const localSchool = t.mapCourse({
+    courseName: '大学物理', courseNo: 'A-PHYS', weeks: '1-16周', weekday: '星期二', section: '第3-4节',
+    teacher: '崔老师', classroom: '逸201'
+  });
+  const localCourse = t.normalizeLocalScheduleItem({
+    id: 'local-course-a', source: 'local', type: 'course', termCode: 'LOCAL-TERM', termName: '本地测试学期',
+    title: '自动控制补课', teacher: '本地老师', location: '活动中心', note: '<script>不执行</script>',
+    course: { weekNumbers: [1, 2, 3, 4, 5, 6, 7, 8], weekdayIndex: 2, startSection: 4, endSection: 5, startTime: '14:00', endTime: '15:40' }
+  });
+  const localEvent = t.normalizeLocalScheduleItem({
+    id: 'local-event-a', source: 'local', type: 'event', termCode: 'LOCAL-TERM', termName: '本地测试学期',
+    title: '摄影社例会', location: '活动中心 201',
+    event: { date: '2026-08-18', allDay: false, startTime: '18:30', endTime: '20:00' }
+  });
+  assert.strictEqual(localCourse.source, 'local');
+  assert.deepStrictEqual(localCourse.course.weekNumbers, [1, 2, 3, 4, 5, 6, 7, 8]);
+  assert.strictEqual(localCourse.course.weekdayIndex, 2);
+  assert.strictEqual(localEvent.event.date, '2026-08-18');
+  t.state.termCode = 'LOCAL-TERM';
+  t.state.studentId = 'student-A';
+  t.state.calendar.firstWeekStart = '';
+  t.state.data.courses = [localSchool];
+  t.state.data.scheduleDetail = [localSchool];
+  t.state.localSchedule = {
+    hydrated: true, loading: false, items: [localCourse, localEvent], hiddenSchoolEntries: [],
+    profileKey: 'student-A', editorOpen: false, managerOpen: false, editingId: '', draft: null,
+    editorError: '', conflict: null, filter: 'all', corrupted: false, lastCsvSkipped: 0
+  };
+  const localRows = t.mergedPersonalScheduleRows(t.state.data.courses);
+  assert.strictEqual(localRows.filter((row) => row.source === 'local').length, 2);
+  assert.strictEqual(t.state.data.courses.some((row) => row.source === 'local'), false);
+  assert.strictEqual(t.state.data.scheduleDetail.some((row) => row.source === 'local'), false);
+  assert.ok(localRows.some((row) => row.localId === 'local-course-a' && row.weekday === '星期二'));
+  const localPersonalMarkup = t.renderPersonal();
+  assert.ok(localPersonalMarkup.includes('自动控制补课'));
+  assert.ok(localPersonalMarkup.includes('open-local-editor'));
+  assert.ok(localPersonalMarkup.includes('管理自定义安排'));
+  const localSettingsMarkup = t.renderSettings();
+  assert.ok(localSettingsMarkup.includes('清除教务缓存'));
+  assert.ok(localSettingsMarkup.includes('清除全部自定义安排'));
+  t.state.selectedCourse = t.localScheduleItemToCourseRow(localEvent);
+  assert.ok(t.renderCourseDetailModal().includes('自定义安排详情'));
+  t.state.selectedCourse = null;
+  assert.ok(t.renderOverview().includes('今天安排'));
+
+  // An exact-date event is visible without firstWeekStart; a recurring school
+  // course remains conservatively excluded until the academic week is known.
+  const eventRow = localRows.find((row) => row.localId === 'local-event-a');
+  assert.strictEqual(t.filterCoursesForDate(localRows, new Date(2026, 7, 18)).some((row) => row.localId === 'local-event-a'), true);
+  assert.strictEqual(t.filterCoursesForDate([localSchool], new Date(2026, 7, 18)).length, 0);
+  assert.strictEqual(t.overviewNextCourse([localSchool], new Date(2026, 7, 18, 9, 0)).state, 'unknown');
+
+  // Section overlap, disjoint weeks, and clock overlap all use the common
+  // compareScheduleItemsOverlap engine.
+  const overlapCourse = t.normalizeLocalScheduleItem({
+    id: 'local-course-overlap', type: 'course', termCode: 'LOCAL-TERM', title: '冲突课程',
+    course: { weekNumbers: [1, 2, 3, 4, 5, 6, 7, 8], weekdayIndex: 2, startSection: 4, endSection: 5 }
+  });
+  const disjointCourse = t.normalizeLocalScheduleItem({
+    id: 'local-course-disjoint', type: 'course', termCode: 'LOCAL-TERM', title: '不冲突课程',
+    course: { weekNumbers: [9, 10, 11, 12, 13, 14, 15, 16], weekdayIndex: 2, startSection: 4, endSection: 5 }
+  });
+  const shortSchool = { ...localSchool, weeks: '1-8周', time: '1-8周 星期二 第3-4节', detail: '1-8周 星期二 第3-4节 逸201' };
+  const overlapResult = t.compareScheduleItemsOverlap(t.localScheduleItemToCourseRow(overlapCourse), localSchool);
+  assert.strictEqual(overlapResult.overlap, true);
+  assert.strictEqual(overlapResult.certain, true);
+  assert.strictEqual(t.compareScheduleItemsOverlap(t.localScheduleItemToCourseRow(disjointCourse), shortSchool).overlap, false);
+  const timedEventA = t.normalizeLocalScheduleItem({ id: 'event-a', type: 'event', termCode: 'LOCAL-TERM', title: 'A', event: { date: '2026-08-18', startTime: '14:00', endTime: '15:00' } });
+  const timedEventB = t.normalizeLocalScheduleItem({ id: 'event-b', type: 'event', termCode: 'LOCAL-TERM', title: 'B', event: { date: '2026-08-18', startTime: '14:30', endTime: '16:00' } });
+  const timedEventRow = t.localScheduleItemToCourseRow(timedEventA);
+  const overviewActive = t.overviewNextCourse([timedEventRow], new Date(2026, 7, 18, 14, 30));
+  assert.strictEqual(overviewActive.state, 'active');
+  assert.strictEqual(overviewActive.course.localId, 'event-a');
+  assert.strictEqual(t.overviewTodayCourses([timedEventRow], new Date(2026, 7, 18)).length, 1);
+  assert.strictEqual(t.compareScheduleItemsOverlap(t.localScheduleItemToCourseRow(timedEventA), t.localScheduleItemToCourseRow(timedEventB)).overlap, true);
+  const allDayEvent = t.normalizeLocalScheduleItem({ id: 'event-all-day', type: 'event', termCode: 'LOCAL-TERM', title: '校庆', event: { date: '2026-08-18', allDay: true } });
+  assert.strictEqual(t.compareScheduleItemsOverlap(t.localScheduleItemToCourseRow(allDayEvent), t.localScheduleItemToCourseRow(timedEventB)).overlap, false);
+
+  // “同时保留” is the default merge; “仅保留新安排” is represented by a
+  // hidden occurrence key and never mutates the school arrays.
+  const occurrenceKey = t.schoolScheduleOccurrenceKey(localSchool);
+  t.state.localSchedule.hiddenSchoolEntries = [{ key: occurrenceKey, termCode: 'LOCAL-TERM', label: '大学物理', hiddenByLocalId: 'local-course-a' }];
+  assert.strictEqual(t.mergedPersonalScheduleRows(t.state.data.courses).some((row) => row.name === '大学物理'), false);
+  assert.strictEqual(t.state.data.courses[0].name, '大学物理');
+  t.state.localSchedule.hiddenSchoolEntries = [];
+  assert.strictEqual(t.mergedPersonalScheduleRows(t.state.data.courses).some((row) => row.name === '大学物理'), true);
+
+  // Local course can be represented by WakeUp CSV; an exact-date event without
+  // a teaching week/section is skipped and reports the count instead of faking a
+  // section number.
+  t.state.localSchedule.items = [localCourse, localEvent];
+  const localCsv = t.scheduleCsvEntries('personal');
+  assert.ok(localCsv.some((entry) => entry.courseName === '自动控制补课'));
+  assert.strictEqual(localCsv.skippedCount, 1);
+  assert.strictEqual(t.scheduleCsvHasRows('personal'), true);
+
+  // Student profile keys are different and deterministic.
+  assert.notStrictEqual(t.localScheduleStorageKey('student-A'), t.localScheduleStorageKey('student-B'));
+  assert.strictEqual(t.localScheduleProfileKey('student-A'), 'student-A');
+  assert.strictEqual(t.localSchedulePayload().schema, 'zhizhang-local-schedule/v1');
+  assert.strictEqual(t.localSchedulePayload().studentId, 'student-A');
+
+  // Editing an item does not collide with itself.
+  t.state.localSchedule.items = [localCourse];
+  t.state.data.courses = [];
+  t.state.data.scheduleDetail = [];
+  const selfOnly = t.localScheduleItemToCourseRow(localCourse);
+  assert.strictEqual(t.findLocalScheduleConflicts(localCourse).length, 0);
+  assert.strictEqual(t.compareScheduleItemsOverlap(selfOnly, selfOnly).overlap, true);
+
+  // Restore the fixture used by the earlier audit assertions for callers that
+  // inspect the state after this test file finishes.
+  t.state.data = savedLocalState.data;
+  t.state.termCode = savedLocalState.termCode;
+  t.state.studentId = savedLocalState.studentId;
+  t.state.localSchedule = savedLocalState.localSchedule;
+  t.state.calendar = savedLocalState.calendar;
 
   console.log('audit smoke tests: PASS');
 })().catch((error) => {
