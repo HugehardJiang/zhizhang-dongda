@@ -32,7 +32,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 构建产物位于：
 
 ```text
-app/build/outputs/apk/debug/执掌东大-Android-0.1.33-debug.apk
+app/build/outputs/apk/debug/执掌东大-Android-0.1.34-debug.apk
 ```
 
 根目录的 `dashboard.html`、`dashboard.css`、`dashboard.js` 会在构建前自动同步到 Android assets，因此接口解析和界面逻辑与浏览器插件共用一套代码。

@@ -129,6 +129,9 @@ const state = {
     filter: "",
     mode: "all",
     semester: "all",
+    pendingOnly: false,
+    // 只保存当前会话中的展开状态；刷新同一方案时保留，切换方案时清空。
+    expanded: {},
     courseDetail: null,
     bootstrap: {
       status: "idle",
@@ -2001,6 +2004,7 @@ function curriculumFilteredGroups() {
   const query = state.curriculum.filter.trim().toLowerCase();
   const mode = state.curriculum.mode;
   const semester = state.curriculum.semester;
+  const pendingOnly = Boolean(state.curriculum.pendingOnly);
   const plan = state.curriculum.selectedPlan || {};
   const filtered = state.curriculum.groups.map((group) => ({
     ...group,
@@ -2008,11 +2012,14 @@ function curriculumFilteredGroups() {
       const modeMatch = mode === "all" || /必修/.test(course.required || course.nature) === (mode === "required");
       const semesterLabel = curriculumSemesterLabel(course.semester, plan);
       const semesterMatch = semester === "all" || semesterLabel === semester;
+      const categoryScore = course.raw?.__curriculumCategoryFallbackScore;
+      const completion = categoryScore ? { earned: true } : curriculumCourseCompletion(course);
+      const pendingMatch = !pendingOnly || !completion.earned;
       const text = [course.name, course.code, course.category, course.nature, course.assessment, course.semester, semesterLabel, course.required, group.name].join(" ").toLowerCase();
-      return modeMatch && semesterMatch && (!query || text.includes(query));
+      return modeMatch && semesterMatch && pendingMatch && (!query || text.includes(query));
     })
   }));
-  const hasCourseFilter = Boolean(query) || mode !== "all" || semester !== "all";
+  const hasCourseFilter = Boolean(query) || mode !== "all" || semester !== "all" || pendingOnly;
   if (!hasCourseFilter) {
     return filtered.filter((group) => group.courses.length || ([group.minCredits, group.totalCredits, group.requiredCredits, group.electiveCredits, group.category, group.kind].some(Boolean) || group.name === "全部课程"));
   }
@@ -2128,47 +2135,57 @@ function curriculumProgressMap(groups = state.curriculum.groups) {
   return memo;
 }
 
-function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgressMap()) {
-  const records = (state.curriculum.courses || []).map((course) => ({ course, completion: curriculumCourseCompletion(course) }));
-  const claimedScoreKeys = new Set(records
-    .map((record, index) => record.completion.score ? curriculumScoreKey(record.completion.score, index) : "")
-    .filter(Boolean));
-  const categoryRecords = [...progressMap.values()]
-    .flatMap((progress) => progress.records || [])
-    .filter((record) => record.categoryFallback && record.completion?.earned)
-    .filter((record, index) => {
-      const key = curriculumScoreKey(record.completion.score, index);
-      if (!key || claimedScoreKeys.has(key)) return false;
-      claimedScoreKeys.add(key);
-      return true;
-    });
-  records.push(...categoryRecords);
-  const earnedRecords = records.filter((record) => record.completion.earned);
-  const earnedCredits = earnedRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
-  const requiredCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "required" ? curriculumCreditNumber(record.course.credit) : 0), 0);
-  const electiveCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "elective" ? curriculumCreditNumber(record.course.credit) : 0), 0);
-  const targetCredits = numericValue(plan.credit);
-  const remainingCredits = targetCredits === null ? null : Math.max(targetCredits - earnedCredits, 0);
-  const meta = state.data.gpaMeta || {};
-  const coverageText = meta.termCount ? `已读取 ${meta.successfulTermCount || 0} / ${meta.termCount} 个成绩学期` : "成绩学期覆盖情况待接口返回";
-  const warning = meta.failedTermCount ? `<p class="curriculum-progress-warning">有 ${meta.failedTermCount} 个学期成绩读取失败；请先在成绩页刷新，避免把未读取学期误判为未获得。</p>` : "";
-  const rootProgress = [...progressMap.values()].find((item) => item.targetCredits !== null && item.remainingCredits !== null);
-  const categoryNote = categoryRecords.length
-    ? `；其中 ${categoryRecords.length} 门通识选修按成绩类别计入`
-    : "";
-  return `<section class="panel curriculum-progress-panel"><div class="curriculum-progress-head"><div><h3>学分完成情况</h3><p class="muted">按全部已读取学期的“已通过”成绩匹配培养方案课程；课程号优先，课程名和课程分类作为兜底。通识选修若在培养方案中只有“选修学分”课组、没有具体课程行，会按成绩类别计入。</p></div><span class="curriculum-progress-coverage">${escapeHtml(coverageText)}</span></div><div class="curriculum-progress-grid"><div class="curriculum-progress-card curriculum-progress-card-earned"><span>已获得培养方案学分</span><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><small>${earnedRecords.length} / ${records.length} 门课程${escapeHtml(categoryNote)}</small></div><div class="curriculum-progress-card curriculum-progress-card-remaining"><span>剩余所需学分</span><strong>${escapeHtml(formatCurriculumCredit(remainingCredits !== null ? remainingCredits : rootProgress?.remainingCredits))}</strong><small>方案最低要求 ${escapeHtml(formatCurriculumCredit(targetCredits !== null ? targetCredits : rootProgress?.targetCredits))} 学分</small></div><div class="curriculum-progress-card"><span>按课程性质</span><strong>必修 ${escapeHtml(formatCurriculumCredit(requiredCredits))}</strong><small>选修已获 ${escapeHtml(formatCurriculumCredit(electiveCredits))} 学分</small></div></div>${warning}</section>`;
-}
-
 function curriculumCourseProgressMarkup(course, options = {}) {
   if (options.export) return "";
   const categoryScore = course.raw?.__curriculumCategoryFallbackScore;
   const completion = categoryScore
     ? { earned: true, score: categoryScore, matchType: "通识选修类别" }
     : curriculumCourseCompletion(course);
-  if (!completion.earned) return `<span class="curriculum-course-status curriculum-course-status-pending">未获得</span>`;
+  if (!completion.earned) return `<span class="curriculum-course-status curriculum-course-status-pending">未完成</span>`;
   const score = completion.score || {};
   const details = [score.score ? `成绩 ${score.score}` : "已通过", score.term, completion.matchType].filter(Boolean).join(" · ");
-  return `<span class="curriculum-course-status curriculum-course-status-earned">已获得 ${escapeHtml(formatCurriculumCredit(course.credit))} 学分</span><small class="curriculum-course-status-detail">${escapeHtml(details)}</small>`;
+  return `<span class="curriculum-course-status curriculum-course-status-earned">✓ 已完成</span><small class="curriculum-course-status-detail">${escapeHtml([formatCurriculumCredit(course.credit) + " 学分", details].filter(Boolean).join(" · "))}</small>`;
+}
+
+function curriculumGroupStatus(progress = {}) {
+  const target = numericValue(progress.targetCredits);
+  const earned = Number(progress.earnedCredits || 0);
+  if (target !== null && target > 0 && earned >= target - 0.005) return { key: "complete", label: "✓ 已满足" };
+  if (earned > 0) return { key: "progress", label: "进行中" };
+  return { key: "neutral", label: "未开始" };
+}
+
+function curriculumGroupPercent(progress = {}) {
+  const target = numericValue(progress.targetCredits);
+  if (target === null || target <= 0) return 0;
+  return Math.min(100, Math.max(0, Number(progress.earnedCredits || 0) / target * 100));
+}
+
+function curriculumGroupMetricMarkup(progress = {}) {
+  const target = progress.targetCredits === null || progress.targetCredits === undefined
+    ? "—"
+    : `${formatCurriculumCredit(progress.targetCredits)} 学分`;
+  const earned = `${formatCurriculumCredit(progress.earnedCredits)} 学分`;
+  const remaining = progress.remainingCredits === null || progress.remainingCredits === undefined
+    ? "—"
+    : `${formatCurriculumCredit(progress.remainingCredits)} 学分`;
+  return `<div class="curriculum-group-metrics"><span class="curriculum-group-metric"><small>已获得 / 要求</small><strong>${escapeHtml(`${earned} / ${target}`)}</strong></span><span class="curriculum-group-metric curriculum-group-metric-remaining"><small>还差</small><strong>${escapeHtml(remaining)}</strong></span><span class="curriculum-group-metric"><small>完成课程</small><strong>${escapeHtml(`${progress.earnedCourseCount || 0} / ${progress.courseCount || 0} 门`)}</strong></span></div>`;
+}
+
+function curriculumGroupMetaMarkup(group = {}, progress = {}) {
+  const items = [
+    group.category ? `类别：${group.category}` : "",
+    group.rule ? `选择规则：${group.rule}` : "",
+    progress.categoryFallbackCount ? `通识选修类别计入 ${progress.categoryFallbackCount} 门` : ""
+  ].filter(Boolean);
+  return items.length ? `<div class="curriculum-group-meta">${items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "";
+}
+
+function curriculumTreeOpenState(key, depth, exportMode = false) {
+  if (exportMode) return true;
+  if (Object.prototype.hasOwnProperty.call(state.curriculum.expanded || {}, key)) return Boolean(state.curriculum.expanded[key]);
+  // 首屏只打开一级模块，避免课程量大时把真正的毕业进度推到很下面。
+  return depth === 0;
 }
 
 function curriculumGroupRequirementItems(group, options = {}) {
@@ -2233,9 +2250,12 @@ function curriculumCourseTableMarkup(group, plan, options = {}) {
   const progressHead = exportMode ? "" : "<th>完成情况</th>";
   return `<div class="table-wrap curriculum-table-wrap"><table><thead><tr><th>课程</th><th>课程号</th><th>学分</th><th>类别</th><th>性质 / 要求</th><th>考核方式</th><th>修读学期</th>${progressHead}</tr></thead><tbody>${courses.map((course) => {
     const categoryFallback = Boolean(course.raw?.__curriculumCategoryFallback);
+    const completion = categoryFallback
+      ? { earned: true }
+      : curriculumCourseCompletion(course);
     const rowAction = exportMode || categoryFallback
-      ? ""
-      : ` class="clickable-row" data-action="show-curriculum-course" data-course-key="${escapeHtml(curriculumCourseKey(course))}" title="点击查看课程全部字段"`;
+      ? ` class="curriculum-course-row${completion.earned ? " is-complete" : ""}"`
+      : ` class="clickable-row curriculum-course-row${completion.earned ? " is-complete" : ""}" data-action="show-curriculum-course" data-course-key="${escapeHtml(curriculumCourseKey(course))}" title="点击查看课程全部字段"`;
     const categoryNote = categoryFallback ? " · 已选通识选修" : "";
     return `<tr${rowAction}><td class="primary-cell">${escapeHtml(`${course.name}${categoryNote}`)}</td><td>${escapeHtml(course.code || "—")}</td><td>${escapeHtml(course.credit || "—")}</td><td>${escapeHtml(course.category || "—")}</td><td>${escapeHtml([course.nature, course.required].filter(Boolean).join(" / ") || "—")}</td><td>${escapeHtml(courseAssessmentLabel(course))}</td><td>${escapeHtml(curriculumSemesterLabel(course.semester, plan) || "—")}</td>${exportMode ? "" : `<td class="curriculum-progress-cell">${curriculumCourseProgressMarkup(course, options)}</td>`}</tr>`;
   }).join("")}</tbody></table></div>`;
@@ -2254,23 +2274,32 @@ function curriculumRequirementOverviewMarkup(groups, plan, options = {}) {
     if (!childrenMap.has(parentId)) childrenMap.set(parentId, []);
     childrenMap.get(parentId).push(group);
   });
-  const renderNode = (group, seen = new Set()) => {
+  const renderNode = (group, depth = 0, seen = new Set()) => {
     const key = curriculumGroupIdentity(group);
     if (seen.has(key)) return "";
     const nextSeen = new Set(seen);
     nextSeen.add(key);
     const children = childrenMap.get(key) || [];
-    const chips = curriculumGroupRequirementItems(group, { ...options, progressMap }).map(([name, value]) => `<span class="curriculum-requirement-item"><small>${escapeHtml(name)}</small><strong>${escapeHtml(value)}</strong></span>`).join("");
     const progress = progressMap.get(key);
-    const count = progress?.courseCount ? `<span class="curriculum-requirement-count">${progress.courseCount} 门课程</span>` : group.courses.length ? `<span class="curriculum-requirement-count">${group.courses.length} 门课程</span>` : "";
-    return `<details class="curriculum-tree-node" open><summary class="curriculum-tree-summary"><div class="curriculum-requirement-title"><span class="eyebrow">${escapeHtml(group.kind || "课组")}</span><strong>${escapeHtml(group.name)}</strong>${group.path ? `<small>${escapeHtml(group.path)}</small>` : ""}</div><div class="curriculum-requirement-values">${chips}${count}</div></summary><div class="curriculum-tree-content">${children.map((child) => renderNode(child, nextSeen)).join("")}${curriculumCourseTableMarkup(group, plan, options)}</div></details>`;
+    const status = curriculumGroupStatus(progress || {});
+    const percent = curriculumGroupPercent(progress || {});
+    const legacyItems = curriculumGroupRequirementItems(group, { ...options, progressMap });
+    const metrics = options.export
+      ? legacyItems.map(([name, value]) => `<span class="curriculum-requirement-item"><small>${escapeHtml(name)}</small><strong>${escapeHtml(value)}</strong></span>`).join("")
+      : `${curriculumGroupMetricMarkup(progress || {})}${percent > 0 && depth <= 1 ? `<span class="curriculum-group-progress" aria-label="已完成 ${Math.round(percent)}%"><span style="width:${percent.toFixed(1)}%"></span></span>` : ""}`;
+    const count = progress?.courseCount ? `${progress.courseCount} 门课程` : group.courses.length ? `${group.courses.length} 门课程` : "";
+    const open = curriculumTreeOpenState(key, depth, Boolean(options.export));
+    const level = Math.min(depth + 1, 4);
+    const meta = options.export ? "" : curriculumGroupMetaMarkup(group, progress || {});
+    return `<details class="curriculum-tree-node curriculum-tree-level-${level} curriculum-status-${status.key}" data-curriculum-key="${escapeHtml(key)}" ${open ? "open" : ""}><summary class="curriculum-tree-summary"><div class="curriculum-requirement-title"><div class="curriculum-group-heading"><span class="curriculum-group-kind">${escapeHtml(group.kind || "课组")}</span><strong>${escapeHtml(group.name)}</strong><span class="curriculum-group-status curriculum-group-status-${status.key}">${escapeHtml(status.label)}</span></div>${group.path ? `<small>${escapeHtml(group.path)}</small>` : ""}${meta}</div><div class="curriculum-requirement-values">${metrics}${count ? `<span class="curriculum-requirement-count">${escapeHtml(count)}</span>` : ""}</div></summary><div class="curriculum-tree-content">${children.map((child) => renderNode(child, depth + 1, nextSeen)).join("")}${curriculumCourseTableMarkup(group, plan, options)}</div></details>`;
   };
   const roots = childrenMap.get("__root__") || visibleGroups;
-  const tree = roots.map((group) => renderNode(group)).join("");
+  const tree = roots.map((group) => renderNode(group, 0)).join("");
   const copy = options.export
     ? "按原系统层级完整展开课组、学分要求、课程字段和修读学期。"
-    : "秋季学期显示为“上”，春季学期显示为“下”；点击每一级标题可折叠或展开整棵子树。";
-  return `<section class="panel curriculum-requirement-overview${options.export ? " curriculum-export-requirement-overview" : ""}"><div class="curriculum-requirement-overview-head"><div><h3>培养方案结构与学分要求</h3><p class="muted">${copy}</p></div><span class="curriculum-requirement-count">${visibleGroups.length} 个层级</span></div><div class="curriculum-tree">${tree}</div></section>`;
+    : "已获得 / 要求、还差和完成课程按层级展示；点击箭头可折叠或展开子树。";
+  const controls = options.export ? "" : options.controlsMarkup || "";
+  return `<section class="panel curriculum-requirement-overview${options.export ? " curriculum-export-requirement-overview" : ""}"><div class="curriculum-requirement-overview-head"><div><h3>培养方案结构</h3><p class="muted">${copy}</p></div><span class="curriculum-requirement-count">${visibleGroups.length} 个层级</span></div>${controls}<div class="curriculum-tree">${tree}</div></section>`;
 }
 
 function curriculumExportSafePlan(plan = {}) {
@@ -2446,7 +2475,13 @@ function renderCurriculum() {
   const categorySelectedCount = groups.reduce((count, group) => count + (progressMap.get(curriculumGroupIdentity(group))?.directCategoryFallbackRecords?.length || 0), 0);
   const courseCount = groups.reduce((count, group) => count + group.courses.length, 0);
   const semesterOptions = curriculumSemesterOptions(plan).map((value) => `<option value="${escapeHtml(value)}" ${curriculum.semester === value ? "selected" : ""}>${escapeHtml(value)}</option>`).join("");
-  return `<div>${sectionHeading("培养计划", "", `<div class="button-row"><button class="button button-primary" type="button" data-action="export-curriculum-pdf">导出 PDF</button></div>`)}<div class="panel curriculum-toolbar-panel"><div class="inline-form"><label>培养方案<select id="curriculumPlanSelect">${planOptions || `<option value="">未读取到方案</option>`}</select></label><button class="button button-primary" type="button" data-action="refresh-curriculum">刷新方案</button></div><p class="muted">${escapeHtml([plan.grade, plan.college, plan.major, plan.type, plan.studyType].filter(Boolean).join(" · ") || "方案信息待接口返回")}</p></div><div class="curriculum-summary-grid"><div class="curriculum-summary-card"><span>方案最低学分</span><strong>${escapeHtml(plan.credit || "—")}</strong><small>${escapeHtml(plan.name || "")}</small></div><div class="curriculum-summary-card"><span>课组</span><strong>${escapeHtml(curriculum.groups.length)}</strong><small>已展开层级</small></div><div class="curriculum-summary-card"><span>课程</span><strong>${escapeHtml(curriculum.courses.length)}</strong><small>${escapeHtml(curriculum.source || "接口数据")}</small></div></div>${curriculumProgressOverviewMarkup(plan, progressMap)}${curriculumRequirementOverviewMarkup(groups, plan, { progressMap })}<div class="panel curriculum-course-list-panel"><div class="curriculum-course-list-head"><div><h3>课程明细已嵌入上方课组</h3><p class="muted">展开具体课组即可看到课程；折叠父级会同时收起其全部子级。已选通识选修会显示在对应类别课组中，但不会写入导出 PDF。</p></div><strong>${courseCount} 门培养方案课程${categorySelectedCount ? ` · ${categorySelectedCount} 门已选通识选修` : ""}</strong></div><div class="toolbar curriculum-filter-toolbar"><input data-filter="curriculum" value="${escapeHtml(curriculum.filter)}" placeholder="搜索课程名、课程号、类别、性质或课组" /><label class="curriculum-mode-label">性质<select id="curriculumMode"><option value="all" ${curriculum.mode === "all" ? "selected" : ""}>全部课程</option><option value="required" ${curriculum.mode === "required" ? "selected" : ""}>必修</option><option value="elective" ${curriculum.mode === "elective" ? "selected" : ""}>选修</option></select></label><label class="curriculum-mode-label">学期<select id="curriculumSemesterSelect"><option value="all" ${curriculum.semester === "all" ? "selected" : ""}>全部学期</option>${semesterOptions}</select></label></div>${curriculum.error ? `<div class="schedule-note">${escapeHtml(curriculum.error)}；下面仍展示已读取到的课程和课组字段。</div>` : ""}</div>${curriculumCourseDetailMarkup(curriculum.courseDetail)}</div>`;
+  const planMeta = [plan.college, plan.major, plan.grade, plan.type, plan.studyType].filter(Boolean).join(" · ") || "方案元数据待原系统返回";
+  const hasSuspiciousPlan = /智能车辆工程/.test(String(plan.name || ""));
+  const refreshHint = hasSuspiciousPlan
+    ? "当前读取到“智能车辆工程”等与本人专业不符的方案，通常说明教务系统培养方案页面尚未完全加载。请先等待原系统页面完全加载，再点击“刷新方案”。"
+    : "如果刷新后出现“智能车辆工程”等明显不属于本人专业的培养方案，通常说明教务系统培养方案页面尚未完全加载；请先等待原系统培养方案页面完全加载，再点击“刷新方案”。";
+  const filterMarkup = `<div class="curriculum-tree-toolbar"><div class="toolbar curriculum-filter-toolbar"><input data-filter="curriculum" value="${escapeHtml(curriculum.filter)}" placeholder="搜索课程名、课程号、类别、性质或课组" /><label class="curriculum-mode-label">性质<select id="curriculumMode"><option value="all" ${curriculum.mode === "all" ? "selected" : ""}>全部课程</option><option value="required" ${curriculum.mode === "required" ? "selected" : ""}>必修</option><option value="elective" ${curriculum.mode === "elective" ? "selected" : ""}>选修</option></select></label><label class="curriculum-mode-label">学期<select id="curriculumSemesterSelect"><option value="all" ${curriculum.semester === "all" ? "selected" : ""}>全部学期</option>${semesterOptions}</select></label><label class="curriculum-pending-label"><input id="curriculumPendingOnly" type="checkbox" ${curriculum.pendingOnly ? "checked" : ""} />只看待完成</label></div><div class="curriculum-tree-actions"><button class="button button-ghost button-small" type="button" data-action="curriculum-expand-all">展开全部</button><button class="button button-ghost button-small" type="button" data-action="curriculum-collapse-all">收起全部</button><span>${escapeHtml(`${courseCount} 门课程${categorySelectedCount ? ` · ${categorySelectedCount} 门通识选修` : ""}`)}</span></div></div>`;
+  return `<div>${sectionHeading("培养计划", "", `<div class="button-row"><button class="button button-primary" type="button" data-action="export-curriculum-pdf">导出 PDF</button></div>`)}<section class="curriculum-plan-control" aria-labelledby="curriculum-plan-title"><div class="curriculum-plan-control-head"><div><span class="curriculum-plan-kicker">当前培养方案</span><h3 id="curriculum-plan-title">${escapeHtml(plan.name || "未命名培养方案")}</h3></div><button class="button button-primary" type="button" data-action="refresh-curriculum">刷新方案</button></div><label class="curriculum-plan-select-label" for="curriculumPlanSelect">选择方案<select id="curriculumPlanSelect">${planOptions || `<option value="">未读取到方案</option>`}</select></label><p class="curriculum-plan-meta">${escapeHtml(planMeta)}</p><p class="curriculum-refresh-hint ${hasSuspiciousPlan ? "is-warning" : ""}" role="note"><strong>刷新提示</strong>${escapeHtml(refreshHint)}</p></section>${curriculumProgressOverviewMarkup(plan, progressMap)}${curriculumRequirementOverviewMarkup(groups, plan, { progressMap, controlsMarkup: filterMarkup })}${curriculum.error ? `<p class="schedule-note curriculum-inline-error">${escapeHtml(curriculum.error)}；下面仍展示已读取到的课程和课组字段。</p>` : ""}${curriculumCourseDetailMarkup(curriculum.courseDetail)}</div>`;
 }
 
 function normalizeScoreStatus(raw) {
@@ -4617,7 +4652,7 @@ function renderOverview() {
     ? `<div class="overview-list">${exams.map((exam) => `<div class="overview-list-row"><span class="overview-list-date">${escapeHtml(exam.date || "—")}</span><span class="overview-list-copy"><strong>${escapeHtml(exam.name)}</strong><span>${escapeHtml([exam.time, exam.place, exam.seat ? `${exam.seat}号` : ""].filter(Boolean).join(" · ") || "信息待发布")}</span></span><span class="overview-list-status">${escapeHtml(exam.countdown)}</span></div>`).join("")}</div>`
     : `<div class="overview-empty">暂无近期考试</div>`;
   const scoreMarkup = state.data.scores.length
-    ? `<div class="overview-list">${state.data.scores.slice(0, 3).map((score) => `<div class="overview-score-row"><strong>${escapeHtml(score.name)}</strong><span>${escapeHtml(score.score || "—")}</span></div>`).join("")}</div>`
+    ? `<div class="overview-list">${state.data.scores.slice(0, 3).map((score) => `<div class="overview-score-row"><strong>${escapeHtml(score.name)}</strong><span class="${scoreSemanticClass(score)}">${escapeHtml(score.score || "—")}</span></div>`).join("")}</div>`
     : `<div class="overview-empty">暂无成绩</div>`;
   const cacheNote = personalCacheStatusText() ? `<p class="overview-cache-note">${escapeHtml(personalCacheStatusText())}</p>` : "";
   const weekContext = dateLabel.weekNumber === null
@@ -4641,6 +4676,13 @@ function scoreStatusTag(status) {
   if (!text) return "<span class=\"muted\">—</span>";
   const pass = /通过|合格|及格|pass/i.test(text);
   return `<span class="tag ${pass ? "pass" : "warn"}">${escapeHtml(text)}</span>`;
+}
+
+function scoreSemanticClass(row = {}) {
+  const text = [row.score, row.status].filter(Boolean).join(" ");
+  if (/不及格|不通过|不合格|未通过|挂科|fail/i.test(text)) return "score-cell-danger";
+  if (/修读中|进行中|待发布|缺考|缓考/i.test(text)) return "score-cell-progress";
+  return "";
 }
 
 function renderScoreDetailModal() {
@@ -4695,12 +4737,12 @@ function renderScores() {
     const score = row.detailId
       ? `<button class="score-link" type="button" data-action="show-score-detail" data-score-index="${index}" title="点击查看分项成绩">${escapeHtml(row.score)}</button>`
       : escapeHtml(row.score);
-    return `<tr><td class="primary-cell"><div class="score-course-cell"><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(scoreMeta(row))}</small></div></td><td>${escapeHtml(row.credit)}</td><td class="score-cell">${score}</td><td>${escapeHtml(row.gpa)}</td><td>${escapeHtml(row.nature || row.category || "—")}</td><td>${escapeHtml(row.term)}</td></tr>`;
+    return `<tr><td class="primary-cell"><div class="score-course-cell"><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(scoreMeta(row))}</small></div></td><td>${escapeHtml(row.credit)}</td><td class="score-cell ${scoreSemanticClass(row)}">${score}</td><td>${escapeHtml(row.gpa)}</td><td>${escapeHtml(row.nature || row.category || "—")}</td><td>${escapeHtml(row.term)}</td></tr>`;
   }).join("")}</tbody></table></div>` : emptyCard(state.filters.scores ? "没有匹配的成绩" : "当前学期暂无成绩", state.filters.scores ? "换一个课程名、课程号或类别关键词。" : "成绩以学校系统已发布的数据为准。", `<button class="button button-ghost" type="button" data-action="open-portal">打开培养板块</button>`);
   const mobileList = rows.length ? `<div class="score-mobile-list">${rows.map((row) => {
     const index = state.data.scores.indexOf(row);
     const action = row.detailId ? ` data-action="show-score-detail" data-score-index="${index}"` : "";
-    return `<button class="score-mobile-row" type="button"${action}><span><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml([row.credit ? `${row.credit} 学分` : "", row.gpa ? `绩点 ${row.gpa}` : "", row.nature || row.category || ""].filter(Boolean).join(" · "))}</small></span><span class="score-mobile-value">${escapeHtml(row.score || "—")}</span></button>`;
+    return `<button class="score-mobile-row" type="button"${action}><span><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml([row.credit ? `${row.credit} 学分` : "", row.gpa ? `绩点 ${row.gpa}` : "", row.nature || row.category || ""].filter(Boolean).join(" · "))}</small></span><span class="score-mobile-value ${scoreSemanticClass(row)}">${escapeHtml(row.score || "—")}</span></button>`;
   }).join("")}</div>` : "";
   const meta = state.data.gpaMeta || {};
   const scope = meta.scope || "全部已查询学期累计";
@@ -7060,8 +7102,26 @@ function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgress
   const percent = targetCredits && targetCredits > 0 ? Math.min(100, Math.max(0, earnedCredits / targetCredits * 100)) : 0;
   const meta = state.data.gpaMeta || {};
   const coverageText = meta.termCount ? `成绩覆盖 ${meta.successfulTermCount || 0} / ${meta.termCount} 个学期` : "成绩覆盖待读取";
-  const warning = meta.failedTermCount ? `<p class="curriculum-progress-warning">有 ${meta.failedTermCount} 个学期成绩读取失败，请先刷新成绩页。</p>` : "";
-  return `<section class="panel curriculum-progress-panel"><div class="curriculum-progress-head"><div><h3>毕业要求</h3></div><span class="curriculum-progress-coverage">${escapeHtml(coverageText)}</span></div><div class="curriculum-progress-total"><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><span> / ${escapeHtml(formatCurriculumCredit(targetCredits))} 学分</span></div><div class="curriculum-progress-bar" role="progressbar" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${percent.toFixed(1)}%"></span></div><div class="curriculum-progress-grid"><div class="curriculum-progress-card curriculum-progress-card-earned"><span>已获得</span><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><small>${earnedRecords.length} / ${records.length} 门</small></div><div class="curriculum-progress-card curriculum-progress-card-remaining"><span>剩余</span><strong>${escapeHtml(formatCurriculumCredit(remainingCredits))}</strong><small>方案最低 ${escapeHtml(formatCurriculumCredit(targetCredits))} 学分</small></div><div class="curriculum-progress-card"><span>课程性质</span><strong>必修 ${escapeHtml(formatCurriculumCredit(requiredCredits))}</strong><small>选修 ${escapeHtml(formatCurriculumCredit(electiveCredits))} 学分</small></div></div>${warning}</section>`;
+  const rootGroups = state.curriculum.groups.filter((group) => {
+    if (!group.parentId) return true;
+    return !state.curriculum.groups.some((candidate) => String(candidate.id || "") === String(group.parentId));
+  });
+  const rootProgresses = rootGroups.map((group) => progressMap.get(curriculumGroupIdentity(group))).filter(Boolean);
+  const knownTarget = (key) => rootProgresses.reduce((total, progress) => {
+    const value = numericValue(progress[key]);
+    return value === null ? total : total + value;
+  }, 0);
+  const requiredTarget = knownTarget("targetRequiredCredits");
+  const electiveTarget = knownTarget("targetElectiveCredits");
+  const categoryNote = categoryRecords.length ? `其中 ${categoryRecords.length} 门通识选修按成绩类别计入` : "按已读取成绩匹配";
+  const remainingMarkup = remainingCredits !== null && remainingCredits > 0
+    ? `<p class="curriculum-progress-warning"><strong>还差 ${escapeHtml(formatCurriculumCredit(remainingCredits))} 学分</strong><span>完成剩余课程后即可达到方案最低要求。</span></p>`
+    : remainingCredits === 0
+      ? `<p class="curriculum-progress-success"><strong>✓ 已达到方案最低学分</strong><span>仍可继续查看各课组与课程完成状态。</span></p>`
+      : "";
+  const failedMarkup = meta.failedTermCount ? `<p class="curriculum-progress-warning"><strong>成绩读取不完整</strong><span>有 ${meta.failedTermCount} 个学期成绩读取失败，请先刷新成绩页，避免把未读取课程误判为未完成。</span></p>` : "";
+  const compositionItem = (label, earned, target) => `<div class="curriculum-composition-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(formatCurriculumCredit(earned))}${target > 0 ? ` / ${escapeHtml(formatCurriculumCredit(target))}` : ""} 学分</strong><small>${target > 0 ? "已获 / 要求" : "已获得"}</small></div>`;
+  return `<section class="panel curriculum-progress-panel"><div class="curriculum-progress-head"><div><h3>毕业进度</h3><p class="muted">${escapeHtml(categoryNote)}；${escapeHtml(coverageText)}。</p></div><span class="curriculum-progress-coverage">${escapeHtml(coverageText)}</span></div><div class="curriculum-progress-total"><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><span> / ${escapeHtml(formatCurriculumCredit(targetCredits))} 学分</span><em>${Math.round(percent)}%</em></div><div class="curriculum-progress-bar" role="progressbar" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100" aria-label="毕业学分进度"><span style="width:${percent.toFixed(1)}%"></span></div><div class="curriculum-progress-grid"><div class="curriculum-progress-card curriculum-progress-card-earned"><span>已获得</span><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><small>培养方案学分</small></div><div class="curriculum-progress-card curriculum-progress-card-remaining"><span>剩余</span><strong>${escapeHtml(formatCurriculumCredit(remainingCredits))}</strong><small>达到最低要求</small></div><div class="curriculum-progress-card"><span>已完成课程</span><strong>${escapeHtml(`${earnedRecords.length} / ${records.length}`)}</strong><small>按已通过成绩匹配</small></div><div class="curriculum-progress-card"><span>课组</span><strong>${escapeHtml(state.curriculum.groups.length)}</strong><small>当前方案层级</small></div></div><div class="curriculum-credit-composition"><div class="curriculum-credit-composition-head"><strong>学分构成</strong><span>只展示已有数据，不改变原系统判定</span></div><div class="curriculum-composition-grid">${compositionItem("必修", requiredCredits, requiredTarget)}${compositionItem("选修", electiveCredits, electiveTarget)}<div class="curriculum-composition-item"><span>方案最低要求</span><strong>${escapeHtml(formatCurriculumCredit(targetCredits))} 学分</strong><small>原系统方案字段</small></div></div></div>${remainingMarkup}${failedMarkup}</section>`;
 }
 
 // 这些最终定义位于所有旧页面 renderer 之后，确保同一套业务状态在桌面和
@@ -7364,6 +7424,7 @@ elements.content.addEventListener("change", (event) => {
   if (event.target.id === "curriculumPlanSelect") {
     state.curriculum.selectedPlanId = event.target.value;
     state.curriculum.semester = "all";
+    state.curriculum.expanded = {};
     loadCurriculumPlan(event.target.value);
     return;
   }
@@ -7374,6 +7435,12 @@ elements.content.addEventListener("change", (event) => {
   }
   if (event.target.id === "curriculumSemesterSelect") {
     state.curriculum.semester = event.target.value;
+    render();
+    return;
+  }
+  if (event.target.id === "curriculumPendingOnly") {
+    state.curriculum.pendingOnly = event.target.checked;
+    state.curriculum.expanded = {};
     render();
     return;
   }
@@ -7391,6 +7458,19 @@ elements.content.addEventListener("change", (event) => {
 });
 
 elements.content.addEventListener("click", async (event) => {
+  const treeSummary = event.target.closest?.(".curriculum-tree-summary");
+  if (treeSummary) {
+    const treeNode = treeSummary.closest(".curriculum-tree-node");
+    if (treeNode?.dataset.curriculumKey) {
+      // details 的 open 状态在 click 回调之后才完成切换，因此放到微任务后读取。
+      window.setTimeout(() => {
+        state.curriculum.expanded = {
+          ...(state.curriculum.expanded || {}),
+          [treeNode.dataset.curriculumKey]: Boolean(treeNode.open)
+        };
+      }, 0);
+    }
+  }
   if (event.target.classList.contains("modal-backdrop")) {
     sportProjectRequestSequence += 1;
     state.selectedCourse = null;
@@ -7552,6 +7632,12 @@ elements.content.addEventListener("click", async (event) => {
   }
   if (action === "refresh-curriculum") {
     return IS_ANDROID_APP ? loadCurriculumPlans() : startCurriculumBootstrap();
+  }
+  if (action === "curriculum-expand-all" || action === "curriculum-collapse-all") {
+    const open = action === "curriculum-expand-all";
+    state.curriculum.expanded = Object.fromEntries(curriculumFilteredGroups().map((group) => [curriculumGroupIdentity(group), open]));
+    render();
+    return;
   }
   if (action === "close-all-detail") {
     allScheduleDetailRequestSequence += 1;
