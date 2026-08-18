@@ -5336,6 +5336,16 @@ function parseSectionRange(value) {
 }
 
 function courseSectionRange(course) {
+  // Local Schedule 的 detail 是用户备注，不能沿用教务课程的“整段文本兜底
+  // 解析”规则；否则备注“123”会被误认为第 123 节。自定义安排只允许
+  // 明确的 section/time 字段参与节次识别。
+  if (course?.source === "local") {
+    const localCandidates = [course?.section, course?.time].filter((value) => hasDisplayValue(value));
+    const localParsed = localCandidates
+      .map((value) => ({ value, range: parseSectionRange(value) }))
+      .filter((item) => item.range);
+    return localParsed.find((item) => item.range.end > item.range.start)?.range || localParsed[0]?.range || null;
+  }
   const candidates = [
     course?.section,
     course?.detail,

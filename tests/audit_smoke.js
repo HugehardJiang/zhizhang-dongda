@@ -452,13 +452,16 @@ const t = global.__auditTest;
   });
   const localEvent = t.normalizeLocalScheduleItem({
     id: 'local-event-a', source: 'local', type: 'event', termCode: 'LOCAL-TERM', termName: '本地测试学期',
-    title: '摄影社例会', location: '活动中心 201',
+    title: '摄影社例会', location: '活动中心 201', note: '123',
     event: { date: '2026-08-18', allDay: false, startTime: '18:30', endTime: '20:00' }
   });
   assert.strictEqual(localCourse.source, 'local');
   assert.deepStrictEqual(localCourse.course.weekNumbers, [1, 2, 3, 4, 5, 6, 7, 8]);
   assert.strictEqual(localCourse.course.weekdayIndex, 2);
   assert.strictEqual(localEvent.event.date, '2026-08-18');
+  const localEventRowWithNote = t.localScheduleItemToCourseRow(localEvent);
+  assert.strictEqual(localEventRowWithNote.section, '');
+  assert.strictEqual(t.renderScheduleGrid([localEventRowWithNote], 'personal').includes('第123节'), false);
 
   // Event fields are independent from course defaults. Empty section values
   // remain canonical nulls, including when an older payload used ""/null.
