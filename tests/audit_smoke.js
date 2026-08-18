@@ -43,6 +43,8 @@ globalThis.__auditTest = {
   currentAcademicWeekNumber, defaultPersonalScheduleWeek, scheduleWeekValue,
   personalScheduleRows,
   scheduleCsvEntries, buildScheduleCsv, scheduleCsvFileName,
+  curriculumTreeKeys, curriculumTreeIsFullyExpanded, curriculumRequirementOverviewMarkup,
+  curriculumExportMarkup, curriculumExportDocument, curriculumExportFileName,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -153,6 +155,47 @@ const t = global.__auditTest;
   assert.ok(csv.includes('"体育(二)","7","3","4","宋建欣","线上","1-9周（单）、11-16周"'));
   const escaped = t.buildScheduleCsv([{ ...sundayEntry, courseName: '含"引号"' }]);
   assert.ok(escaped.includes('"含""引号"""'));
+
+  // Curriculum expand/collapse is a single state batch over every depth, not
+  // a sequence of DOM clicks. The export tree is independent and always open.
+  const curriculumGroups = [];
+  for (let rootIndex = 0; rootIndex < 4; rootIndex += 1) {
+    const rootId = `curriculum-root-${rootIndex}`;
+    curriculumGroups.push({ id: rootId, name: `一级模块${rootIndex + 1}`, parentId: "", minCredits: "40", courses: [] });
+    for (let childIndex = 0; childIndex < 7; childIndex += 1) {
+      const childId = `${rootId}-child-${childIndex}`;
+      curriculumGroups.push({ id: childId, name: `课组${rootIndex + 1}-${childIndex + 1}`, parentId: rootId, minCredits: "5", courses: [] });
+    }
+  }
+  const curriculumCourses = Array.from({ length: 112 }, (_, index) => ({
+    name: `培养课程${index + 1}`, code: `C${String(index + 1).padStart(4, "0")}`, credit: "2",
+    category: "专业基础课", nature: "必修", required: "必修", semester: "2025-2026-1", raw: {}
+  }));
+  curriculumCourses.forEach((course, index) => {
+    curriculumGroups[1 + (index % 28)].courses.push(course);
+  });
+  t.state.curriculum.groups = curriculumGroups;
+  t.state.curriculum.courses = curriculumCourses;
+  t.state.curriculum.plans = [{ id: "curriculum-plan", name: "2025 自动化", grade: "2025级", major: "自动化", college: "信息学院", credit: "162" }];
+  t.state.curriculum.selectedPlanId = "curriculum-plan";
+  t.state.curriculum.selectedPlan = t.state.curriculum.plans[0];
+  t.state.curriculum.expanded = {};
+  const curriculumKeys = t.curriculumTreeKeys(curriculumGroups);
+  assert.strictEqual(curriculumKeys.length, 32);
+  assert.strictEqual(t.curriculumTreeIsFullyExpanded(curriculumGroups), false);
+  t.state.curriculum.expanded = Object.fromEntries(curriculumKeys.map((key) => [key, true]));
+  assert.strictEqual(t.curriculumTreeIsFullyExpanded(curriculumGroups), true);
+  const interactiveTree = t.curriculumRequirementOverviewMarkup(curriculumGroups, t.state.curriculum.selectedPlan, { progressMap: new Map() });
+  assert.ok(interactiveTree.includes("收起全部"));
+  assert.strictEqual((interactiveTree.match(/data-tree-depth=/g) || []).length, 32);
+  const exportMarkup = t.curriculumExportMarkup();
+  assert.ok(exportMarkup.includes('id="curriculumExportRoot"'));
+  assert.strictEqual((exportMarkup.match(/data-tree-depth=/g) || []).length, 32);
+  assert.strictEqual((exportMarkup.match(/<tr class="curriculum-course-row/g) || []).length, 112);
+  assert.ok(!exportMarkup.includes("curriculum-course-status"));
+  assert.ok(!exportMarkup.includes("curriculum-tree-summary::before"));
+  assert.ok(t.curriculumExportDocument().html.includes("overflow: visible"));
+  assert.strictEqual(t.curriculumExportFileName(t.state.curriculum.selectedPlan), "培养计划_2025级_自动化");
 
   t.state.allDetail = {
     typeName: '教师课表', name: '张三', code: 'T001',

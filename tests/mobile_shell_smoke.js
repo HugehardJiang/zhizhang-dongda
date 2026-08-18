@@ -45,6 +45,8 @@ function createEventTarget() {
 const elements = new Map();
 const pageWrap = createEventTarget();
 const nativeCalls = [];
+const androidCurriculumEntry = createElementStub();
+androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; };
 global.window = global;
 global.AndroidApi = {
   request() {},
@@ -59,7 +61,9 @@ global.document = {
   querySelector(selector) {
     return selector === ".page-wrap" ? pageWrap : null;
   },
-  querySelectorAll() { return []; },
+  querySelectorAll(selector) {
+    return selector === '[data-view="curriculum"]' ? [androidCurriculumEntry] : [];
+  },
   createElement() { return createElementStub(); }
 };
 global.localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
@@ -84,6 +88,8 @@ vm.runInThisContext(code, { filename: dashboardPath });
 const audit = global.__mobileShellAudit;
 const card = audit.card;
 const touch = (clientY) => ({ touches: [{ clientY }], changedTouches: [{ clientY }] });
+
+assert.strictEqual(androidCurriculumEntry.removed, true);
 
 audit.prepare();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");

@@ -132,6 +132,7 @@ const state = {
     pendingOnly: false,
     // 只保存当前会话中的展开状态；刷新同一方案时保留，切换方案时清空。
     expanded: {},
+    exporting: false,
     courseDetail: null,
     bootstrap: {
       status: "idle",
@@ -2181,6 +2182,72 @@ function curriculumGroupMetaMarkup(group = {}, progress = {}) {
   return items.length ? `<div class="curriculum-group-meta">${items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "";
 }
 
+function curriculumTreeModel(groups = [], progressMap = curriculumProgressMap(), options = {}) {
+  const visibleGroups = groups.filter((group) => (
+    options.export
+      ? true
+      : curriculumGroupRequirementItems(group, { ...options, progressMap }).length || group.courses.length
+  ));
+  const groupMap = new Map(visibleGroups.map((group) => [curriculumGroupIdentity(group), group]));
+  visibleGroups.forEach((group) => {
+    if (group.id) groupMap.set(String(group.id), group);
+  });
+  const childrenMap = new Map();
+  visibleGroups.forEach((group) => {
+    const parent = group.parentId && groupMap.get(String(group.parentId));
+    const parentId = parent ? curriculumGroupIdentity(parent) : "__root__";
+    if (!childrenMap.has(parentId)) childrenMap.set(parentId, []);
+    childrenMap.get(parentId).push(group);
+  });
+  return {
+    groups: visibleGroups,
+    childrenMap,
+    roots: childrenMap.get("__root__") || visibleGroups
+  };
+}
+
+function curriculumTreeWalk(groups, visitor, options = {}) {
+  const model = curriculumTreeModel(groups, options.progressMap || curriculumProgressMap(), options);
+  const walk = (group, depth = 0, seen = new Set()) => {
+    const key = curriculumGroupIdentity(group);
+    if (seen.has(key)) return;
+    const nextSeen = new Set(seen);
+    nextSeen.add(key);
+    visitor(group, depth, key);
+    (model.childrenMap.get(key) || []).forEach((child) => walk(child, depth + 1, nextSeen));
+  };
+  model.roots.forEach((group) => walk(group));
+  return model;
+}
+
+function curriculumTreeKeys(groups = state.curriculum.groups) {
+  const keys = [];
+  curriculumTreeWalk(groups, (_group, _depth, key) => keys.push(key));
+  return keys;
+}
+
+function curriculumTreeIsFullyExpanded(groups = state.curriculum.groups) {
+  let allExpanded = true;
+  curriculumTreeWalk(groups, (_group, depth, key) => {
+    if (!curriculumTreeOpenState(key, depth)) allExpanded = false;
+  });
+  return allExpanded;
+}
+
+function curriculumTreeBulkActionMarkup(groups = state.curriculum.groups) {
+  const expanded = curriculumTreeIsFullyExpanded(groups);
+  return `<button class="button button-ghost button-small curriculum-tree-bulk-action" type="button" data-curriculum-bulk data-action="curriculum-${expanded ? "collapse" : "expand"}-all">${expanded ? "收起全部" : "展开全部"}</button>`;
+}
+
+function syncCurriculumTreeBulkAction() {
+  const button = elements.content?.querySelector?.("[data-curriculum-bulk]");
+  if (!button) return;
+  const expanded = curriculumTreeIsFullyExpanded(state.curriculum.groups);
+  button.dataset.action = `curriculum-${expanded ? "collapse" : "expand"}-all`;
+  button.textContent = expanded ? "收起全部" : "展开全部";
+  button.setAttribute("aria-label", expanded ? "收起全部培养方案层级" : "展开全部培养方案层级");
+}
+
 function curriculumTreeOpenState(key, depth, exportMode = false) {
   if (exportMode) return true;
   if (Object.prototype.hasOwnProperty.call(state.curriculum.expanded || {}, key)) return Boolean(state.curriculum.expanded[key]);
@@ -2263,23 +2330,15 @@ function curriculumCourseTableMarkup(group, plan, options = {}) {
 
 function curriculumRequirementOverviewMarkup(groups, plan, options = {}) {
   const progressMap = options.progressMap || curriculumProgressMap();
-  const visibleGroups = groups.filter((group) => curriculumGroupRequirementItems(group, { ...options, progressMap }).length || group.courses.length);
+  const treeModel = curriculumTreeModel(groups, progressMap, options);
+  const visibleGroups = treeModel.groups;
   if (!visibleGroups.length) return "";
-  const groupMap = new Map(visibleGroups.map((group) => [curriculumGroupIdentity(group), group]));
-  visibleGroups.forEach((group) => { if (group.id) groupMap.set(String(group.id), group); });
-  const childrenMap = new Map();
-  visibleGroups.forEach((group) => {
-    const parent = group.parentId && groupMap.get(String(group.parentId));
-    const parentId = parent ? curriculumGroupIdentity(parent) : "__root__";
-    if (!childrenMap.has(parentId)) childrenMap.set(parentId, []);
-    childrenMap.get(parentId).push(group);
-  });
   const renderNode = (group, depth = 0, seen = new Set()) => {
     const key = curriculumGroupIdentity(group);
     if (seen.has(key)) return "";
     const nextSeen = new Set(seen);
     nextSeen.add(key);
-    const children = childrenMap.get(key) || [];
+    const children = treeModel.childrenMap.get(key) || [];
     const progress = progressMap.get(key);
     const status = curriculumGroupStatus(progress || {});
     const percent = curriculumGroupPercent(progress || {});
@@ -2289,23 +2348,26 @@ function curriculumRequirementOverviewMarkup(groups, plan, options = {}) {
       : `${curriculumGroupMetricMarkup(progress || {})}${percent > 0 && depth <= 1 ? `<span class="curriculum-group-progress" aria-label="已完成 ${Math.round(percent)}%"><span style="width:${percent.toFixed(1)}%"></span></span>` : ""}`;
     const count = progress?.courseCount ? `${progress.courseCount} 门课程` : group.courses.length ? `${group.courses.length} 门课程` : "";
     const open = curriculumTreeOpenState(key, depth, Boolean(options.export));
-    const level = Math.min(depth + 1, 4);
+    const level = depth + 1;
     const meta = options.export ? "" : curriculumGroupMetaMarkup(group, progress || {});
-    return `<details class="curriculum-tree-node curriculum-tree-level-${level} curriculum-status-${status.key}" data-curriculum-key="${escapeHtml(key)}" ${open ? "open" : ""}><summary class="curriculum-tree-summary"><div class="curriculum-requirement-title"><div class="curriculum-group-heading"><span class="curriculum-group-kind">${escapeHtml(group.kind || "课组")}</span><strong>${escapeHtml(group.name)}</strong><span class="curriculum-group-status curriculum-group-status-${status.key}">${escapeHtml(status.label)}</span></div>${group.path ? `<small>${escapeHtml(group.path)}</small>` : ""}${meta}</div><div class="curriculum-requirement-values">${metrics}${count ? `<span class="curriculum-requirement-count">${escapeHtml(count)}</span>` : ""}</div></summary><div class="curriculum-tree-content">${children.map((child) => renderNode(child, depth + 1, nextSeen)).join("")}${curriculumCourseTableMarkup(group, plan, options)}</div></details>`;
+    const pathMarkup = group.path && depth === 0 ? `<small>${escapeHtml(group.path)}</small>` : "";
+    return `<details class="curriculum-tree-node curriculum-tree-level-${level} curriculum-status-${status.key}" data-curriculum-key="${escapeHtml(key)}" data-tree-depth="${depth}" ${open ? "open" : ""}><summary class="curriculum-tree-summary"><div class="curriculum-requirement-title"><div class="curriculum-group-heading"><span class="curriculum-group-kind">${escapeHtml(group.kind || "课组")}</span><strong>${escapeHtml(group.name)}</strong><span class="curriculum-group-status curriculum-group-status-${status.key}">${escapeHtml(status.label)}</span></div>${pathMarkup}${meta}</div><div class="curriculum-requirement-values">${metrics}${count ? `<span class="curriculum-requirement-count">${escapeHtml(count)}</span>` : ""}</div></summary><div class="curriculum-tree-content">${children.map((child) => renderNode(child, depth + 1, nextSeen)).join("")}${curriculumCourseTableMarkup(group, plan, options)}</div></details>`;
   };
-  const roots = childrenMap.get("__root__") || visibleGroups;
-  const tree = roots.map((group) => renderNode(group, 0)).join("");
+  const tree = treeModel.roots.map((group) => renderNode(group, 0)).join("");
   const copy = options.export
     ? "按原系统层级完整展开课组、学分要求、课程字段和修读学期。"
     : "已获得 / 要求、还差和完成课程按层级展示；点击箭头可折叠或展开子树。";
   const controls = options.export ? "" : options.controlsMarkup || "";
-  return `<section class="panel curriculum-requirement-overview${options.export ? " curriculum-export-requirement-overview" : ""}"><div class="curriculum-requirement-overview-head"><div><h3>培养方案结构</h3><p class="muted">${copy}</p></div><span class="curriculum-requirement-count">${visibleGroups.length} 个层级</span></div>${controls}<div class="curriculum-tree">${tree}</div></section>`;
+  const headingActions = options.export ? "" : `<div class="curriculum-tree-heading-actions">${curriculumTreeBulkActionMarkup(state.curriculum.groups)}<span class="curriculum-requirement-count">${visibleGroups.length} 个层级</span></div>`;
+  return `<section class="panel curriculum-requirement-overview${options.export ? " curriculum-export-requirement-overview" : ""}"><div class="curriculum-requirement-overview-head"><div><h3>培养方案结构</h3><p class="muted">${copy}</p></div>${headingActions}</div>${controls}<div class="curriculum-tree">${tree}</div></section>`;
 }
 
 function curriculumExportSafePlan(plan = {}) {
   // 导出只取方案本身的公共字段，不读取 raw，也不把学生姓名、学号、账号等字段带入 PDF。
   return [
     ["培养方案", plan.name],
+    ["院系", plan.college],
+    ["专业", plan.major],
     ["年级", plan.grade],
     ["培养层次", plan.level],
     ["方案类型", plan.type],
@@ -2325,12 +2387,14 @@ function curriculumExportMarkup() {
   ];
   const planMeta = safePlan.map(([label, value]) => `<span class="curriculum-export-meta-item"><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></span>`).join("");
   const summaryMarkup = summary.map(([label, value, meta]) => `<div class="curriculum-summary-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(meta)}</small></div>`).join("");
-  return `<main class="curriculum-export-root"><header class="curriculum-export-header"><p class="eyebrow">ACADEMIC HUB · CURRICULUM</p><h1>培养方案</h1><p>东北大学本科培养方案 · 课程与学分要求</p><div class="curriculum-export-meta">${planMeta}</div></header><div class="curriculum-summary-grid curriculum-export-summary">${summaryMarkup}</div>${curriculumRequirementOverviewMarkup(curriculum.groups, plan, { export: true })}<footer class="curriculum-export-footer">本文件仅包含培养方案结构、学分要求和课程明细，不包含导出人的姓名、学号、账号或其他个人信息。</footer></main>`;
+  return `<main id="curriculumExportRoot" class="curriculum-export-root" data-curriculum-export="full"><header class="curriculum-export-header"><p class="eyebrow">ACADEMIC HUB · CURRICULUM</p><h1>培养方案</h1><p>东北大学本科培养方案 · 课程与学分要求</p><div class="curriculum-export-meta">${planMeta}</div></header><div class="curriculum-summary-grid curriculum-export-summary">${summaryMarkup}</div>${curriculumRequirementOverviewMarkup(curriculum.groups, plan, { export: true })}<footer class="curriculum-export-footer">本文件仅包含培养方案结构、学分要求和课程明细，不包含导出人的姓名、学号、账号或其他个人信息。</footer></main>`;
 }
 
 function curriculumExportPrintCss() {
   return `<style>
-    .curriculum-export-root { width: min(1180px, 100%); margin: 0 auto; padding: 28px 0 42px; }
+    html body { width: auto; min-width: 0; height: auto; min-height: 0; overflow: visible; }
+    body { margin: 0; color: #172033; background: #fff; }
+    .curriculum-export-root { width: min(1180px, 100%); height: auto; min-height: 0; margin: 0 auto; padding: 28px 0 42px; overflow: visible; }
     .curriculum-export-header { margin-bottom: 16px; padding: 24px 28px; color: #fff; background: #264b80; border-radius: 8px; box-shadow: none; }
     .curriculum-export-header .eyebrow { color: #b8d0ff; }
     .curriculum-export-header h1 { margin: 0 0 7px; font-size: 27px; letter-spacing: -.04em; }
@@ -2343,12 +2407,12 @@ function curriculumExportPrintCss() {
     .curriculum-export-summary .curriculum-summary-card { min-height: 82px; padding: 12px 14px; }
     .curriculum-export-summary .curriculum-summary-card strong { margin: 6px 0 3px; font-size: 21px; }
     .curriculum-export-requirement-overview { margin-bottom: 14px; }
-    .curriculum-export-requirement-overview .curriculum-tree-summary { cursor: default; }
-    .curriculum-export-requirement-overview .curriculum-tree-summary::before { color: #6683ba; }
+    .curriculum-export-requirement-overview .curriculum-tree-summary { grid-template-columns: minmax(0, 1fr) minmax(300px, auto); cursor: default; }
+    .curriculum-export-requirement-overview .curriculum-tree-summary::before { display: none; content: none; }
     .curriculum-export-footer { margin-top: 12px; color: #8a97ad; font-size: 10px; line-height: 1.6; text-align: center; }
     @media print {
       @page { size: A4; margin: 11mm 10mm 13mm; }
-      html, body { min-width: 0 !important; background: #fff !important; }
+      html body { width: auto; min-width: 0; height: auto; min-height: 0; overflow: visible; background: #fff; }
       body { color: #172033; font-size: 10px; }
       .curriculum-export-root { width: 100%; margin: 0; padding: 0; }
       .curriculum-export-header { padding: 16px 20px; border-radius: 12px; box-shadow: none; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
@@ -2364,7 +2428,8 @@ function curriculumExportPrintCss() {
       .curriculum-requirement-overview-head h3 { font-size: 13px; }
       .curriculum-requirement-overview-head p { font-size: 9px; }
       .curriculum-tree { gap: 5px; }
-      .curriculum-tree-node { overflow: visible; border-radius: 8px; break-inside: auto; page-break-inside: auto; }
+      .curriculum-tree-node { overflow: visible; border-radius: 6px; break-inside: auto; page-break-inside: auto; }
+      .curriculum-export-requirement-overview > .curriculum-tree > .curriculum-tree-node { break-inside: auto; page-break-inside: auto; }
       .curriculum-tree-summary { padding: 7px 8px; break-after: avoid; page-break-after: avoid; }
       .curriculum-tree-summary::before { width: 11px; font-size: 10px; }
       .curriculum-requirement-title { min-width: 0; }
@@ -2395,31 +2460,85 @@ function curriculumExportPrintCss() {
   </style>`;
 }
 
+function curriculumExportFileName(plan = {}) {
+  const grade = String(plan.grade || String(plan.name || "").match(/20\d{2}/)?.[0] || "").trim();
+  const normalizedGrade = grade && !/级$/.test(grade) ? `${grade}级` : grade;
+  const major = String(plan.major || String(plan.name || "").replace(/^20\d{2}\s*/, "").replace(/专业培养方案.*$/, "").trim() || "培养方案").trim();
+  return ["培养计划", normalizedGrade, major]
+    .filter(Boolean)
+    .join("_")
+    .replace(/[\\/:*?"<>|]/g, "_");
+}
+
 function curriculumExportDocument() {
   const curriculum = state.curriculum;
   const cssUrl = globalThis.chrome?.runtime?.getURL ? chrome.runtime.getURL("dashboard.css") : "dashboard.css";
-  const planTitle = String(curriculum.selectedPlan?.name || "培养方案");
+  const plan = curriculum.selectedPlan || curriculum.plans.find((item) => item.id === curriculum.selectedPlanId) || {};
+  const planTitle = String(plan.name || "培养方案");
   const planName = escapeHtml(planTitle);
+  const fileName = curriculumExportFileName(plan);
   return {
-    html: `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>培养方案 - ${planName}</title><link rel="stylesheet" href="${cssUrl}">${curriculumExportPrintCss()}</head><body>${curriculumExportMarkup()}</body></html>`,
-    title: `培养方案 - ${planTitle}`
+    html: `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(fileName)}</title><link rel="stylesheet" href="${cssUrl}">${curriculumExportPrintCss()}</head><body>${curriculumExportMarkup()}</body></html>`,
+    title: fileName,
+    fileName,
+    planTitle
   };
 }
 
-function exportCurriculumPdf() {
+function setCurriculumExportButtonState(exporting) {
+  const button = elements.content?.querySelector?.('[data-action="export-curriculum-pdf"]');
+  if (!button) return;
+  button.disabled = Boolean(exporting);
+  button.textContent = exporting ? "正在生成…" : "导出 PDF";
+}
+
+async function waitForCurriculumExportRender(printWindow) {
+  const documentRef = printWindow?.document;
+  if (!documentRef) return;
+  try {
+    if (documentRef.fonts?.ready) await documentRef.fonts.ready;
+  } catch {
+    // 字体加载失败不应阻断导出；浏览器会回退到系统字体。
+  }
+  await new Promise((resolve) => {
+    const raf = printWindow.requestAnimationFrame || ((callback) => printWindow.setTimeout(callback, 16));
+    raf(() => raf(resolve));
+  });
+  const root = documentRef.getElementById("curriculumExportRoot");
+  if (root) {
+    root.style.height = "auto";
+    root.style.maxHeight = "none";
+    root.style.overflow = "visible";
+  }
+}
+
+function finishCurriculumExportNotice(text = "") {
+  state.curriculum.exporting = false;
+  setCurriculumExportButtonState(false);
+  if (text) setNotice(text, "success");
+}
+
+async function exportCurriculumPdf() {
   const curriculum = state.curriculum;
+  if (curriculum.exporting) return;
   if (!curriculum.selectedPlan || (!curriculum.groups.length && !curriculum.courses.length)) {
     setNotice("当前没有可导出的培养方案，请先刷新方案。", "error");
     return;
   }
+  // 导出使用独立的、数据驱动的 print DOM；不读取 expanded，也不改写真实页面树。
   const documentData = curriculumExportDocument();
   // Android 走系统打印服务，能直接选择“保存为 PDF”；HTML 仍由同一套
   // dashboard.css 和打印样式生成，避免手机端 window.open 被 WebView 拦截。
   if (typeof globalThis.AndroidApi?.printHtml === "function") {
+    state.curriculum.exporting = true;
+    setCurriculumExportButtonState(true);
+    setNotice("正在生成完整培养计划…");
     try {
       globalThis.AndroidApi.printHtml(documentData.html, documentData.title);
-      setNotice("已打开系统打印面板，请选择“保存为 PDF”。", "success");
+      finishCurriculumExportNotice("已打开系统打印面板，请选择“保存为 PDF”。");
     } catch (error) {
+      state.curriculum.exporting = false;
+      setCurriculumExportButtonState(false);
       setNotice(`打开系统 PDF 导出失败：${error.message || "未知错误"}`, "error");
     }
     return;
@@ -2429,25 +2548,31 @@ function exportCurriculumPdf() {
     setNotice("导出窗口被浏览器拦截，请允许扩展打开新页面后重试。", "error");
     return;
   }
+  state.curriculum.exporting = true;
+  setCurriculumExportButtonState(true);
+  setNotice("正在生成完整培养计划…");
   printWindow.document.open();
   printWindow.document.write(documentData.html);
   printWindow.document.close();
-  setNotice("已打开 PDF 导出页面，请在打印窗口选择“另存为 PDF”。", "success");
   let printTriggered = false;
-  const triggerPrint = () => {
+  const triggerPrint = async () => {
     if (printTriggered) return;
     printTriggered = true;
     try {
+      await waitForCurriculumExportRender(printWindow);
       printWindow.focus();
       printWindow.print();
+      finishCurriculumExportNotice("已打开 PDF 导出页面，请在打印窗口选择“另存为 PDF”。");
     } catch (error) {
+      state.curriculum.exporting = false;
+      setCurriculumExportButtonState(false);
       setNotice(`PDF 导出窗口已打开，但打印功能调用失败：${error.message || "未知错误"}`, "error");
     }
   };
-  printWindow.addEventListener("load", () => window.setTimeout(triggerPrint, 120), { once: true });
+  printWindow.addEventListener("load", () => window.setTimeout(() => { void triggerPrint(); }, 120), { once: true });
   // 扩展页的样式表偶尔会因 WebVPN/浏览器调度延后触发 load；兜底等待
   // 后再打印，避免导出的第一页没有加载 dashboard.css。
-  window.setTimeout(triggerPrint, 900);
+  window.setTimeout(() => { void triggerPrint(); }, 900);
 }
 
 function curriculumCourseDetailMarkup(detail) {
@@ -2480,8 +2605,9 @@ function renderCurriculum() {
   const refreshHint = hasSuspiciousPlan
     ? "当前读取到“智能车辆工程”等与本人专业不符的方案，通常说明教务系统培养方案页面尚未完全加载。请先等待原系统页面完全加载，再点击“刷新方案”。"
     : "如果刷新后出现“智能车辆工程”等明显不属于本人专业的培养方案，通常说明教务系统培养方案页面尚未完全加载；请先等待原系统培养方案页面完全加载，再点击“刷新方案”。";
-  const filterMarkup = `<div class="curriculum-tree-toolbar"><div class="toolbar curriculum-filter-toolbar"><input data-filter="curriculum" value="${escapeHtml(curriculum.filter)}" placeholder="搜索课程名、课程号、类别、性质或课组" /><label class="curriculum-mode-label">性质<select id="curriculumMode"><option value="all" ${curriculum.mode === "all" ? "selected" : ""}>全部课程</option><option value="required" ${curriculum.mode === "required" ? "selected" : ""}>必修</option><option value="elective" ${curriculum.mode === "elective" ? "selected" : ""}>选修</option></select></label><label class="curriculum-mode-label">学期<select id="curriculumSemesterSelect"><option value="all" ${curriculum.semester === "all" ? "selected" : ""}>全部学期</option>${semesterOptions}</select></label><label class="curriculum-pending-label"><input id="curriculumPendingOnly" type="checkbox" ${curriculum.pendingOnly ? "checked" : ""} />只看待完成</label></div><div class="curriculum-tree-actions"><button class="button button-ghost button-small" type="button" data-action="curriculum-expand-all">展开全部</button><button class="button button-ghost button-small" type="button" data-action="curriculum-collapse-all">收起全部</button><span>${escapeHtml(`${courseCount} 门课程${categorySelectedCount ? ` · ${categorySelectedCount} 门通识选修` : ""}`)}</span></div></div>`;
-  return `<div>${sectionHeading("培养计划", "", `<div class="button-row"><button class="button button-primary" type="button" data-action="export-curriculum-pdf">导出 PDF</button></div>`)}<section class="curriculum-plan-control" aria-labelledby="curriculum-plan-title"><div class="curriculum-plan-control-head"><div><span class="curriculum-plan-kicker">当前培养方案</span><h3 id="curriculum-plan-title">${escapeHtml(plan.name || "未命名培养方案")}</h3></div><button class="button button-primary" type="button" data-action="refresh-curriculum">刷新方案</button></div><label class="curriculum-plan-select-label" for="curriculumPlanSelect">选择方案<select id="curriculumPlanSelect">${planOptions || `<option value="">未读取到方案</option>`}</select></label><p class="curriculum-plan-meta">${escapeHtml(planMeta)}</p><p class="curriculum-refresh-hint ${hasSuspiciousPlan ? "is-warning" : ""}" role="note"><strong>刷新提示</strong>${escapeHtml(refreshHint)}</p></section>${curriculumProgressOverviewMarkup(plan, progressMap)}${curriculumRequirementOverviewMarkup(groups, plan, { progressMap, controlsMarkup: filterMarkup })}${curriculum.error ? `<p class="schedule-note curriculum-inline-error">${escapeHtml(curriculum.error)}；下面仍展示已读取到的课程和课组字段。</p>` : ""}${curriculumCourseDetailMarkup(curriculum.courseDetail)}</div>`;
+  const filterMarkup = `<div class="curriculum-tree-toolbar"><div class="toolbar curriculum-filter-toolbar"><input data-filter="curriculum" value="${escapeHtml(curriculum.filter)}" placeholder="搜索课程名、课程号、类别、性质或课组" /><label class="curriculum-mode-label">性质<select id="curriculumMode"><option value="all" ${curriculum.mode === "all" ? "selected" : ""}>全部课程</option><option value="required" ${curriculum.mode === "required" ? "selected" : ""}>必修</option><option value="elective" ${curriculum.mode === "elective" ? "selected" : ""}>选修</option></select></label><label class="curriculum-mode-label">学期<select id="curriculumSemesterSelect"><option value="all" ${curriculum.semester === "all" ? "selected" : ""}>全部学期</option>${semesterOptions}</select></label><label class="curriculum-pending-label"><input id="curriculumPendingOnly" type="checkbox" ${curriculum.pendingOnly ? "checked" : ""} />只看待完成</label><span class="curriculum-tree-filter-count">${escapeHtml(`${courseCount} 门课程${categorySelectedCount ? ` · ${categorySelectedCount} 门通识选修` : ""}`)}</span></div></div>`;
+  const exportLabel = curriculum.exporting ? "正在生成…" : "导出 PDF";
+  return `<div>${sectionHeading("培养计划", "", `<div class="button-row"><button class="button button-primary" type="button" data-action="export-curriculum-pdf" ${curriculum.exporting ? "disabled" : ""}>${exportLabel}</button></div>`)}<section class="curriculum-plan-control" aria-labelledby="curriculum-plan-title"><div class="curriculum-plan-control-head"><div><span class="curriculum-plan-kicker">当前培养方案</span><h3 id="curriculum-plan-title">${escapeHtml(plan.name || "未命名培养方案")}</h3></div><button class="button button-primary" type="button" data-action="refresh-curriculum">刷新方案</button></div><label class="curriculum-plan-select-label" for="curriculumPlanSelect">选择方案<select id="curriculumPlanSelect">${planOptions || `<option value="">未读取到方案</option>`}</select></label><p class="curriculum-plan-meta">${escapeHtml(planMeta)}</p><p class="curriculum-refresh-hint ${hasSuspiciousPlan ? "is-warning" : ""}" role="note"><strong>刷新提示</strong>${escapeHtml(refreshHint)}</p></section>${curriculumProgressOverviewMarkup(plan, progressMap)}${curriculumRequirementOverviewMarkup(groups, plan, { progressMap, controlsMarkup: filterMarkup })}${curriculum.error ? `<p class="schedule-note curriculum-inline-error">${escapeHtml(curriculum.error)}；下面仍展示已读取到的课程和课组字段。</p>` : ""}${curriculumCourseDetailMarkup(curriculum.courseDetail)}</div>`;
 }
 
 function normalizeScoreStatus(raw) {
@@ -7468,6 +7594,7 @@ elements.content.addEventListener("click", async (event) => {
           ...(state.curriculum.expanded || {}),
           [treeNode.dataset.curriculumKey]: Boolean(treeNode.open)
         };
+        syncCurriculumTreeBulkAction();
       }, 0);
     }
   }
@@ -7635,7 +7762,7 @@ elements.content.addEventListener("click", async (event) => {
   }
   if (action === "curriculum-expand-all" || action === "curriculum-collapse-all") {
     const open = action === "curriculum-expand-all";
-    state.curriculum.expanded = Object.fromEntries(curriculumFilteredGroups().map((group) => [curriculumGroupIdentity(group), open]));
+    state.curriculum.expanded = Object.fromEntries(curriculumTreeKeys(state.curriculum.groups).map((key) => [key, open]));
     render();
     return;
   }
