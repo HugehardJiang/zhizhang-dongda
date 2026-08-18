@@ -5446,9 +5446,16 @@ function localScheduleTermOptionsMarkup(selected = state.termCode) {
   return terms.map((term) => `<option value="${escapeHtml(term.code)}" ${term.code === selected ? "selected" : ""}>${escapeHtml(term.name || term.code)}</option>`).join("");
 }
 
-function localScheduleSectionOptions(selected = null, placeholder = "不指定") {
+function localScheduleSectionOptions(selected = null, placeholder = "不指定", minimum = null) {
   const max = Math.max(12, ...schoolPersonalScheduleRows(state.data.courses || []).map((course) => courseSectionRange(course)?.end || 0));
-  return `<option value="" ${selected === null || selected === "" ? "selected" : ""}>${placeholder}</option>${Array.from({ length: max }, (_, index) => index + 1).map((value) => `<option value="${value}" ${Number(selected) === value ? "selected" : ""}>第${value}节</option>`).join("")}`;
+  const selectedNumber = localScheduleInteger(selected, null);
+  const minimumNumber = localScheduleInteger(minimum, null);
+  const selectedPlaceholder = selectedNumber === null || (minimumNumber !== null && selectedNumber < minimumNumber);
+  const options = Array.from({ length: max }, (_, index) => index + 1)
+    .filter((value) => minimumNumber === null || value >= minimumNumber)
+    .map((value) => `<option value="${value}" ${selectedNumber === value ? "selected" : ""}>第${value}节</option>`)
+    .join("");
+  return `<option value="" ${selectedPlaceholder ? "selected" : ""}>${placeholder}</option>${options}`;
 }
 
 function localScheduleEditorMarkup() {
@@ -5468,8 +5475,8 @@ function localScheduleEditorMarkup() {
     .map((week) => `<label class="local-week-option"><input type="checkbox" data-local-week value="${week}" ${weeks.has(week) ? "checked" : ""} />${week}</label>`).join("");
   const termOptions = localScheduleTermOptionsMarkup(draft.termCode || state.termCode);
   const colorOptions = LOCAL_SCHEDULE_COLOR_KEYS.map((key) => `<label class="local-color-option local-color-${key}"><input type="radio" name="localColorKey" value="${key}" ${draft.colorKey === key ? "checked" : ""} /><span></span></label>`).join("");
-  const courseForm = `<div class="local-editor-section"><h4>上课时间</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>课程名称 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：自动控制补课" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>星期 <em>*</em></span><select id="localWeekday"><option value="">请选择星期</option>${["周日", "周一", "周二", "周三", "周四", "周五", "周六"].map((name, index) => `<option value="${index}" ${course.weekdayIndex === index ? "selected" : ""}>${name}</option>`).join("")}</select></label><label class="local-form-field"><span>开始节次 <em>*</em></span><select id="localStartSection">${localScheduleSectionOptions(course.startSection, "请选择")}</select></label><label class="local-form-field"><span>结束节次 <em>*</em></span><select id="localEndSection">${localScheduleSectionOptions(course.endSection, "请选择")}</select></label></div><div class="local-week-builder"><strong>重复周次 <em>*</em></strong><div class="local-week-range"><label>起始周<input id="localWeekStart" type="number" min="1" max="60" value="${escapeHtml(minWeek)}" /></label><label>结束周<input id="localWeekEnd" type="number" min="1" max="60" value="${escapeHtml(maxWeek)}" /></label><label>重复<select id="localWeekRepeat"><option value="every" ${repeatValue === "every" ? "selected" : ""}>每周</option><option value="odd" ${repeatValue === "odd" ? "selected" : ""}>单周</option><option value="even" ${repeatValue === "even" ? "selected" : ""}>双周</option><option value="custom" ${repeatValue === "custom" ? "selected" : ""}>自定义周次</option></select></label></div><details class="local-custom-weeks" ${repeatValue === "custom" ? "open" : ""}><summary>自定义周次（可选）</summary><div class="local-week-options">${weekCheckboxes}</div></details></div></div><div class="local-editor-section"><h4>课程信息</h4><div class="local-form-grid"><label class="local-form-field"><span>教师</span><input id="localTeacher" value="${escapeHtml(draft.teacher)}" placeholder="可选" /></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(course.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(course.endTime || "")}" /></label><label class="local-form-field local-form-wide"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label></div></div>`;
-  const eventForm = `<div class="local-editor-section"><h4>日程信息</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>标题 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：摄影社例会" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>日期 <em>*</em></span><input id="localEventDate" type="date" value="${escapeHtml(event.date || "")}" /></label><label class="local-form-check local-form-wide"><input id="localEventAllDay" type="checkbox" ${event.allDay ? "checked" : ""} /><span>全天日程（不参与时间冲突判断）</span></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(event.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(event.endTime || "")}" /></label><label class="local-form-field"><span>开始节次（可选）</span><select id="localStartSection">${localScheduleSectionOptions(event.startSection, "不指定")}</select></label><label class="local-form-field"><span>结束节次（可选）</span><select id="localEndSection">${localScheduleSectionOptions(event.endSection, "不指定")}</select></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label><p class="local-form-help local-form-wide">一次性日程会按日期显示，即使尚未设置教学周。</p></div></div>`;
+  const courseForm = `<div class="local-editor-section"><h4>上课时间</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>课程名称 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：自动控制补课" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>星期 <em>*</em></span><select id="localWeekday"><option value="">请选择星期</option>${["周日", "周一", "周二", "周三", "周四", "周五", "周六"].map((name, index) => `<option value="${index}" ${course.weekdayIndex === index ? "selected" : ""}>${name}</option>`).join("")}</select></label><label class="local-form-field"><span>开始节次 <em>*</em></span><select id="localStartSection">${localScheduleSectionOptions(course.startSection, "请选择")}</select></label><label class="local-form-field"><span>结束节次 <em>*</em></span><select id="localEndSection">${localScheduleSectionOptions(course.endSection, "请选择", course.startSection)}</select></label></div><div class="local-week-builder"><strong>重复周次 <em>*</em></strong><div class="local-week-range"><label>起始周<input id="localWeekStart" type="number" min="1" max="60" value="${escapeHtml(minWeek)}" /></label><label>结束周<input id="localWeekEnd" type="number" min="1" max="60" value="${escapeHtml(maxWeek)}" /></label><label>重复<select id="localWeekRepeat"><option value="every" ${repeatValue === "every" ? "selected" : ""}>每周</option><option value="odd" ${repeatValue === "odd" ? "selected" : ""}>单周</option><option value="even" ${repeatValue === "even" ? "selected" : ""}>双周</option><option value="custom" ${repeatValue === "custom" ? "selected" : ""}>自定义周次</option></select></label></div><details class="local-custom-weeks" ${repeatValue === "custom" ? "open" : ""}><summary>自定义周次（可选）</summary><div class="local-week-options">${weekCheckboxes}</div></details></div></div><div class="local-editor-section"><h4>课程信息</h4><div class="local-form-grid"><label class="local-form-field"><span>教师</span><input id="localTeacher" value="${escapeHtml(draft.teacher)}" placeholder="可选" /></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(course.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(course.endTime || "")}" /></label><label class="local-form-field local-form-wide"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label></div></div>`;
+  const eventForm = `<div class="local-editor-section"><h4>日程信息</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>标题 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：摄影社例会" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>日期 <em>*</em></span><input id="localEventDate" type="date" value="${escapeHtml(event.date || "")}" /></label><label class="local-form-check local-form-wide"><input id="localEventAllDay" type="checkbox" ${event.allDay ? "checked" : ""} /><span>全天日程（不参与时间冲突判断）</span></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(event.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(event.endTime || "")}" /></label><label class="local-form-field"><span>开始节次（可选）</span><select id="localStartSection">${localScheduleSectionOptions(event.startSection, "未指定")}</select></label><label class="local-form-field"><span>结束节次（可选）</span><select id="localEndSection">${localScheduleSectionOptions(event.endSection, "未指定", event.startSection)}</select></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label><p class="local-form-help local-form-wide">一次性日程会按日期显示，即使尚未设置教学周。</p></div></div>`;
   return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-editor-modal" role="dialog" aria-modal="true" aria-label="${type === "event" ? "编辑本地日程" : "编辑本地课程"}"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${draft.id && state.localSchedule.editingId ? "编辑安排" : "添加安排"}</h3><p class="muted">内容只保存在本机，不会写入教务系统或上传到服务器。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-editor">关闭</button></div><div class="local-editor-tabs"><button class="button button-small ${type === "course" ? "button-primary" : "button-ghost"}" type="button" data-action="local-editor-type" data-local-type="course">课程</button><button class="button button-small ${type === "event" ? "button-primary" : "button-ghost"}" type="button" data-action="local-editor-type" data-local-type="event">日程</button></div>${type === "course" ? courseForm : eventForm}<div class="local-editor-section"><h4>颜色</h4><div class="local-color-options">${colorOptions}</div></div>${state.localSchedule.editorError ? `<p class="local-form-error" role="alert">${escapeHtml(state.localSchedule.editorError)}</p>` : ""}<div class="schedule-export-actions"><button class="button button-ghost" type="button" data-action="close-local-editor">取消</button><button class="button button-primary" type="button" data-action="save-local-schedule">保存安排</button></div></section></div>`;
 }
 
@@ -5487,12 +5494,24 @@ function localScheduleConflictMarkup() {
   if (!conflict) return "";
   const candidate = conflict.candidate;
   const candidateText = localScheduleItemDisplayText(candidate).schedule;
+  const confirmed = conflict.conflicts.filter((item) => item.status === SCHEDULE_COLLISION_STATUS.CONFIRMED);
+  const possible = conflict.conflicts.filter((item) => item.status === SCHEDULE_COLLISION_STATUS.POSSIBLE);
   const list = conflict.conflicts.map((item) => {
     const existing = item.existingItem || item.existing;
     const label = existing?.source === "local" ? "自定义安排" : "教务课程";
-    return `<article class="local-conflict-row"><div><strong>${escapeHtml(existing?.name || existing?.title || "未命名安排")}</strong><span>${escapeHtml(label)} · ${escapeHtml(item.certain ? "确定冲突" : `可能冲突：${(item.missing || []).join("、")}`)}</span></div><small>${escapeHtml(existing?.source === "local" ? localScheduleItemDisplayText(existing).schedule : courseTransferScheduleText(existing))}</small></article>`;
+    const statusText = item.status === SCHEDULE_COLLISION_STATUS.CONFIRMED
+      ? "确定冲突"
+      : `可能重叠：${(item.reasons || []).join("、") || "时间信息不足"}`;
+    return `<article class="local-conflict-row"><div><strong>${escapeHtml(existing?.name || existing?.title || "未命名安排")}</strong><span>${escapeHtml(label)} · ${escapeHtml(statusText)}</span></div><small>${escapeHtml(existing?.source === "local" ? localScheduleItemDisplayText(existing).schedule : courseTransferScheduleText(existing))}</small></article>`;
   }).join("");
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-conflict-modal" role="dialog" aria-modal="true" aria-label="发现时间冲突"><div class="detail-modal-head"><div><p class="eyebrow">SCHEDULE CONFLICT</p><h3>发现 ${conflict.conflicts.length} 项时间冲突</h3><p class="muted">你添加的安排：${escapeHtml(candidate.title)} · ${escapeHtml(candidateText)}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-conflict">关闭</button></div><div class="local-conflict-list">${list}</div><div class="local-conflict-choice"><strong>如何处理？</strong><p>默认不会自动隐藏任何课程；“仅保留新安排”只会在本地组合课表隐藏教务排课。</p><div class="local-conflict-actions"><button class="button button-ghost" type="button" data-action="resolve-local-conflict" data-conflict-choice="existing">保留现有安排</button><button class="button button-primary" type="button" data-action="resolve-local-conflict" data-conflict-choice="both">同时保留</button><button class="button button-soft" type="button" data-action="resolve-local-conflict" data-conflict-choice="new">仅保留新安排<br /><small>本地隐藏冲突教务课程</small></button></div></div></section></div>`;
+  const heading = confirmed.length ? `发现 ${confirmed.length} 项确定冲突` : "时间信息不足，暂不能确认冲突";
+  const summary = confirmed.length
+    ? `${possible.length ? `另有 ${possible.length} 项可能重叠，但不会显示为确定冲突。` : ""} 默认不会自动隐藏任何课程；“仅保留新安排”只针对确定冲突。`
+    : `有 ${possible.length} 项安排可能重叠，但缺少教学周、结束时间或其他信息，无法确认。可以直接保存，不会隐藏任何课程。`;
+  const actions = confirmed.length
+    ? `<div class="local-conflict-actions"><button class="button button-ghost" type="button" data-action="resolve-local-conflict" data-conflict-choice="existing">保留现有安排</button><button class="button button-primary" type="button" data-action="resolve-local-conflict" data-conflict-choice="both">同时保留</button><button class="button button-soft" type="button" data-action="resolve-local-conflict" data-conflict-choice="new">仅保留新安排<br /><small>仅隐藏确定冲突的教务课程</small></button></div>`
+    : `<div class="local-conflict-actions"><button class="button button-primary" type="button" data-action="resolve-local-conflict" data-conflict-choice="both">仍然保存</button></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-conflict-modal" role="dialog" aria-modal="true" aria-label="${confirmed.length ? "发现时间冲突" : "时间信息不足"}"><div class="detail-modal-head"><div><p class="eyebrow">SCHEDULE CONFLICT</p><h3>${heading}</h3><p class="muted">你添加的安排：${escapeHtml(candidate.title)} · ${escapeHtml(candidateText)}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-conflict">关闭</button></div><div class="local-conflict-list">${list}</div><div class="local-conflict-choice"><strong>如何处理？</strong><p>${summary}</p>${actions}</div></section></div>`;
 }
 
 function localScheduleModalMarkup() {
@@ -5500,7 +5519,8 @@ function localScheduleModalMarkup() {
 }
 
 function localScheduleRowHasConflict(row, rows = mergedPersonalScheduleRows()) {
-  return rows.some((candidate) => candidate !== row && compareScheduleItemsOverlap(row, candidate).overlap);
+  return rows.some((candidate) => candidate !== row
+    && compareScheduleItemsOverlap(row, candidate).status === SCHEDULE_COLLISION_STATUS.CONFIRMED);
 }
 
 function renderDailyScheduleWithLocalOverlay(rows, scope = "personal") {
@@ -5805,6 +5825,21 @@ function localScheduleInputValue(id) {
   return document.getElementById(id)?.value || "";
 }
 
+function syncLocalScheduleEndSectionSelect(startValue = localScheduleInputValue("localStartSection")) {
+  const endSelect = document.getElementById("localEndSection");
+  if (!endSelect) return;
+  const start = localScheduleInteger(startValue, null);
+  [...endSelect.options].forEach((option) => {
+    option.hidden = Boolean(start && option.value && Number(option.value) < start);
+  });
+  if (!start) {
+    endSelect.value = "";
+    return;
+  }
+  if (endSelect.value && Number(endSelect.value) < start) endSelect.value = "";
+  if (!endSelect.value) endSelect.value = String(start);
+}
+
 function localScheduleFormCandidate() {
   const draft = state.localSchedule.draft || localScheduleDraftFromItem(null, "course");
   const type = draft.type === "event" ? "event" : "course";
@@ -5887,14 +5922,32 @@ function findLocalScheduleConflicts(candidate) {
     : [];
   schoolRows.filter((row) => !hidden.has(schoolScheduleOccurrenceKey(row))).forEach((existing) => {
     const overlap = compareScheduleItemsOverlap(candidateRow, existing);
-    if (overlap.overlap) conflicts.push({ existing, existingItem: null, certain: overlap.certain, missing: overlap.missing || [] });
+    if (overlap.status !== SCHEDULE_COLLISION_STATUS.NONE) {
+      conflicts.push({
+        existing,
+        existingItem: null,
+        status: overlap.status,
+        reason: overlap.reason,
+        reasons: overlap.reasons || [],
+        evidence: overlap.evidence || {}
+      });
+    }
   });
   (state.localSchedule.items || [])
     .filter((item) => item.termCode === candidate.termCode && item.id !== candidate.id && item.enabled !== false)
     .forEach((existingItem) => {
       const existing = localScheduleItemToCourseRow(existingItem);
       const overlap = compareScheduleItemsOverlap(candidateRow, existing);
-      if (overlap.overlap) conflicts.push({ existing, existingItem, certain: overlap.certain, missing: overlap.missing || [] });
+      if (overlap.status !== SCHEDULE_COLLISION_STATUS.NONE) {
+        conflicts.push({
+          existing,
+          existingItem,
+          status: overlap.status,
+          reason: overlap.reason,
+          reasons: overlap.reasons || [],
+          evidence: overlap.evidence || {}
+        });
+      }
     });
   return conflicts;
 }
@@ -5911,7 +5964,7 @@ async function commitLocalSchedule(candidate, choice = "both") {
   }
   const nextItems = (state.localSchedule.items || []).filter((item) => item.id !== candidate.id);
   if (choice === "new") {
-    conflicts.forEach((conflict) => {
+    conflicts.filter((conflict) => conflict.status === SCHEDULE_COLLISION_STATUS.CONFIRMED).forEach((conflict) => {
       if (conflict.existingItem) {
         const old = nextItems.find((item) => item.id === conflict.existingItem.id);
         if (old) old.enabled = false;
@@ -6468,10 +6521,12 @@ function parseCourseTransferText(text) {
 function scheduleSectionsOverlap(left, right) {
   const leftRange = courseSectionRange(left);
   const rightRange = courseSectionRange(right);
-  if (!leftRange || !rightRange) return { overlap: true, certain: false };
+  if (!leftRange || !rightRange) return { status: "possible", reason: "section-unknown", reasons: ["节次"] };
+  const overlap = leftRange.start <= rightRange.end && rightRange.start <= leftRange.end;
   return {
-    overlap: leftRange.start <= rightRange.end && rightRange.start <= leftRange.end,
-    certain: true
+    status: overlap ? "confirmed" : "none",
+    reason: overlap ? "section-overlap" : "section-separated",
+    reasons: []
   };
 }
 
@@ -6479,22 +6534,26 @@ function compareCourseScheduleOverlap(left, right) {
   const leftDay = courseDayIndex(left);
   const rightDay = courseDayIndex(right);
   const dayKnown = leftDay >= 0 && rightDay >= 0;
-  if (dayKnown && leftDay !== rightDay) return { overlap: false, certain: true, missing: [] };
+  if (dayKnown && leftDay !== rightDay) return { status: "none", reason: "weekday-separated", reasons: [] };
 
   const leftWeeks = courseWeekNumbers(left);
   const rightWeeks = courseWeekNumbers(right);
   const weeksKnown = leftWeeks.size > 0 && rightWeeks.size > 0;
   if (weeksKnown && ![...leftWeeks].some((week) => rightWeeks.has(week))) {
-    return { overlap: false, certain: true, missing: [] };
+    return { status: "none", reason: "week-separated", reasons: [] };
   }
 
   const section = scheduleSectionsOverlap(left, right);
-  if (!section.overlap) return { overlap: false, certain: true, missing: [] };
-  const missing = [];
-  if (!dayKnown) missing.push("星期");
-  if (!weeksKnown) missing.push("周次");
-  if (!section.certain) missing.push("节次");
-  return { overlap: true, certain: dayKnown && weeksKnown && section.certain, missing };
+  if (section.status === "none") return { status: "none", reason: section.reason, reasons: [] };
+  const reasons = [];
+  if (!dayKnown) reasons.push("星期");
+  if (!weeksKnown) reasons.push("周次");
+  reasons.push(...(section.reasons || []));
+  return {
+    status: dayKnown && weeksKnown && section.status === "confirmed" ? "confirmed" : "possible",
+    reason: section.reason,
+    reasons
+  };
 }
 
 function courseTransferScheduleText(course) {
@@ -6526,9 +6585,16 @@ function analyzeCourseTransferCollisions(importedCourses) {
   importedCourses.forEach((imported) => {
     currentCourses.forEach((existing) => {
       const overlap = compareCourseScheduleOverlap(imported, existing);
-      if (!overlap.overlap) return;
-      const item = { imported, existing, missing: overlap.missing };
-      if (overlap.certain) conflicts.push(item);
+      if (overlap.status === SCHEDULE_COLLISION_STATUS.NONE) return;
+      const item = {
+        imported,
+        existing,
+        status: overlap.status,
+        reason: overlap.reason,
+        reasons: overlap.reasons || [],
+        missing: overlap.reasons || []
+      };
+      if (overlap.status === SCHEDULE_COLLISION_STATUS.CONFIRMED) conflicts.push(item);
       else possible.push(item);
     });
   });
@@ -7762,7 +7828,7 @@ function renderSelectableCourseRowsTable(rows, includeDetail = false, scope = "a
 function renderCourseTransferCollisionResult(result) {
   if (!result) return "";
   const conflictItems = result.conflicts.map((item) => `<article class="course-collision-item course-collision-certain"><div class="course-collision-head"><span class="tag warn">确定冲突</span><strong>${escapeHtml(item.imported.name || "导入课程")}</strong><span>与</span><strong>${escapeHtml(item.existing.name || "当前课表课程")}</strong></div><p>导入课程：${escapeHtml(courseTransferBrief(item.imported))}</p><p>当前课表课程：${escapeHtml(courseTransferBrief(item.existing))}</p></article>`).join("");
-  const possibleItems = result.possible.map((item) => `<article class="course-collision-item course-collision-possible"><div class="course-collision-head"><span class="tag">可能冲突</span><strong>${escapeHtml(item.imported.name || "导入课程")}</strong><span>与</span><strong>${escapeHtml(item.existing.name || "当前课表课程")}</strong></div><p>导入课程：${escapeHtml(courseTransferBrief(item.imported))}</p><p>当前课表课程：${escapeHtml(courseTransferBrief(item.existing))}</p><small>因${escapeHtml(item.missing.join("、") || "排课字段") }未完整返回，已按保守规则提示，请结合原系统确认。</small></article>`).join("");
+  const possibleItems = result.possible.map((item) => `<article class="course-collision-item course-collision-possible"><div class="course-collision-head"><span class="tag">可能冲突</span><strong>${escapeHtml(item.imported.name || "导入课程")}</strong><span>与</span><strong>${escapeHtml(item.existing.name || "当前课表课程")}</strong></div><p>导入课程：${escapeHtml(courseTransferBrief(item.imported))}</p><p>当前课表课程：${escapeHtml(courseTransferBrief(item.existing))}</p><small>因${escapeHtml((item.reasons || item.missing || []).join("、") || "排课字段") }未完整返回，已按保守规则提示，请结合原系统确认。</small></article>`).join("");
   const summary = `<div class="course-collision-summary"><div><span>导入课程</span><strong>${result.importedCount}</strong></div><div><span>确定冲突</span><strong class="collision-number-danger">${result.conflicts.length}</strong></div><div><span>可能冲突</span><strong class="collision-number-warn">${result.possible.length}</strong></div><div><span>当前课表课程</span><strong>${result.referenceCount}</strong></div></div>`;
   const empty = !result.conflicts.length && !result.possible.length
     ? `<div class="course-collision-empty"><strong>没有发现时间重叠</strong><span>已按周次、星期和节次范围与“${escapeHtml(result.referenceLabel)}”逐条比较。</span></div>`
@@ -8744,6 +8810,7 @@ function localScheduleDate(value) {
 }
 
 function localScheduleInteger(value, fallback = null) {
+  if (value === null || value === undefined || String(value).trim() === "") return fallback;
   const number = Number(value);
   return Number.isInteger(number) ? number : fallback;
 }
@@ -8768,6 +8835,7 @@ function normalizeLocalScheduleItem(raw = {}, options = {}) {
   const now = localScheduleNow();
   const course = raw.course && typeof raw.course === "object" ? raw.course : {};
   const event = raw.event && typeof raw.event === "object" ? raw.event : {};
+  const schedule = type === "event" ? event : course;
   const termCode = localScheduleTrim(raw.termCode || options.termCode || state.termCode, 80);
   const sourceWeeks = course.weekNumbers ?? raw.weekNumbers ?? raw.weeks;
   const weekdayValue = course.weekdayIndex ?? raw.weekdayIndex ?? raw.weekday;
@@ -8776,12 +8844,14 @@ function normalizeLocalScheduleItem(raw = {}, options = {}) {
     const parsedDay = parseDay(weekdayValue);
     weekdayIndex = parsedDay ? (parsedDay === 7 ? 0 : parsedDay) : null;
   }
-  const startSection = localScheduleInteger(course.startSection ?? raw.startSection ?? event.startSection, null);
-  const endSection = localScheduleInteger(course.endSection ?? raw.endSection ?? event.endSection, null);
+  const startSection = localScheduleInteger(schedule.startSection ?? raw.startSection, null);
+  const endSection = localScheduleInteger(schedule.endSection ?? raw.endSection, null);
   const normalizedStartSection = startSection && startSection > 0 ? startSection : null;
-  const normalizedEndSection = endSection && endSection > 0 ? endSection : null;
-  const startTime = localScheduleTime(course.startTime ?? event.startTime ?? raw.startTime);
-  const endTime = localScheduleTime(course.endTime ?? event.endTime ?? raw.endTime);
+  // 结束节次单独存在没有语义；保持可选字段的 canonical null，避免旧数据
+  // 或表单空值在后续比较中被当成一节真实排课。
+  const normalizedEndSection = normalizedStartSection && endSection && endSection > 0 ? endSection : null;
+  const startTime = localScheduleTime(schedule.startTime ?? raw.startTime);
+  const endTime = localScheduleTime(schedule.endTime ?? raw.endTime);
   const item = {
     id: localScheduleTrim(raw.id, 120) || localScheduleId(),
     source: "local",
@@ -8822,12 +8892,20 @@ function normalizeLocalScheduleItem(raw = {}, options = {}) {
 
 function localScheduleDraftFromItem(item = null, type = "course") {
   if (!item) {
-    return normalizeLocalScheduleItem({
+    const base = {
       type,
       termCode: state.termCode,
-      termName: localScheduleTermName(state.termCode),
-      course: { weekNumbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], weekdayIndex: 1, startSection: 1, endSection: 2 },
-      event: { date: localScheduleDate(new Date()), allDay: false }
+      termName: localScheduleTermName(state.termCode)
+    };
+    if (type === "event") {
+      return normalizeLocalScheduleItem({
+        ...base,
+        event: { date: localScheduleDate(new Date()), allDay: false, startSection: null, endSection: null }
+      });
+    }
+    return normalizeLocalScheduleItem({
+      ...base,
+      course: { weekNumbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], weekdayIndex: 1, startSection: 1, endSection: 2 }
     });
   }
   return normalizeLocalScheduleItem(JSON.parse(JSON.stringify(item)));
@@ -9061,14 +9139,56 @@ function resolveScheduleItemFromAction(element) {
   return Number.isInteger(index) ? courseAtScopeIndex(scope, index) : null;
 }
 
+const SCHEDULE_COLLISION_STATUS = Object.freeze({
+  NONE: "none",
+  POSSIBLE: "possible",
+  CONFIRMED: "confirmed"
+});
+
+function scheduleCollisionResult(status, reason, reasons = [], evidence = {}) {
+  return {
+    status,
+    reason,
+    reasons: [...new Set(reasons.filter(Boolean))],
+    evidence
+  };
+}
+
+function scheduleClockRangeFromText(value) {
+  const matches = String(value ?? "").match(/\d{1,2}:\d{2}/g) || [];
+  const start = matches[0] ? overviewClockMinutes(matches[0]) : null;
+  const end = matches[1] ? overviewClockMinutes(matches[1]) : null;
+  return {
+    start,
+    end,
+    startText: matches[0] || "",
+    endText: matches[1] || "",
+    hasStart: start !== null,
+    hasEnd: end !== null,
+    hasRange: start !== null && end !== null && end > start
+  };
+}
+
 function localScheduleClockRange(item) {
-  const row = item?.source === "local" ? item : localScheduleItemToCourseRow(item);
-  const value = row?.startTime && row?.endTime
-    ? `${row.startTime}-${row.endTime}`
-    : row?.time;
-  const match = String(value || "").match(/(\d{1,2}:\d{2})[-–](\d{1,2}:\d{2})/);
-  if (!match) return { start: null, end: null, startText: "", endText: "" };
-  return { start: overviewClockMinutes(match[1]), end: overviewClockMinutes(match[2]), startText: match[1], endText: match[2] };
+  const row = item?.source === "local" && item?.localType
+    ? item
+    : item?.source === "local"
+      ? localScheduleItemToCourseRow(item)
+      : item;
+  const directStart = overviewClockMinutes(row?.startTime);
+  const directEnd = overviewClockMinutes(row?.endTime);
+  if (directStart !== null || directEnd !== null) {
+    return {
+      start: directStart,
+      end: directEnd,
+      startText: row?.startTime || "",
+      endText: row?.endTime || "",
+      hasStart: directStart !== null,
+      hasEnd: directEnd !== null,
+      hasRange: directStart !== null && directEnd !== null && directEnd > directStart
+    };
+  }
+  return scheduleClockRangeFromText([row?.time, row?.detail, rawScheduleText(row?.raw)].filter(Boolean).join(" "));
 }
 
 function scheduleItemIsEvent(item) {
@@ -9084,73 +9204,172 @@ function scheduleItemSectionRange(item) {
   return courseSectionRange(item);
 }
 
-function compareScheduleClockOverlap(left, right) {
+function scheduleCollisionOccurrenceForDate(item, date) {
+  const normalized = normalizeCalendarDate(date);
+  if (!normalized) return { status: "unknown", reason: "date-unknown", reasons: ["日期"] };
+  const day = courseDayIndex(item);
+  if (day < 0) return { status: "unknown", reason: "weekday-unknown", reasons: ["星期"] };
+  if (day !== normalized.getDay()) return { status: "none", reason: "weekday-separated", reasons: [] };
+  const info = academicDayInfo(normalized);
+  const weeks = courseWeekNumbers(item);
+  if (info.week === null) return { status: "unknown", reason: "week-unknown", reasons: ["教学周"] };
+  if (!weeks.size) return { status: "unknown", reason: "course-weeks-unknown", reasons: ["周次"] };
+  if (!weeks.has(info.week)) return { status: "none", reason: "week-separated", reasons: [] };
+  return { status: "match", reason: "occurs-on-date", reasons: [] };
+}
+
+function scheduleCollisionOccurrence(left, right) {
+  const leftEvent = scheduleItemIsEvent(left);
+  const rightEvent = scheduleItemIsEvent(right);
+  if (leftEvent && rightEvent) {
+    const leftDate = scheduleItemDate(left);
+    const rightDate = scheduleItemDate(right);
+    if (!leftDate || !rightDate) return { status: "unknown", reason: "date-unknown", reasons: ["日期"] };
+    return localScheduleDate(leftDate) === localScheduleDate(rightDate)
+      ? { status: "match", reason: "same-date", reasons: [] }
+      : { status: "none", reason: "date-separated", reasons: [] };
+  }
+  if (leftEvent || rightEvent) {
+    const event = leftEvent ? left : right;
+    const recurring = leftEvent ? right : left;
+    const eventDate = scheduleItemDate(event);
+    if (!eventDate) return { status: "unknown", reason: "date-unknown", reasons: ["日期"] };
+    return scheduleCollisionOccurrenceForDate(recurring, eventDate);
+  }
+
+  const leftDay = courseDayIndex(left);
+  const rightDay = courseDayIndex(right);
+  if (leftDay >= 0 && rightDay >= 0 && leftDay !== rightDay) {
+    return { status: "none", reason: "weekday-separated", reasons: [] };
+  }
+  const reasons = [];
+  if (leftDay < 0 || rightDay < 0) reasons.push("星期");
+  const leftWeeks = courseWeekNumbers(left);
+  const rightWeeks = courseWeekNumbers(right);
+  if (leftWeeks.size && rightWeeks.size) {
+    if (![...leftWeeks].some((week) => rightWeeks.has(week))) {
+      return { status: "none", reason: "week-separated", reasons: [] };
+    }
+  } else {
+    reasons.push("周次");
+  }
+  return reasons.length
+    ? { status: "unknown", reason: "recurrence-unknown", reasons }
+    : { status: "match", reason: "same-occurrence", reasons: [] };
+}
+
+function scheduleCollisionClock(left, right) {
   const leftRange = localScheduleClockRange(left);
   const rightRange = localScheduleClockRange(right);
-  if (leftRange.start !== null && leftRange.end !== null && rightRange.start !== null && rightRange.end !== null) {
-    return { overlap: leftRange.start < rightRange.end && rightRange.start < leftRange.end, certain: true, missing: [] };
+  const evidence = { left: leftRange, right: rightRange };
+  if (leftRange.hasRange && rightRange.hasRange) {
+    const overlap = leftRange.start < rightRange.end && rightRange.start < leftRange.end;
+    return {
+      ...scheduleCollisionResult(
+        overlap ? SCHEDULE_COLLISION_STATUS.CONFIRMED : SCHEDULE_COLLISION_STATUS.NONE,
+        overlap ? "clock-overlap" : "clock-separated",
+        [],
+        evidence
+      ),
+      complete: true
+    };
   }
-  return { overlap: true, certain: false, missing: ["具体时间"] };
+  if (!leftRange.hasStart && !rightRange.hasStart) return null;
+  if (leftRange.hasStart && rightRange.hasStart) {
+    if (!leftRange.hasRange && !rightRange.hasRange) {
+      return {
+        ...scheduleCollisionResult(
+          leftRange.start === rightRange.start ? SCHEDULE_COLLISION_STATUS.POSSIBLE : SCHEDULE_COLLISION_STATUS.NONE,
+          leftRange.start === rightRange.start ? "same-start-time-incomplete" : "start-times-separated",
+          leftRange.start === rightRange.start ? ["结束时间"] : [],
+          evidence
+        ),
+        complete: false
+      };
+    }
+    const range = leftRange.hasRange ? leftRange : rightRange;
+    const point = leftRange.hasRange ? rightRange.start : leftRange.start;
+    if (point < range.start || point >= range.end) {
+      return { ...scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, "clock-point-separated", [], evidence), complete: false };
+    }
+    return { ...scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.POSSIBLE, "clock-incomplete", ["结束时间"], evidence), complete: false };
+  }
+  return { ...scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.POSSIBLE, "clock-incomplete", ["具体时间"], evidence), complete: false };
+}
+
+function scheduleCollisionSections(left, right) {
+  const leftRange = scheduleItemSectionRange(left);
+  const rightRange = scheduleItemSectionRange(right);
+  if (!leftRange || !rightRange) return null;
+  const overlap = leftRange.start <= rightRange.end && rightRange.start <= leftRange.end;
+  return scheduleCollisionResult(
+    overlap ? SCHEDULE_COLLISION_STATUS.CONFIRMED : SCHEDULE_COLLISION_STATUS.NONE,
+    overlap ? "section-overlap" : "section-separated",
+    [],
+    { left: leftRange, right: rightRange }
+  );
 }
 
 function compareScheduleItemsOverlap(left, right) {
   const leftEvent = scheduleItemIsEvent(left);
   const rightEvent = scheduleItemIsEvent(right);
   if ((leftEvent && left.localAllDay) || (rightEvent && right.localAllDay)) {
-    return { overlap: false, certain: true, missing: [] };
-  }
-  const missing = [];
-  let dayKnown = false;
-  let weeksKnown = true;
-  if (leftEvent || rightEvent) {
-    const event = leftEvent ? left : right;
-    const recurring = leftEvent ? right : left;
-    const eventDate = scheduleItemDate(event);
-    if (!eventDate) return { overlap: true, certain: false, missing: ["日期"] };
-    const info = academicDayInfo(eventDate);
-    const recurringDay = courseDayIndex(recurring);
-    dayKnown = recurringDay >= 0;
-    if (dayKnown && recurringDay !== eventDate.getDay()) return { overlap: false, certain: true, missing: [] };
-    if (!dayKnown) missing.push("星期");
-    const weeks = courseWeekNumbers(recurring);
-    if (info.week !== null && weeks.size) {
-      weeksKnown = true;
-      if (!weeks.has(info.week)) return { overlap: false, certain: true, missing: [] };
-    } else if (info.week === null) {
-      weeksKnown = false;
-      missing.push("教学周");
-    } else if (!weeks.size) {
-      weeksKnown = false;
-      missing.push("周次");
-    }
-    const leftSection = scheduleItemSectionRange(left);
-    const rightSection = scheduleItemSectionRange(right);
-    if (leftSection && rightSection) {
-      const overlap = leftSection.start <= rightSection.end && rightSection.start <= leftSection.end;
-      return { overlap, certain: overlap ? dayKnown && weeksKnown : true, missing: overlap ? missing : [] };
-    }
-    const clock = compareScheduleClockOverlap(left, right);
-    return { ...clock, certain: clock.overlap ? dayKnown && weeksKnown && clock.certain : true, missing: clock.overlap ? [...missing, ...clock.missing] : [] };
+    return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, "all-day-event", [], { allDay: true });
   }
 
-  const leftDay = courseDayIndex(left);
-  const rightDay = courseDayIndex(right);
-  dayKnown = leftDay >= 0 && rightDay >= 0;
-  if (dayKnown && leftDay !== rightDay) return { overlap: false, certain: true, missing: [] };
-  if (!dayKnown) missing.push("星期");
-  const leftWeeks = courseWeekNumbers(left);
-  const rightWeeks = courseWeekNumbers(right);
-  weeksKnown = leftWeeks.size > 0 && rightWeeks.size > 0;
-  if (weeksKnown && ![...leftWeeks].some((week) => rightWeeks.has(week))) return { overlap: false, certain: true, missing: [] };
-  if (!weeksKnown) missing.push("周次");
-  const leftSection = scheduleItemSectionRange(left);
-  const rightSection = scheduleItemSectionRange(right);
-  if (leftSection && rightSection) {
-    const overlap = leftSection.start <= rightSection.end && rightSection.start <= leftSection.end;
-    return { overlap, certain: overlap ? dayKnown && weeksKnown : true, missing: overlap ? missing : [] };
+  const leftClock = localScheduleClockRange(left);
+  const rightClock = localScheduleClockRange(right);
+  const leftDateOnly = leftEvent && !leftClock.hasStart && !scheduleItemSectionRange(left);
+  const rightDateOnly = rightEvent && !rightClock.hasStart && !scheduleItemSectionRange(right);
+  if (leftDateOnly || rightDateOnly) {
+    return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, "date-only-no-occupancy", [], {
+      leftDateOnly,
+      rightDateOnly
+    });
   }
-  const clock = compareScheduleClockOverlap(left, right);
-  return { ...clock, certain: clock.overlap ? dayKnown && weeksKnown && clock.certain : true, missing: clock.overlap ? [...missing, ...clock.missing] : [] };
+
+  const occurrence = scheduleCollisionOccurrence(left, right);
+  const evidence = { occurrence };
+  if (occurrence.status === "none") {
+    return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, occurrence.reason, occurrence.reasons, evidence);
+  }
+
+  const completeClock = leftClock.hasRange && rightClock.hasRange;
+  const clock = scheduleCollisionClock(left, right);
+  if (clock) evidence.clock = clock.evidence;
+
+  // 两边都有完整时钟时，时钟是最终依据，不能再被节次覆盖。
+  if (completeClock) {
+    if (clock.status === SCHEDULE_COLLISION_STATUS.NONE) {
+      return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, clock.reason, [], evidence);
+    }
+    if (occurrence.status === "match") {
+      return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.CONFIRMED, clock.reason, [], evidence);
+    }
+    return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.POSSIBLE, "occurrence-unknown", occurrence.reasons, evidence);
+  }
+
+  // 没有两边完整时钟时，节次才作为 fallback；缺节次不能直接制造 overlap。
+  const sections = scheduleCollisionSections(left, right);
+  if (sections) {
+    evidence.section = sections.evidence;
+    if (sections.status === SCHEDULE_COLLISION_STATUS.NONE) {
+      return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, sections.reason, [], evidence);
+    }
+    if (occurrence.status === "match") {
+      return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.CONFIRMED, sections.reason, [], evidence);
+    }
+    return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.POSSIBLE, "occurrence-unknown", occurrence.reasons, evidence);
+  }
+
+  if (clock) {
+    if (clock.status === SCHEDULE_COLLISION_STATUS.NONE) {
+      return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.NONE, clock.reason, [], evidence);
+    }
+    return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.POSSIBLE, clock.reason, [...occurrence.reasons, ...clock.reasons], evidence);
+  }
+
+  return scheduleCollisionResult(SCHEDULE_COLLISION_STATUS.POSSIBLE, "time-unknown", [...occurrence.reasons, "具体时间或节次"], evidence);
 }
 
 function compareCourseScheduleOverlap(left, right) {
@@ -9428,6 +9647,14 @@ elements.content.addEventListener("change", (event) => {
     state.scheduleWeek.personal = event.target.value;
     state.selectedCourse = null;
     render();
+    return;
+  }
+  if (event.target.id === "localStartSection") {
+    syncLocalScheduleEndSectionSelect(event.target.value);
+    return;
+  }
+  if (event.target.id === "localEndSection" && localScheduleInteger(localScheduleInputValue("localStartSection"), null) === null) {
+    event.target.value = "";
     return;
   }
   if (event.target.id === "allDetailWeekSelect") {
