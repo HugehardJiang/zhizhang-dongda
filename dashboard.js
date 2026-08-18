@@ -2093,15 +2093,15 @@ function curriculumProgressMap(groups = state.curriculum.groups) {
       ? record
       : { course: record.course, completion: curriculumCourseCompletion(record.course) });
     const earnedRecords = records.filter((record) => record.completion.earned);
-    const earnedCredits = earnedRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
-    const earnedRequiredCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "required" ? curriculumCreditNumber(record.course.credit) : 0), 0);
-    const earnedElectiveCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "elective" ? curriculumCreditNumber(record.course.credit) : 0), 0);
+    const rawEarnedCredits = earnedRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
+    const rawEarnedRequiredCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "required" ? curriculumCreditNumber(record.course.credit) : 0), 0);
+    const rawEarnedElectiveCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "elective" ? curriculumCreditNumber(record.course.credit) : 0), 0);
     const categoryFallbackRecords = earnedRecords.filter((record) => record.categoryFallback);
-    const categoryFallbackCredits = categoryFallbackRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
-    const minimum = numericValue(group.minCredits);
-    const total = numericValue(group.totalCredits);
-    const required = numericValue(group.requiredCredits);
-    const elective = numericValue(group.electiveCredits);
+    const rawCategoryFallbackCredits = categoryFallbackRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
+    const minimum = curriculumRequirementCredit(group.minCredits);
+    const total = curriculumRequirementCredit(group.totalCredits);
+    const required = curriculumRequirementCredit(group.requiredCredits);
+    const elective = curriculumRequirementCredit(group.electiveCredits);
     const targetCredits = minimum !== null
       ? minimum
       : total !== null
@@ -2109,16 +2109,22 @@ function curriculumProgressMap(groups = state.curriculum.groups) {
         : required !== null || elective !== null
           ? (required || 0) + (elective || 0)
           : null;
+    // 成绩中的已通过课程可以超过某个课组/类别的要求，但培养方案进度只
+    // 计算到该课组实际需要的上限，避免出现“8 / 6 学分”或负数剩余。
+    const earnedCredits = curriculumCappedCredit(rawEarnedCredits, targetCredits);
+    const earnedRequiredCredits = curriculumCappedCredit(rawEarnedRequiredCredits, required);
+    const earnedElectiveCredits = curriculumCappedCredit(rawEarnedElectiveCredits, elective);
+    const categoryFallbackCredits = curriculumCappedCredit(rawCategoryFallbackCredits, elective !== null ? elective : targetCredits);
     const progress = {
       courseCount: records.length,
       earnedCourseCount: earnedRecords.length,
       earnedCredits,
       targetCredits,
-      remainingCredits: targetCredits === null ? null : Math.max(targetCredits - earnedCredits, 0),
+      remainingCredits: targetCredits === null ? null : curriculumRemainingCredit(targetCredits, earnedCredits),
       targetRequiredCredits: required,
       targetElectiveCredits: elective,
-      remainingRequiredCredits: required === null ? null : Math.max(required - earnedRequiredCredits, 0),
-      remainingElectiveCredits: elective === null ? null : Math.max(elective - earnedElectiveCredits, 0),
+      remainingRequiredCredits: required === null ? null : curriculumRemainingCredit(required, earnedRequiredCredits),
+      remainingElectiveCredits: elective === null ? null : curriculumRemainingCredit(elective, earnedElectiveCredits),
       earnedRequiredCredits,
       earnedElectiveCredits,
       categoryFallbackCount: categoryFallbackRecords.length,
@@ -3104,6 +3110,23 @@ function curriculumCourseCompletion(course = {}, scores = state.data.allScores) 
 function curriculumCreditNumber(value) {
   const number = numericValue(value);
   return number !== null && number > 0 ? number : 0;
+}
+
+function curriculumRequirementCredit(value) {
+  const number = numericValue(value);
+  return number === null ? null : Math.max(number, 0);
+}
+
+function curriculumCappedCredit(value, target = null) {
+  const amount = curriculumCreditNumber(value);
+  const limit = curriculumRequirementCredit(target);
+  return limit === null ? amount : Math.min(amount, limit);
+}
+
+function curriculumRemainingCredit(target, earned) {
+  const required = curriculumRequirementCredit(target);
+  if (required === null) return null;
+  return Math.max(required - curriculumCappedCredit(earned), 0);
 }
 
 function formatCurriculumCredit(value) {
@@ -7560,12 +7583,10 @@ function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgress
     });
   records.push(...categoryRecords);
   const earnedRecords = records.filter((record) => record.completion.earned);
-  const earnedCredits = earnedRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
-  const requiredCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "required" ? curriculumCreditNumber(record.course.credit) : 0), 0);
-  const electiveCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "elective" ? curriculumCreditNumber(record.course.credit) : 0), 0);
-  const targetCredits = numericValue(plan.credit);
-  const remainingCredits = targetCredits === null ? null : Math.max(targetCredits - earnedCredits, 0);
-  const percent = targetCredits && targetCredits > 0 ? Math.min(100, Math.max(0, earnedCredits / targetCredits * 100)) : 0;
+  const rawEarnedCredits = earnedRecords.reduce((total, record) => total + curriculumCreditNumber(record.course.credit), 0);
+  const rawRequiredCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "required" ? curriculumCreditNumber(record.course.credit) : 0), 0);
+  const rawElectiveCredits = earnedRecords.reduce((total, record) => total + (curriculumCourseType(record.course) === "elective" ? curriculumCreditNumber(record.course.credit) : 0), 0);
+  const targetCredits = curriculumRequirementCredit(plan.credit);
   const meta = state.data.gpaMeta || {};
   const coverageText = meta.termCount ? `成绩覆盖 ${meta.successfulTermCount || 0} / ${meta.termCount} 个学期` : "成绩覆盖待读取";
   const rootGroups = state.curriculum.groups.filter((group) => {
@@ -7573,12 +7594,25 @@ function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgress
     return !state.curriculum.groups.some((candidate) => String(candidate.id || "") === String(group.parentId));
   });
   const rootProgresses = rootGroups.map((group) => progressMap.get(curriculumGroupIdentity(group))).filter(Boolean);
-  const knownTarget = (key) => rootProgresses.reduce((total, progress) => {
-    const value = numericValue(progress[key]);
-    return value === null ? total : total + value;
-  }, 0);
+  const knownTarget = (key) => {
+    let found = false;
+    const total = rootProgresses.reduce((sum, progress) => {
+      const value = curriculumRequirementCredit(progress[key]);
+      if (value === null) return sum;
+      found = true;
+      return sum + value;
+    }, 0);
+    return found ? total : null;
+  };
   const requiredTarget = knownTarget("targetRequiredCredits");
   const electiveTarget = knownTarget("targetElectiveCredits");
+  // 总学分、必修和选修分别按方案要求封顶；课程明细仍保留真实学分，
+  // 这里只限制进度统计，避免超修课程把总进度“冲过头”。
+  const earnedCredits = curriculumCappedCredit(rawEarnedCredits, targetCredits);
+  const requiredCredits = curriculumCappedCredit(rawRequiredCredits, requiredTarget);
+  const electiveCredits = curriculumCappedCredit(rawElectiveCredits, electiveTarget);
+  const remainingCredits = targetCredits === null ? null : curriculumRemainingCredit(targetCredits, earnedCredits);
+  const percent = targetCredits && targetCredits > 0 ? Math.min(100, Math.max(0, earnedCredits / targetCredits * 100)) : 0;
   const categoryNote = categoryRecords.length ? `其中 ${categoryRecords.length} 门通识选修按成绩类别计入` : "按已读取成绩匹配";
   const remainingMarkup = remainingCredits !== null && remainingCredits > 0
     ? `<p class="curriculum-progress-warning"><strong>还差 ${escapeHtml(formatCurriculumCredit(remainingCredits))} 学分</strong><span>完成剩余课程后即可达到方案最低要求。</span></p>`

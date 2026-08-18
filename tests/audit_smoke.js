@@ -45,7 +45,7 @@ globalThis.__auditTest = {
   currentAcademicWeekNumber, defaultPersonalScheduleWeek, scheduleWeekValue,
   personalScheduleRows,
   scheduleCsvEntries, buildScheduleCsv, scheduleCsvFileName,
-  curriculumTreeKeys, curriculumTreeIsFullyExpanded, curriculumRequirementOverviewMarkup,
+  curriculumTreeKeys, curriculumTreeIsFullyExpanded, curriculumProgressMap, curriculumProgressOverviewMarkup, curriculumRequirementOverviewMarkup,
   curriculumExportMarkup, curriculumExportDocument, curriculumExportFileName,
   curriculumPdfDocumentModel, curriculumPdfPaginateBlocks,
   state,
@@ -223,6 +223,44 @@ const t = global.__auditTest;
   assert.ok(curriculumPaged.length > 1);
   assert.strictEqual(pagedCourses.length, 112);
   assert.strictEqual(pagedCourses.at(-1).name, "培养课程112");
+
+  // Credit progress is capped by each requirement. A completed 4-credit
+  // required course plus a completed 4-credit elective course must render as
+  // 4/4 required, 2/2 elective, and 6/6 overall when the plan requires 6.
+  const cappedRequiredCourse = {
+    name: "超额必修课程", code: "CAP-REQ", credit: "4", category: "专业课",
+    nature: "必修", required: "必修", groupName: "分类学分测试", semester: "2025-2026-1", raw: {}
+  };
+  const cappedElectiveCourse = {
+    name: "超额选修课程", code: "CAP-ELE", credit: "4", category: "专业选修课",
+    nature: "选修", required: "选修", groupName: "分类学分测试", semester: "2025-2026-1", raw: {}
+  };
+  const cappedGroup = {
+    id: "credit-cap-group", name: "分类学分测试", parentId: "", minCredits: "6",
+    totalCredits: "6", requiredCredits: "4", electiveCredits: "2",
+    courses: [cappedRequiredCourse, cappedElectiveCourse]
+  };
+  const cappedPlan = { id: "credit-cap-plan", name: "学分封顶测试", credit: "6" };
+  t.state.curriculum.groups = [cappedGroup];
+  t.state.curriculum.courses = [cappedRequiredCourse, cappedElectiveCourse];
+  t.state.curriculum.selectedPlan = cappedPlan;
+  t.state.data.allScores = [
+    { name: cappedRequiredCourse.name, code: cappedRequiredCourse.code, credit: "4", score: "90", raw: {} },
+    { name: cappedElectiveCourse.name, code: cappedElectiveCourse.code, credit: "4", score: "90", raw: {} }
+  ];
+  const cappedProgress = t.curriculumProgressMap([cappedGroup]).get("credit-cap-group");
+  assert.strictEqual(cappedProgress.earnedCredits, 6);
+  assert.strictEqual(cappedProgress.remainingCredits, 0);
+  assert.strictEqual(cappedProgress.earnedRequiredCredits, 4);
+  assert.strictEqual(cappedProgress.remainingRequiredCredits, 0);
+  assert.strictEqual(cappedProgress.earnedElectiveCredits, 2);
+  assert.strictEqual(cappedProgress.remainingElectiveCredits, 0);
+  const cappedOverview = t.curriculumProgressOverviewMarkup(cappedPlan, new Map([["credit-cap-group", cappedProgress]]));
+  assert.ok(cappedOverview.includes("6</strong><span> / 6 学分"));
+  assert.ok(cappedOverview.includes("4 / 4 学分"));
+  assert.ok(cappedOverview.includes("2 / 2 学分"));
+  assert.ok(!cappedOverview.includes("8 / 6"));
+  assert.ok(!/还差[^<]*-/.test(cappedOverview));
 
   t.state.allDetail = {
     typeName: '教师课表', name: '张三', code: 'T001',
