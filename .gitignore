@@ -1,0 +1,19 @@
+# macOS / IDE
+.DS_Store
+.idea/
+*.iml
+
+# Android / Gradle local state
+android/.gradle/
+android/local.properties
+android/build/
+android/app/build/
+
+# Local release staging files
+.release/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+
