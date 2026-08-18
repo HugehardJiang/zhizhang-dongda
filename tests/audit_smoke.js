@@ -34,7 +34,9 @@ code = code.replace(/\nrefresh\(\);\s*$/, '\n');
 code += `
 globalThis.__auditTest = {
   parseExamDate, normalizeCalendarDate, escapeHtml, mergeCurriculumPlans,
-  allScheduleApiPath, mapCourse, parseSectionRange, courseWeekNumbers,
+  allScheduleApiPath, mapScheduleType, scheduleTypeKind, normalizedScheduleAction,
+  isSupportedAllScheduleType, allScheduleDetailIdentity, scheduleDetailTypeCodes,
+  isAllSchedulePermissionError, mapCourse, parseSectionRange, courseWeekNumbers,
   splitScheduleSegments, expandMappedCourse, expandCourseRows, mergeCourseSources,
   renderScheduleGrid,
   mergePersonalCourseSources,
@@ -295,6 +297,32 @@ const t = global.__auditTest;
   assert.strictEqual(t.allScheduleApiPath('customTeacherAction', '教师课表'), 'modules/qxkbcx/customTeacherAction.do');
   assert.strictEqual(t.allScheduleApiPath('', '教师课表'), 'modules/qxkbcx/lslb.do');
   assert.strictEqual(t.allScheduleApiPath('', '未知类型'), 'modules/qxkbcx/bjlb.do');
+
+  // The raw type endpoint also exposes internal reports that the original page
+  // hides when jwAppConfig.hasPermission is false. Keep the extension aligned
+  // with the three object-list routes available to the signed-in account.
+  const rawTypes = [
+    { code: '01', name: '教室课表', queryAction: 'jslb', permission: 'qxkbcx-jaskb' },
+    { code: '02', name: '教师课表', queryAction: 'lslb', permission: 'qxkbcx-jskb' },
+    { code: '03', name: '学生课表', queryAction: 'xslb', permission: 'qxkbcx-xskb' },
+    { code: '05', name: '班级课表', queryAction: 'bjlb', permission: 'qxkbcx-bjkb' }
+  ];
+  assert.deepStrictEqual(rawTypes.map((raw) => t.mapScheduleType(raw).queryAction), ['jslb', 'lslb', 'xslb', 'bjlb']);
+  assert.deepStrictEqual(rawTypes.map((raw) => t.isSupportedAllScheduleType(t.mapScheduleType(raw))), [true, true, false, true]);
+  assert.strictEqual(t.normalizedScheduleAction('/modules/qxkbcx/lslb.do'), 'lslb');
+  assert.strictEqual(t.scheduleTypeKind({ name: '专业方向课表' }), 'direction');
+  assert.strictEqual(t.isAllSchedulePermissionError({ status: 403 }), true);
+
+  // The current deployment uses the dynamic type code as KBLX. Teacher and
+  // room details must therefore try 02 and 01 before legacy 06/07 fallbacks.
+  const teacherType = { code: '02', name: '教师课表', queryAction: 'lslb' };
+  const roomType = { code: '01', name: '教室课表', queryAction: 'jslb' };
+  const teacherIdentity = t.allScheduleDetailIdentity({ CODE: '00009945', WID: '9839', XM: '李硕' }, teacherType);
+  const roomIdentity = t.allScheduleDetailIdentity({ CODE: 'A101', JASMC: '机211' }, roomType);
+  assert.strictEqual(teacherIdentity.typeCode, '02');
+  assert.strictEqual(roomIdentity.typeCode, '01');
+  assert.strictEqual(t.scheduleDetailTypeCodes(teacherIdentity)[0], '02');
+  assert.strictEqual(t.scheduleDetailTypeCodes(roomIdentity)[0], '01');
 
   // Direct full-school course rows remain clickable after mapping.
   const rawCourse = { KCM: '高等数学', KCH: 'MATH001', SKJS: '李老师', JASMC: 'A101', SKXQMC: '星期一', JC: '1-2' };

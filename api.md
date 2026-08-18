@@ -691,6 +691,7 @@ POST ${KB}/api/qxkbcx/getScheduleTypeList.do?vpn-12-o1-jwxt.neu.edu.cn
 | 类型代码 | `code`、`CODE`、`itemCode`、`DM` |
 | 类型名称 | `name`、`NAME`、`itemName`、`MC` |
 | 查询动作 | `queryAction`、`QUERYACTION`、`query_action`、`action` |
+| 权限标识 | `permission`、`PERMISSION` |
 
 原系统的权威映射通常为：
 
@@ -700,7 +701,7 @@ POST ${KB}/api/qxkbcx/getScheduleTypeList.do?vpn-12-o1-jwxt.neu.edu.cn
 | 教师课表 | `lslb` | `modules/qxkbcx/lslb.do` |
 | 教室课表 | `jslb` | `modules/qxkbcx/jslb.do` |
 
-不要只根据中文名称拼接后缀，因为教师和教室的原系统缩写不是同名拼音首字母。
+原系统还会返回当前账号没有权限的内部报表类型；前端应按原系统的权限结果过滤后再展示。不要只根据中文名称拼接后缀，因为教师和教室的原系统缩写不是同名拼音首字母。
 
 ### 8.2 查询班级/教师/教室列表
 
@@ -866,7 +867,7 @@ XQDM=00
 教室：CODE、WID、JASDM、JASCODE、roomCode、roomId
 ```
 
-详情响应仍然用 `extractCourseRows` 一类的递归课程数组识别，并映射成个人课表相同的课程结构。
+详情响应仍然用 `extractCourseRows` 一类的递归课程数组识别，并映射成个人课表相同的课程结构。`KBLX` 优先使用 `getScheduleTypeList.do` 返回的类型 `code`（当前部署教室=01、教师=02、班级=05）；旧版 06/07 只作为兼容候选。若网格接口已经返回课程，应直接展示，不要继续请求当前 WebVPN 会返回 403 的 `cxkblbms.do`。
 
 ### 8.5 体育课程名称弹窗：项目、教师和教学班明细
 

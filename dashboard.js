@@ -145,6 +145,7 @@ const state = {
   scheduleTypes: [],
   scheduleTypesLoaded: false,
   scheduleTypeError: "",
+  allScheduleHiddenTypes: [],
   allTerms: [],
   allTermsLoaded: false,
   allTermCode: "",
@@ -618,10 +619,11 @@ function bindNativeEcodeScroll() {
 }
 
 class ApiError extends Error {
-  constructor(message, details = "") {
+  constructor(message, details = "", status = 0) {
     super(message);
     this.name = "ApiError";
     this.details = details;
+    this.status = Number(status) || 0;
   }
 }
 
@@ -882,11 +884,12 @@ async function requestJsonOnce(url, options = {}) {
     const looksLikeLogin = /登录|统一身份认证|login|cas/i.test(raw);
     throw new ApiError(
       looksLikeLogin ? "教务系统登录已失效" : "教务接口返回了无法识别的数据",
-      `HTTP ${response.status}`
+      `HTTP ${response.status}`,
+      response.status
     );
   }
 
-  if (!response.ok) throw new ApiError(`教务接口请求失败（${response.status}）`);
+  if (!response.ok) throw new ApiError(`教务接口请求失败（${response.status}）`, `HTTP ${response.status}`, response.status);
   if (payload && (payload.code === 401 || payload.status === 401 || payload.loginRequired === true)) {
     throw new ApiError("教务系统登录已失效");
   }
@@ -1193,17 +1196,11 @@ async function loadAllTerms() {
     let terms = termRowsFromPayload(listPayload);
     if (!terms.length) terms = state.terms.slice();
 
-    let currentPayload = null;
-    try {
-      currentPayload = await getKbContext("modules/qxkbcx/cxdqxnxq.do");
-    } catch {
-      try {
-        currentPayload = await getKb("modules/qxkbcx/cxdqxnxq.do");
-      } catch {
-        currentPayload = null;
-      }
-    }
-    const currentValue = valueOf(currentPayload, ["XNXQDM", "DM", "termCode", "itemCode", "code"], "");
+    // 当前账号对原系统的“当前学期”探测接口返回 403；课表模块学期列表
+    // 已包含完整可选项，直接使用学期列表/个人模块当前学期即可，避免每次
+    // 打开全校课表时制造两条无意义的 WebVPN 错误。
+    const currentPayload = null;
+    const currentValue = "";
     const currentCode = matchingTermCode(currentValue, terms)
       || findExplicitTermCode(currentPayload, terms)
       || chooseCalendarTerm(terms)?.code
@@ -4569,6 +4566,7 @@ function mapScheduleType(raw) {
     code: displayValue(valueOf(raw, ["code", "CODE", "itemCode", "DM"]), ""),
     name: displayValue(valueOf(raw, ["name", "NAME", "itemName", "MC"]), "未命名查询"),
     queryAction: displayValue(valueOf(raw, ["queryAction", "QUERYACTION", "query_action", "action"]), ""),
+    permission: displayValue(valueOf(raw, ["permission", "PERMISSION", "permissionCode", "QXDM"]), ""),
     raw
   };
 }
@@ -4582,7 +4580,29 @@ function scheduleTypeKind(type = selectedScheduleType()) {
   if (/班级/.test(name)) return "class";
   if (/教师/.test(name)) return "teacher";
   if (/教室/.test(name)) return "room";
+  if (/学生/.test(name)) return "student";
+  if (/专业方向/.test(name)) return "direction";
+  if (/非主修|辅修方案/.test(name)) return "nonMajor";
+  if (/教学任务/.test(name)) return "teachingTask";
+  if (/课程/.test(name)) return "course";
+  if (/专业/.test(name)) return "major";
   return "generic";
+}
+
+function normalizedScheduleAction(action) {
+  return String(action || "")
+    .trim()
+    .replace(/^\/+/, "")
+    .split("/")
+    .pop()
+    .replace(/\.do$/i, "");
+}
+
+function isSupportedAllScheduleType(type) {
+  // getScheduleTypeList.do 还会返回学生、专业、课程等内部报表类型，但原系统
+  // 会先用 jwAppConfig.hasPermission 过滤；当前登录账号实际只开放这三种对象列表。
+  // 保留动作白名单可以避免把无权限的内部入口渲染出来后再触发一串 403。
+  return new Set(["bjlb", "lslb", "jslb"]).has(normalizedScheduleAction(type?.queryAction));
 }
 
 function isClassScheduleType(type = selectedScheduleType()) {
@@ -4613,13 +4633,19 @@ async function loadScheduleTypes() {
         payload = await postKb("api/qxkbcx/getScheduleTypeList.do", {});
       }
     }
-    state.scheduleTypes = rowsOf(payload).map(mapScheduleType).filter((item) => item.code);
+    const discoveredTypes = rowsOf(payload).map(mapScheduleType).filter((item) => item.code);
+    const supportedTypes = discoveredTypes.filter(isSupportedAllScheduleType);
+    state.allScheduleHiddenTypes = supportedTypes.length
+      ? discoveredTypes.filter((item) => !isSupportedAllScheduleType(item))
+      : [];
+    state.scheduleTypes = supportedTypes.length ? supportedTypes : discoveredTypes;
     if (!state.scheduleTypes.length) throw new ApiError("没有读取到全校课表类型");
     const classType = state.scheduleTypes.find((item) => scheduleTypeKind(item) === "class");
     state.allTypeCode = classType?.code || state.scheduleTypes[0].code;
   } catch (error) {
     state.scheduleTypeError = error.message || "全校课表类型读取失败";
     state.scheduleTypes = [{ code: "01", name: "全校大课表", queryAction: "cxdyqxdkb", raw: {} }];
+    state.allScheduleHiddenTypes = [];
     state.allTypeCode = "01";
   }
   render();
@@ -4738,6 +4764,11 @@ async function requestAllSchedulePayload(body, typeName = "", typeAction = "") {
   throw lastError || new ApiError("全校课表接口请求失败");
 }
 
+function isAllSchedulePermissionError(error) {
+  return Number(error?.status) === 403
+    || /(?:HTTP\s*)?403|没有权限|无权限/.test(`${error?.message || ""} ${error?.details || ""}`);
+}
+
 async function queryAllSchedule() {
   const type = state.scheduleTypes.find((item) => item.code === state.allTypeCode) || state.scheduleTypes[0];
   if (!type) return;
@@ -4746,6 +4777,12 @@ async function queryAllSchedule() {
   const termCode = state.allTermCode || state.termCode;
   if (!termCode) {
     state.allError = "还没有选择课表学期";
+    render();
+    return;
+  }
+  if (state.allScheduleHiddenTypes.length && !isSupportedAllScheduleType(type)) {
+    state.allError = "当前登录账号没有该查询类型的权限，请选择原系统开放的班级、教师或教室课表";
+    state.allRetrying = false;
     render();
     return;
   }
@@ -4787,6 +4824,7 @@ async function queryAllSchedule() {
       if (requestId !== allScheduleRequestSequence) return;
       lastError = error;
     }
+    if (isAllSchedulePermissionError(lastError)) break;
     if (attempt < ALL_SCHEDULE_RETRY_LIMIT) {
       await new Promise((resolve) => setTimeout(resolve, ALL_SCHEDULE_RETRY_DELAY));
       if (requestId !== allScheduleRequestSequence) return;
@@ -7203,7 +7241,10 @@ function renderAll() {
   const allTermOptions = state.allTerms.length
     ? state.allTerms.map((term) => `<option value="${escapeHtml(term.code)}">${escapeHtml(term.name)}</option>`).join("")
     : `<option value="">正在读取学期…</option>`;
-  return `<div>${sectionHeading("全校课表", "")}<div class="all-query-toolbar"><div class="all-query-context"><label>学期<select id="allTermSelect" ${state.allTerms.length ? "" : "disabled"}>${allTermOptions}</select></label><label>查询类型<select id="allMode">${options}</select></label></div><div class="inline-form">${filterFields}<button class="button button-primary" type="button" data-action="search-all">查询</button></div></div>${state.allTermError ? `<p class="muted">${escapeHtml(state.allTermError)}</p>` : ""}${state.scheduleTypeError ? `<p class="muted">${escapeHtml(state.scheduleTypeError)}</p>` : ""}<div class="panel all-results-panel">${renderAllRows()}</div>${renderAllDetail()}${renderAllUtilities()}${renderCourseTransferModal()}</div>`;
+  const permissionHint = state.allScheduleHiddenTypes.length
+    ? `<p class="muted all-schedule-permission-hint">原系统当前开放：${escapeHtml(state.scheduleTypes.map((type) => type.name).join("、"))}。其他类型没有查询权限，已按原系统规则隐藏。</p>`
+    : "";
+  return `<div>${sectionHeading("全校课表", "")}<div class="all-query-toolbar"><div class="all-query-context"><label>学期<select id="allTermSelect" ${state.allTerms.length ? "" : "disabled"}>${allTermOptions}</select></label><label>查询类型<select id="allMode">${options}</select></label></div><div class="inline-form">${filterFields}<button class="button button-primary" type="button" data-action="search-all">查询</button></div></div>${state.allTermError ? `<p class="muted">${escapeHtml(state.allTermError)}</p>` : ""}${state.scheduleTypeError ? `<p class="muted">${escapeHtml(state.scheduleTypeError)}</p>` : ""}${permissionHint}<div class="panel all-results-panel">${renderAllRows()}</div>${renderAllDetail()}${renderAllUtilities()}${renderCourseTransferModal()}</div>`;
 }
 
 function renderAllUtilities() {
@@ -7245,30 +7286,53 @@ function isCourseDetailRow(row) {
 
 function allScheduleDetailIdentity(row, type = selectedScheduleType()) {
   const kind = scheduleTypeKind(type);
-  const codeKeys = kind === "class"
-    ? ["CODE", "code", "BJDM", "classCode"]
-    : kind === "teacher"
-      ? ["CODE", "code", "WID", "JSDM", "teacherCode", "teacherId"]
-      : kind === "room"
-        ? ["CODE", "code", "WID", "JASDM", "JASCODE", "roomCode", "roomId"]
-        : ["CODE", "code", "BJDM", "WID", "JSDM", "JASDM", "JASCODE", "classCode", "teacherCode", "roomCode"];
+  const codeKeysByKind = {
+    class: ["CODE", "code", "BJDM", "classCode"],
+    teacher: ["CODE", "code", "WID", "JSDM", "teacherCode", "teacherId"],
+    room: ["CODE", "code", "WID", "JASDM", "JASCODE", "roomCode", "roomId"],
+    student: ["XSBH", "XH", "XSID", "STUDENTID", "CODE", "code", "WID", "studentCode", "studentId"],
+    major: ["ZYDM", "ZYCODE", "CODE", "code", "WID", "majorCode", "majorId"],
+    course: ["KCH", "KCDM", "CODE", "code", "WID", "courseCode", "courseId"],
+    teachingTask: ["JXBID", "JXBH", "JXBDM", "JXRWDM", "CODE", "code", "WID", "teachingTaskCode", "teachingTaskId"],
+    direction: ["ZYFXDM", "ZYFXCODE", "CODE", "code", "WID", "directionCode", "directionId"],
+    nonMajor: ["FADM", "FACODE", "CODE", "code", "WID", "planCode", "planId"],
+    generic: ["CODE", "code", "DM", "ID", "WID", "BJDM", "JSDM", "JASDM", "JASCODE"]
+  };
+  const codeKeys = codeKeysByKind[kind] || codeKeysByKind.generic;
   const codeCandidates = [...new Set(codeKeys.map((key) => displayValue(valueOf(row, [key]), "")).filter(Boolean))];
   const code = codeCandidates[0] || "";
-  const name = displayValue(valueOf(row,
-    kind === "class" ? ["BJMC", "className", "name"]
-      : kind === "teacher" ? ["XM", "JSXM", "teacherName", "name"]
-        : kind === "room" ? ["JASMC", "roomName", "name"]
-          : ["BJMC", "XM", "JASMC", "name"]), "未命名对象");
-  const typeCode = displayValue(valueOf(row, ["KBLX", "kblx", "scheduleTypeCode"]), "");
+  const nameKeysByKind = {
+    class: ["BJMC", "className", "name"],
+    teacher: ["XM", "JSXM", "teacherName", "name"],
+    room: ["JASMC", "roomName", "name"],
+    student: ["XSXM", "XSMC", "XM", "studentName", "name"],
+    major: ["ZYMC", "majorName", "name"],
+    course: ["KCM", "KCMC", "courseName", "name"],
+    teachingTask: ["JXBMC", "JXRWMC", "taskName", "name"],
+    direction: ["ZYFXMC", "directionName", "name"],
+    nonMajor: ["FAMC", "planName", "name"],
+    generic: ["BJMC", "XM", "JASMC", "ZYMC", "KCM", "name"]
+  };
+  const name = displayValue(valueOf(row, nameKeysByKind[kind] || nameKeysByKind.generic), "未命名对象");
+  // 全校类型接口返回的 code（教室=01、教师=02、班级=05）才是当前部署
+  // getScheduleDetail.do 所需的 KBLX；列表行通常没有单独的 KBLX 字段。
+  const typeCode = displayValue(valueOf(row, ["KBLX", "kblx", "scheduleTypeCode"]), "") || displayValue(type?.code, "");
   return { code, codeCandidates, name, kind, typeCode, typeName: type?.name || "全校课表" };
 }
 
 function scheduleDetailTypeCodes(detail) {
-  // 原系统 getScheduleDetail.do 的课表类型参数：班级 05、教师 06、教室 07。
+  // 当前部署使用全校类型列表的 code：教室 01、教师 02、班级 05。
+  // 旧版本曾把教师/教室写成 06/07，保留旧值作为兼容兜底，但必须先试当前码。
   const fallback = {
     class: ["05"],
-    teacher: ["06", "05", "07"],
-    room: ["07", "05", "06"]
+    teacher: ["02", "06", "05", "07"],
+    room: ["01", "07", "05", "06"],
+    student: ["03", "06", "05", "07"],
+    major: ["04", "06", "05", "07"],
+    course: ["06", "05", "07"],
+    teachingTask: ["07", "06", "05"],
+    direction: ["08", "06", "05", "07"],
+    nonMajor: ["09", "06", "05", "07"]
   }[detail.kind] || ["05", "06", "07"];
   return [...new Set([detail.typeCode, ...fallback].filter(Boolean))];
 }
@@ -7315,9 +7379,26 @@ async function queryAllScheduleDetail(rowIndex) {
           lastError = error;
         }
 
-        // 详情网格和原系统下方课程明细是两条互补数据源：网格负责可靠的
-        // 星期/节次/跨行布局，列表负责课程类别等网格经常没有的字段。即使
-        // 网格已经有课程，也必须继续读取列表并回填元数据，不能提前 return。
+        // 当前 WebVPN 会拒绝 cxkblbms.do（403），而 getScheduleDetail.do
+        // 已经包含课程名、星期、节次、教师和地点。网格有数据时立即展示，
+        // 不再为补充字段重复请求必然失败的列表接口。
+        if (gridCourses.length) {
+          state.allDetail = {
+            ...identity,
+            code,
+            termCode,
+            loading: false,
+            error: "",
+            rawRows: gridRawRows,
+            courses: gridCourses,
+            source: "网格接口"
+          };
+          render();
+          return;
+        }
+
+        // 如果网格为空，再兼容旧系统只提供课程列表的版本；列表接口的
+        // 403/超时只影响当前代码与类型，不会阻塞后续候选类型。
         let listRawRows = [];
         let listCourses = [];
         try {
@@ -7532,7 +7613,10 @@ function renderAll() {
   const allTermOptions = state.allTerms.length
     ? state.allTerms.map((term) => `<option value="${escapeHtml(term.code)}">${escapeHtml(term.name)}</option>`).join("")
     : `<option value="">正在读取学期…</option>`;
-  return `<div>${sectionHeading("全校课表", "")}<div class="all-query-toolbar"><div class="all-query-context"><label>学期<select id="allTermSelect" ${state.allTerms.length ? "" : "disabled"}>${allTermOptions}</select></label><label>查询类型<select id="allMode">${options}</select></label></div><div class="inline-form">${filterFields}<button class="button button-primary" type="button" data-action="search-all">查询</button></div></div>${state.allTermError ? `<p class="muted">${escapeHtml(state.allTermError)}</p>` : ""}${state.scheduleTypeError ? `<p class="muted">${escapeHtml(state.scheduleTypeError)}</p>` : ""}<div class="panel all-results-panel">${renderAllRows()}</div>${renderAllDetail()}${renderAllUtilities()}${renderCourseTransferModal()}</div>`;
+  const permissionHint = state.allScheduleHiddenTypes.length
+    ? `<p class="muted all-schedule-permission-hint">原系统当前开放：${escapeHtml(state.scheduleTypes.map((type) => type.name).join("、"))}。其他类型没有查询权限，已按原系统规则隐藏。</p>`
+    : "";
+  return `<div>${sectionHeading("全校课表", "")}<div class="all-query-toolbar"><div class="all-query-context"><label>学期<select id="allTermSelect" ${state.allTerms.length ? "" : "disabled"}>${allTermOptions}</select></label><label>查询类型<select id="allMode">${options}</select></label></div><div class="inline-form">${filterFields}<button class="button button-primary" type="button" data-action="search-all">查询</button></div></div>${state.allTermError ? `<p class="muted">${escapeHtml(state.allTermError)}</p>` : ""}${state.scheduleTypeError ? `<p class="muted">${escapeHtml(state.scheduleTypeError)}</p>` : ""}${permissionHint}<div class="panel all-results-panel">${renderAllRows()}</div>${renderAllDetail()}${renderAllUtilities()}${renderCourseTransferModal()}</div>`;
 }
 
 function renderAllUtilities() {
