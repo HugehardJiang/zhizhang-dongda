@@ -80,7 +80,7 @@ public class MainActivity extends Activity {
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.36";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.37";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -642,7 +642,7 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.36");
+        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.37");
         webView.setBackgroundColor(Color.rgb(246, 247, 249));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setVerticalScrollBarEnabled(false);
