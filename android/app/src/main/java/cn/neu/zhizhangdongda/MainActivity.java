@@ -21,8 +21,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Bundle;
-import android.print.PrintAttributes;
-import android.print.PrintManager;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
@@ -82,7 +80,7 @@ public class MainActivity extends Activity {
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.35";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.36";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -507,7 +505,6 @@ public class MainActivity extends Activity {
     private WebView portalWebView;
     private WebView ecodeWebView;
     private WebView dashboardWebView;
-    private WebView printWebView;
     private FrameLayout dashboardHome;
     private FrameLayout ecodePanel;
     private FrameLayout ecodeCollapsedCard;
@@ -645,7 +642,7 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.35");
+        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.36");
         webView.setBackgroundColor(Color.rgb(246, 247, 249));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setVerticalScrollBarEnabled(false);
@@ -2096,7 +2093,6 @@ public class MainActivity extends Activity {
         if (portalWebView != null) portalWebView.destroy();
         if (ecodeWebView != null) ecodeWebView.destroy();
         if (dashboardWebView != null) dashboardWebView.destroy();
-        if (printWebView != null) printWebView.destroy();
         super.onDestroy();
     }
 
@@ -2158,11 +2154,6 @@ public class MainActivity extends Activity {
         }
 
         @android.webkit.JavascriptInterface
-        public void printHtml(String html, String title) {
-            openPrintPanel(html, title);
-        }
-
-        @android.webkit.JavascriptInterface
         public void saveImage(String dataUrl, String fileName) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
                     && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -2191,50 +2182,6 @@ public class MainActivity extends Activity {
             }
             networkExecutor.execute(() -> persistScheduleCsv(content, fileName));
         }
-    }
-
-    /**
-     * 使用 Android 系统打印服务生成 PDF。页面 HTML 来自本地 dashboard，
-     * 以 android_asset 为 base URL，因此能复用与浏览器插件完全相同的 CSS。
-     */
-    private void openPrintPanel(String html, String title) {
-        runOnUiThread(() -> {
-            if (printWebView != null) {
-                printWebView.destroy();
-            }
-            printWebView = new WebView(this);
-            WebSettings settings = printWebView.getSettings();
-            settings.setJavaScriptEnabled(false);
-            settings.setDomStorageEnabled(false);
-            settings.setDefaultTextEncodingName("UTF-8");
-            printWebView.setBackgroundColor(Color.WHITE);
-            final String jobTitle = title == null || title.trim().isEmpty() ? "执掌东大-培养方案" : title.trim();
-            printWebView.setWebViewClient(new WebViewClient() {
-                private boolean printed;
-
-                @Override
-                public void onPageFinished(WebView view, String url) {
-                    super.onPageFinished(view, url);
-                    if (printed) return;
-                    printed = true;
-                    PrintManager printManager = (PrintManager) getSystemService(PRINT_SERVICE);
-                    if (printManager == null) return;
-                    PrintAttributes attributes = new PrintAttributes.Builder()
-                            .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
-                            .setResolution(new PrintAttributes.Resolution("zhizhang-pdf", "执掌东大 PDF", 300, 300))
-                            .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
-                            .build();
-                    printManager.print(jobTitle, view.createPrintDocumentAdapter(jobTitle), attributes);
-                }
-            });
-            printWebView.loadDataWithBaseURL(
-                    "file:///android_asset/",
-                    html == null ? "<html><body>没有可导出的内容</body></html>" : html,
-                    "text/html",
-                    "UTF-8",
-                    null
-            );
-        });
     }
 
     private void performRequest(String requestId, String method, String urlText, String body, String headersJson) {

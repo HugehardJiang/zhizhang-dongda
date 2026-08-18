@@ -45,6 +45,7 @@ globalThis.__auditTest = {
   scheduleCsvEntries, buildScheduleCsv, scheduleCsvFileName,
   curriculumTreeKeys, curriculumTreeIsFullyExpanded, curriculumRequirementOverviewMarkup,
   curriculumExportMarkup, curriculumExportDocument, curriculumExportFileName,
+  curriculumPdfDocumentModel, curriculumPdfPaginateBlocks,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -189,13 +190,37 @@ const t = global.__auditTest;
   assert.ok(interactiveTree.includes("收起全部"));
   assert.strictEqual((interactiveTree.match(/data-tree-depth=/g) || []).length, 32);
   const exportMarkup = t.curriculumExportMarkup();
-  assert.ok(exportMarkup.includes('id="curriculumExportRoot"'));
-  assert.strictEqual((exportMarkup.match(/data-tree-depth=/g) || []).length, 32);
-  assert.strictEqual((exportMarkup.match(/<tr class="curriculum-course-row/g) || []).length, 112);
-  assert.ok(!exportMarkup.includes("curriculum-course-status"));
-  assert.ok(!exportMarkup.includes("curriculum-tree-summary::before"));
-  assert.ok(t.curriculumExportDocument().html.includes("overflow: visible"));
+  assert.ok(exportMarkup.includes('data-curriculum-export="full"'));
+  assert.strictEqual((exportMarkup.match(/<tr class="curriculum-pdf-course-row/g) || []).length, 112);
+  assert.strictEqual((exportMarkup.match(/<th>/g) || []).length, 28 * 8);
+  assert.ok(exportMarkup.includes("课程号"));
+  assert.ok(exportMarkup.includes("完成情况"));
+  assert.ok(!exportMarkup.includes("curriculum-tree-node"));
+  assert.ok(!exportMarkup.includes("curriculum-tree-summary"));
+  assert.ok(!exportMarkup.includes("<details"));
+  const exportDocument = t.curriculumExportDocument();
+  assert.strictEqual(exportDocument.format, "A4 landscape");
+  assert.strictEqual(exportDocument.model.groupCount, 32);
+  assert.strictEqual(exportDocument.model.courseCount, 112);
+  const exportCourses = exportDocument.model.groups.flatMap((entry) => entry.group.courses || []);
+  assert.strictEqual(exportCourses.at(-1).name, "培养课程112");
+  assert.strictEqual(exportDocument.scale, 2);
   assert.strictEqual(t.curriculumExportFileName(t.state.curriculum.selectedPlan), "培养计划_2025级_自动化");
+  const syntheticMetrics = {
+    title: 24,
+    summary: 24,
+    structure: 24,
+    groupHeadings: new Map(exportDocument.model.groups.map((entry) => [entry.key, 28])),
+    continuationHeadings: new Map(exportDocument.model.groups.map((entry) => [entry.key, 24])),
+    rows: new Map(exportDocument.model.groups.flatMap((entry) => (entry.group.courses || []).map((_, index) => [`${entry.key}:${index}`, 22]))),
+    tableHeader: 26,
+    tableGap: 9
+  };
+  const curriculumPaged = t.curriculumPdfPaginateBlocks(exportDocument.model, syntheticMetrics);
+  const pagedCourses = curriculumPaged.flatMap((page) => page.entries.filter((entry) => entry.type === "table").flatMap((entry) => entry.rows));
+  assert.ok(curriculumPaged.length > 1);
+  assert.strictEqual(pagedCourses.length, 112);
+  assert.strictEqual(pagedCourses.at(-1).name, "培养课程112");
 
   t.state.allDetail = {
     typeName: '教师课表', name: '张三', code: 'T001',
