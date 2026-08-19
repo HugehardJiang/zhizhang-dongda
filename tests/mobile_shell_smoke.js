@@ -126,6 +126,7 @@ assert.ok(mainActivitySource.includes('AES/GCM/NoPadding'));
 assert.ok(mainActivitySource.includes('submitBuiltInCredentials(true)'));
 assert.ok(mainActivitySource.includes('后台自动登录需要短信验证码'));
 assert.ok(mainActivitySource.includes('LOGIN_METHOD_BUILT_IN'));
+assert.ok(/handleAcademicSessionInvalid[\s\S]*if \(backgroundLoginInProgress\) return;[\s\S]*setLastAcademicLoginError\(reason\)/.test(mainActivitySource));
 
 audit.prepare();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");

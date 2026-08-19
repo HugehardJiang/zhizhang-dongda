@@ -95,7 +95,7 @@ public class MainActivity extends Activity {
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.41";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.42";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -1744,6 +1744,10 @@ public class MainActivity extends Activity {
             String reason = detail == null || detail.trim().isEmpty()
                     ? "教务系统登录状态已失效"
                     : detail.trim();
+            // 一次刷新会并发请求多个教务接口，会话过期时它们可能
+            // 同时返回登录页。后台重登已在进行时忽略后续重复通知，避免
+            // “正在重登”被误覆盖成“登录失败”。
+            if (backgroundLoginInProgress) return;
             setLastAcademicLoginError(reason);
             if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
             LoginCredentials saved = loadBuiltInCredentials();
