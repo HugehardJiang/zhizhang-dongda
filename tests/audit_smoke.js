@@ -516,6 +516,8 @@ const t = global.__auditTest;
   const localSettingsMarkup = t.renderSettings();
   assert.ok(localSettingsMarkup.includes('清除教务缓存'));
   assert.ok(localSettingsMarkup.includes('清除全部自定义安排'));
+  assert.ok(!localSettingsMarkup.includes('value="builtin"'));
+  assert.ok(!localSettingsMarkup.includes('Android Keystore'));
   t.state.selectedCourse = t.localScheduleItemToCourseRow(localEvent);
   assert.ok(t.renderCourseDetailModal().includes('自定义安排详情'));
   t.state.selectedCourse = null;

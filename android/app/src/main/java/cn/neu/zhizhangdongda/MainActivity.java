@@ -22,6 +22,9 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.security.keystore.KeyGenParameterSpec;
+import android.security.keystore.KeyProperties;
+import android.text.InputType;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
@@ -35,11 +38,13 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -59,11 +64,17 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.security.KeyStore;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import javax.crypto.Cipher;
+import javax.crypto.KeyGenerator;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.GCMParameterSpec;
 
 /**
  * 执掌东大 Android 外壳：
@@ -71,7 +82,7 @@ import java.util.concurrent.Executors;
  * - dashboardWebView 复用插件已经验证过的本地 HTML/JS/CSS；
  * - ecodeWebView 只负责首页的 E 码通原网页，两套入口可以分别登录；
  * - AndroidBridge 负责把 WebVPN Cookie 带到原生网络请求中；
- * - CookieManager 和 SharedPreferences 共同保证登录会话可跨次启动复用；
+ * - CookieManager 保持学校会话，Android Keystore 加密保存用户明确选择记住的内置登录凭据；
  * - 应用内部 personal-cache 文件只保存按学号隔离的个人查询结果，供失效会话时离线展示。
  * - 应用内部 local-schedule 文件只保存按学号隔离的本地课程/日程覆盖层，
  *   不会混入教务缓存，也不会回写学校接口。
@@ -84,7 +95,7 @@ public class MainActivity extends Activity {
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.38";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.41";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -360,10 +371,15 @@ public class MainActivity extends Activity {
     // 升级后必须重新以教务系统会话为准，避免“上面已登录、下面未登录”。
     private static final String HAS_ACADEMIC_SESSION = "has_academic_session";
     private static final String DEFAULT_LOGIN_METHOD = "default_login_method";
+    private static final String BUILT_IN_CREDENTIALS = "built_in_credentials";
+    private static final String LAST_ACADEMIC_LOGIN_ERROR = "last_academic_login_error";
     private static final String SAVED_QR_IMAGE_URI = "saved_qr_image_uri";
     private static final String SAVED_QR_IMAGE_PATH = "saved_qr_image_path";
+    private static final String LOGIN_METHOD_BUILT_IN = "builtin";
     private static final String LOGIN_METHOD_PASSWORD = "password";
     private static final String LOGIN_METHOD_WECHAT = "wechat";
+    private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
+    private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
     private static final int WRITE_QR_STORAGE_REQUEST = 2201;
     private static final int WRITE_DASHBOARD_IMAGE_REQUEST = 2202;
     private static final int WRITE_DASHBOARD_CSV_REQUEST = 2203;
@@ -512,6 +528,16 @@ public class MainActivity extends Activity {
     private WebView portalWebView;
     private WebView ecodeWebView;
     private WebView dashboardWebView;
+    private LinearLayout loginMethodBar;
+    private FrameLayout builtInLoginPanel;
+    private EditText builtInUsernameInput;
+    private EditText builtInPasswordInput;
+    private EditText builtInCodeInput;
+    private LinearLayout builtInCodeRow;
+    private CheckBox builtInTrustDeviceCheck;
+    private TextView builtInLoginStatus;
+    private Button builtInLoginButton;
+    private Button builtInCodeSendButton;
     private FrameLayout dashboardHome;
     private FrameLayout ecodePanel;
     private FrameLayout ecodeCollapsedCard;
@@ -534,7 +560,7 @@ public class MainActivity extends Activity {
     private boolean ecodeWarmupPending;
     private boolean ecodePanelHidden;
     private int ecodeProbeAttempts;
-    private String loginMethodForCurrentPortal = LOGIN_METHOD_PASSWORD;
+    private String loginMethodForCurrentPortal = LOGIN_METHOD_BUILT_IN;
     private volatile String portalLoginService = "";
     private String pendingQrUrl = "";
     private String pendingDashboardImageDataUrl = "";
@@ -545,6 +571,29 @@ public class MainActivity extends Activity {
     private String savedQrImagePath = "";
     private boolean qrSavePendingPermission;
     private boolean loginMethodChooserShown;
+    private boolean builtInLoginSubmissionPending;
+    private boolean builtInLoginAwaitingPage;
+    private boolean builtInLoginChallengeVisible;
+    private boolean backgroundLoginInProgress;
+    private boolean backgroundLoginAttemptedForCurrentFailure;
+    private int builtInLoginInspectionAttempts;
+    private String pendingBuiltInUsername = "";
+    private String pendingBuiltInPassword = "";
+    private String lastAcademicLoginError = "";
+
+    private static final class LoginCredentials {
+        final String username;
+        final String password;
+
+        LoginCredentials(String username, String password) {
+            this.username = username == null ? "" : username;
+            this.password = password == null ? "" : password;
+        }
+
+        boolean isComplete() {
+            return !username.trim().isEmpty() && !password.isEmpty();
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -554,7 +603,11 @@ public class MainActivity extends Activity {
 
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         cookieManager.setAcceptCookie(true);
+        if (!preferences.contains(DEFAULT_LOGIN_METHOD)) {
+            preferences.edit().putString(DEFAULT_LOGIN_METHOD, LOGIN_METHOD_BUILT_IN).apply();
+        }
         loginMethodForCurrentPortal = readLoginMethodPreference();
+        lastAcademicLoginError = preferences.getString(LAST_ACADEMIC_LOGIN_ERROR, "");
         savedQrImageUri = preferences.getString(SAVED_QR_IMAGE_URI, "");
         savedQrImagePath = preferences.getString(SAVED_QR_IMAGE_PATH, "");
 
@@ -579,6 +632,11 @@ public class MainActivity extends Activity {
         );
         dashboardHome.addView(ecodePanel, ecodeParams);
         root.addView(dashboardHome, fullScreenParams());
+
+        loginMethodBar = createLoginMethodBar();
+        root.addView(loginMethodBar, loginMethodBarParams());
+        builtInLoginPanel = createBuiltInLoginPanel();
+        root.addView(builtInLoginPanel, builtInLoginPanelParams());
 
         portalActionButton = new Button(this);
         portalActionButton.setAllCaps(false);
@@ -630,9 +688,15 @@ public class MainActivity extends Activity {
             // 只根据教务系统登录标记进入查询页。E 码通是否有效由上方独立
             // 原网页自己判断，不能再阻塞教务成绩、考试和课表查询。
             showDashboard();
+        } else if (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)
+                && loadBuiltInCredentials().isComplete()) {
+            // 上一次已确认会话失效，但本机仍有 Keystore 加密凭据：先显示
+            // 查询页/缓存，再让隐藏的登录 WebView 在后台重新认证。
+            showDashboard();
+            backgroundLoginAttemptedForCurrentFailure = true;
+            root.postDelayed(() -> submitBuiltInCredentials(true), 180);
         } else {
-            // 首次登录进入教务系统原网页。原网页继续保留账号密码和二维码两个
-            // 入口；首次加载完成后再让用户选择默认方式，不把密码交给应用。
+            // 首次默认显示内置登录，同时始终保留学校原网页账密和二维码入口。
             showPortal();
         }
     }
@@ -649,7 +713,8 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
-        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/0.1.38");
+        // 保持跨版本稳定的 UA 标识，避免应用更新被学校的可信设备策略视为全新设备。
+        settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/Android");
         webView.setBackgroundColor(Color.rgb(246, 247, 249));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setVerticalScrollBarEnabled(false);
@@ -688,6 +753,12 @@ public class MainActivity extends Activity {
                     installPortalQrCapture();
                     showQrActionLoadingIfNeeded(url);
                     showLoginMethodChooserIfNeeded(url);
+                    if (builtInLoginSubmissionPending && isAcademicPortalReadyUrl(url)) {
+                        finishBuiltInLoginSuccess();
+                    } else if (builtInLoginSubmissionPending && isPortalLoginPage(url)) {
+                        if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
+                        else view.postDelayed(MainActivity.this::inspectBuiltInLoginPage, 350);
+                    }
                 } else if (view == ecodeWebView) {
                     Log.d(LOG_TAG, "page-finished url=" + url + " current=" + view.getUrl() + " title=" + view.getTitle() + " warmup=" + ecodeWarmupPending);
                     if (ecodeWarmupPending) {
@@ -746,6 +817,172 @@ public class MainActivity extends Activity {
         return webView;
     }
 
+    private LinearLayout createLoginMethodBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setPadding(dp(8), dp(7), dp(8), dp(7));
+        bar.setBackgroundColor(Color.WHITE);
+        String[][] methods = {
+                {LOGIN_METHOD_BUILT_IN, "内置登录"},
+                {LOGIN_METHOD_PASSWORD, "原网页账密"},
+                {LOGIN_METHOD_WECHAT, "二维码登录"}
+        };
+        for (String[] item : methods) {
+            Button button = new Button(this);
+            button.setTag(item[0]);
+            button.setText(item[1]);
+            button.setTextSize(12);
+            button.setAllCaps(false);
+            button.setMinHeight(0);
+            button.setMinimumHeight(0);
+            button.setPadding(dp(4), 0, dp(4), 0);
+            button.setOnClickListener(view -> selectPortalLoginMethod(String.valueOf(view.getTag())));
+            bar.addView(button, new LinearLayout.LayoutParams(0, dp(38), 1f));
+        }
+        return bar;
+    }
+
+    private FrameLayout.LayoutParams loginMethodBarParams() {
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(52), Gravity.TOP);
+        params.setMargins(dp(12), dp(6), dp(12), 0);
+        return params;
+    }
+
+    private FrameLayout createBuiltInLoginPanel() {
+        FrameLayout panel = new FrameLayout(this);
+        panel.setBackgroundColor(Color.rgb(246, 247, 249));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(22), dp(30), dp(22), dp(30));
+
+        TextView title = new TextView(this);
+        title.setText("内置登录");
+        title.setTextColor(Color.rgb(24, 35, 54));
+        title.setTextSize(24);
+        title.setTypeface(null, android.graphics.Typeface.BOLD);
+        content.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("通过学校官方统一身份认证页面提交。凭据仅使用 Android Keystore 加密保存在本机，用于登录失效后的后台自动重试。");
+        subtitle.setTextColor(Color.rgb(91, 104, 125));
+        subtitle.setTextSize(13);
+        subtitle.setLineSpacing(0, 1.25f);
+        LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        subtitleParams.setMargins(0, dp(8), 0, dp(22));
+        content.addView(subtitle, subtitleParams);
+
+        builtInUsernameInput = builtInLoginField("学号", InputType.TYPE_CLASS_TEXT);
+        content.addView(builtInUsernameInput, loginFieldParams());
+        builtInPasswordInput = builtInLoginField(
+                "密码",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
+        );
+        content.addView(builtInPasswordInput, loginFieldParams());
+
+        builtInCodeRow = new LinearLayout(this);
+        builtInCodeRow.setTag("built_in_code_row");
+        builtInCodeRow.setOrientation(LinearLayout.HORIZONTAL);
+        builtInCodeInput = builtInLoginField("短信验证码", InputType.TYPE_CLASS_NUMBER);
+        builtInCodeRow.addView(builtInCodeInput, new LinearLayout.LayoutParams(0, dp(52), 1f));
+        builtInCodeSendButton = new Button(this);
+        builtInCodeSendButton.setText("获取验证码");
+        builtInCodeSendButton.setTextSize(12);
+        builtInCodeSendButton.setAllCaps(false);
+        builtInCodeSendButton.setOnClickListener(view -> requestBuiltInSmsCode());
+        LinearLayout.LayoutParams codeButtonParams = new LinearLayout.LayoutParams(dp(112), dp(52));
+        codeButtonParams.setMargins(dp(8), 0, 0, 0);
+        builtInCodeRow.addView(builtInCodeSendButton, codeButtonParams);
+        builtInCodeRow.setVisibility(View.GONE);
+        content.addView(builtInCodeRow, loginFieldParams());
+
+        builtInTrustDeviceCheck = new CheckBox(this);
+        builtInTrustDeviceCheck.setText("信任此设备，并保存加密凭据用于后台自动登录");
+        builtInTrustDeviceCheck.setTextColor(Color.rgb(47, 61, 83));
+        builtInTrustDeviceCheck.setTextSize(13);
+        builtInTrustDeviceCheck.setChecked(true);
+        LinearLayout.LayoutParams trustParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        trustParams.setMargins(0, dp(2), 0, dp(14));
+        content.addView(builtInTrustDeviceCheck, trustParams);
+
+        builtInLoginButton = new Button(this);
+        builtInLoginButton.setText("登录");
+        builtInLoginButton.setAllCaps(false);
+        builtInLoginButton.setTextSize(15);
+        builtInLoginButton.setTextColor(Color.WHITE);
+        builtInLoginButton.setBackground(roundBackground(Color.rgb(43, 101, 153), 14));
+        builtInLoginButton.setOnClickListener(view -> {
+            if (builtInLoginChallengeVisible) submitBuiltInVerificationCode();
+            else submitBuiltInCredentials(false);
+        });
+        content.addView(builtInLoginButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+
+        builtInLoginStatus = new TextView(this);
+        builtInLoginStatus.setTextColor(Color.rgb(111, 121, 138));
+        builtInLoginStatus.setTextSize(12);
+        builtInLoginStatus.setLineSpacing(0, 1.25f);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        statusParams.setMargins(0, dp(12), 0, dp(8));
+        content.addView(builtInLoginStatus, statusParams);
+
+        TextView fallback = new TextView(this);
+        fallback.setText("如果内置登录失败，可随时切换到上方的原网页账密登录或二维码登录。验证码仅提交给学校页面，应用不会保存。");
+        fallback.setTextColor(Color.rgb(125, 135, 151));
+        fallback.setTextSize(11);
+        fallback.setLineSpacing(0, 1.2f);
+        content.addView(fallback);
+
+        LoginCredentials saved = loadBuiltInCredentials();
+        if (saved.isComplete()) {
+            builtInUsernameInput.setText(saved.username);
+            builtInPasswordInput.setText(saved.password);
+            builtInLoginStatus.setText("已读取本机加密凭据。登录状态失效时会先在后台自动重试。");
+        } else if (!lastAcademicLoginError.isEmpty()) {
+            builtInLoginStatus.setText(lastAcademicLoginError);
+            builtInLoginStatus.setTextColor(Color.rgb(176, 57, 57));
+        }
+
+        scroll.addView(content, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        panel.addView(scroll, fullScreenParams());
+        return panel;
+    }
+
+    private EditText builtInLoginField(String hint, int inputType) {
+        EditText field = new EditText(this);
+        field.setHint(hint);
+        field.setTextSize(15);
+        field.setSingleLine(true);
+        field.setInputType(inputType);
+        field.setPadding(dp(14), 0, dp(14), 0);
+        field.setBackground(roundBackground(Color.WHITE, 12));
+        return field;
+    }
+
+    private LinearLayout.LayoutParams loginFieldParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(52));
+        params.setMargins(0, 0, 0, dp(12));
+        return params;
+    }
+
+    private FrameLayout.LayoutParams builtInLoginPanelParams() {
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.TOP
+        );
+        params.setMargins(0, dp(58), 0, 0);
+        return params;
+    }
+
     private FrameLayout.LayoutParams fullScreenParams() {
         return new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -787,7 +1024,8 @@ public class MainActivity extends Activity {
             }
             portalWebView.setVisibility(View.VISIBLE);
             dashboardHome.setVisibility(View.GONE);
-            portalActionButton.setVisibility(View.VISIBLE);
+            if (loginMethodBar != null) loginMethodBar.setVisibility(View.VISIBLE);
+            applyPortalLoginMethodUi();
             updatePortalActionLabel(portalWebView.getUrl());
             if (portalQrActionButton != null) {
                 showQrActionLoadingIfNeeded(portalWebView.getUrl());
@@ -815,6 +1053,8 @@ public class MainActivity extends Activity {
             preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
             cookieManager.flush();
             portalWebView.setVisibility(View.GONE);
+            if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
+            if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
             dashboardHome.setVisibility(View.VISIBLE);
             portalActionButton.setVisibility(View.GONE);
             if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
@@ -840,7 +1080,75 @@ public class MainActivity extends Activity {
 
     private String readLoginMethodPreference() {
         String method = preferences == null ? "" : preferences.getString(DEFAULT_LOGIN_METHOD, "");
-        return LOGIN_METHOD_WECHAT.equals(method) ? LOGIN_METHOD_WECHAT : LOGIN_METHOD_PASSWORD;
+        if (LOGIN_METHOD_WECHAT.equals(method)) return LOGIN_METHOD_WECHAT;
+        if (LOGIN_METHOD_PASSWORD.equals(method)) return LOGIN_METHOD_PASSWORD;
+        return LOGIN_METHOD_BUILT_IN;
+    }
+
+    private SecretKey getOrCreateLoginSecretKey() throws Exception {
+        KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
+        keyStore.load(null);
+        java.security.Key existing = keyStore.getKey(LOGIN_KEYSTORE_ALIAS, null);
+        if (existing instanceof SecretKey) return (SecretKey) existing;
+        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        generator.init(new KeyGenParameterSpec.Builder(
+                LOGIN_KEYSTORE_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
+        ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true)
+                .build());
+        return generator.generateKey();
+    }
+
+    private void saveBuiltInCredentials(String username, String password) {
+        if (preferences == null || username == null || username.trim().isEmpty()
+                || password == null || password.isEmpty()) return;
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("username", username.trim());
+            payload.put("password", password);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, getOrCreateLoginSecretKey());
+            byte[] encrypted = cipher.doFinal(payload.toString().getBytes(StandardCharsets.UTF_8));
+            JSONObject envelope = new JSONObject();
+            envelope.put("version", 1);
+            envelope.put("iv", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP));
+            envelope.put("ciphertext", Base64.encodeToString(encrypted, Base64.NO_WRAP));
+            preferences.edit().putString(BUILT_IN_CREDENTIALS, envelope.toString()).apply();
+        } catch (Exception error) {
+            setBuiltInLoginError("无法安全保存登录凭据：" + safeErrorMessage(error));
+        }
+    }
+
+    private LoginCredentials loadBuiltInCredentials() {
+        if (preferences == null) return new LoginCredentials("", "");
+        String encoded = preferences.getString(BUILT_IN_CREDENTIALS, "");
+        if (encoded == null || encoded.isEmpty()) return new LoginCredentials("", "");
+        try {
+            JSONObject envelope = new JSONObject(encoded);
+            byte[] iv = Base64.decode(envelope.getString("iv"), Base64.NO_WRAP);
+            byte[] encrypted = Base64.decode(envelope.getString("ciphertext"), Base64.NO_WRAP);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, getOrCreateLoginSecretKey(), new GCMParameterSpec(128, iv));
+            JSONObject payload = new JSONObject(new String(
+                    cipher.doFinal(encrypted), StandardCharsets.UTF_8));
+            return new LoginCredentials(payload.optString("username", ""), payload.optString("password", ""));
+        } catch (Exception error) {
+            preferences.edit().remove(BUILT_IN_CREDENTIALS).apply();
+            return new LoginCredentials("", "");
+        }
+    }
+
+    private void clearBuiltInCredentials() {
+        if (preferences != null) preferences.edit().remove(BUILT_IN_CREDENTIALS).apply();
+    }
+
+    private String safeErrorMessage(Throwable error) {
+        if (error == null || error.getMessage() == null || error.getMessage().trim().isEmpty()) {
+            return "未知错误";
+        }
+        return error.getMessage().trim();
     }
 
     private File personalCacheDirectory() {
@@ -1137,11 +1445,336 @@ public class MainActivity extends Activity {
         portalWebView.evaluateJavascript(script, null);
     }
 
-    private void selectPortalLoginMethod(String method) {
-        loginMethodForCurrentPortal = LOGIN_METHOD_WECHAT.equals(method)
-                ? LOGIN_METHOD_WECHAT
-                : LOGIN_METHOD_PASSWORD;
+    private void applyPortalLoginMethodUi() {
+        if (loginMethodBar != null) {
+            for (int index = 0; index < loginMethodBar.getChildCount(); index += 1) {
+                View child = loginMethodBar.getChildAt(index);
+                if (!(child instanceof Button)) continue;
+                boolean selected = loginMethodForCurrentPortal.equals(String.valueOf(child.getTag()));
+                ((Button) child).setTextColor(selected ? Color.WHITE : Color.rgb(66, 81, 104));
+                child.setBackground(roundBackground(
+                        selected ? Color.rgb(43, 101, 153) : Color.rgb(242, 245, 248),
+                        10
+                ));
+            }
+        }
+        boolean builtIn = LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal);
+        if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(builtIn ? View.VISIBLE : View.GONE);
+        if (portalActionButton != null) portalActionButton.setVisibility(builtIn ? View.GONE : View.VISIBLE);
+        if (portalQrActionButton != null && builtIn) portalQrActionButton.setVisibility(View.GONE);
+        if (builtIn && builtInLoginStatus != null && !lastAcademicLoginError.isEmpty()) {
+            builtInLoginStatus.setText(lastAcademicLoginError);
+            builtInLoginStatus.setTextColor(Color.rgb(176, 57, 57));
+        }
+    }
+
+    private void submitBuiltInCredentials(boolean background) {
+        LoginCredentials credentials;
+        if (background) {
+            credentials = loadBuiltInCredentials();
+        } else {
+            credentials = new LoginCredentials(
+                    builtInUsernameInput == null ? "" : builtInUsernameInput.getText().toString(),
+                    builtInPasswordInput == null ? "" : builtInPasswordInput.getText().toString()
+            );
+        }
+        if (!credentials.isComplete()) {
+            finishBuiltInLoginFailure("内置登录失败：请完整输入学号和密码。", background);
+            return;
+        }
+        pendingBuiltInUsername = credentials.username.trim();
+        pendingBuiltInPassword = credentials.password;
+        backgroundLoginInProgress = background;
+        builtInLoginSubmissionPending = true;
+        builtInLoginAwaitingPage = true;
+        builtInLoginChallengeVisible = false;
+        builtInLoginInspectionAttempts = 0;
+        if (!background) {
+            showBuiltInChallenge(false);
+            setBuiltInLoginStatus("正在连接学校统一身份认证…", false);
+            if (builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+        } else {
+            notifyDashboardLoginStatus("retrying", "登录状态已失效，正在后台使用本机加密凭据重新登录…");
+        }
+        if (portalWebView == null) {
+            finishBuiltInLoginFailure("内置登录失败：学校登录页面不可用。", background);
+            return;
+        }
+        String currentUrl = portalWebView.getUrl();
+        if (isPortalLoginPage(currentUrl)) injectBuiltInCredentialsIntoSchoolPage();
+        else portalWebView.loadUrl(PORTAL_URL);
+    }
+
+    private void injectBuiltInCredentialsIntoSchoolPage() {
+        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+        builtInLoginAwaitingPage = false;
+        String username = JSONObject.quote(pendingBuiltInUsername);
+        String password = JSONObject.quote(pendingBuiltInPassword);
+        String script = "(function(){"
+                + "var u=" + username + ",p=" + password + ";"
+                + "var tab=document.getElementById('password_login');"
+                + "if(tab&&typeof tab.click==='function')tab.click();"
+                + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
+                + "if(!un||!pd)return JSON.stringify({ok:false,error:'学校登录页未找到账号密码输入框'});"
+                + "un.disabled=false;pd.disabled=false;un.value=u;pd.value=p;"
+                + "un.dispatchEvent(new Event('input',{bubbles:true}));"
+                + "pd.dispatchEvent(new Event('input',{bubbles:true}));"
+                + "if(typeof window.login==='function'){window.login();return JSON.stringify({ok:true});}"
+                + "var button=document.getElementById('index_login_btn');"
+                + "if(button&&typeof button.click==='function'){button.click();return JSON.stringify({ok:true});}"
+                + "return JSON.stringify({ok:false,error:'学校登录页未找到登录按钮'});"
+                + "})();";
+        portalWebView.evaluateJavascript(script, value -> {
+            try {
+                JSONObject result = new JSONObject(decodeJavascriptString(value));
+                if (!result.optBoolean("ok", false)) {
+                    finishBuiltInLoginFailure("内置登录失败：" + result.optString("error", "无法提交学校登录表单"), backgroundLoginInProgress);
+                    return;
+                }
+            } catch (Exception error) {
+                finishBuiltInLoginFailure("内置登录失败：无法确认学校登录表单是否提交。", backgroundLoginInProgress);
+                return;
+            }
+            portalWebView.postDelayed(this::inspectBuiltInLoginPage, 700);
+        });
+    }
+
+    private void inspectBuiltInLoginPage() {
+        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+        builtInLoginInspectionAttempts += 1;
+        String script = "(function(){"
+                + "function visible(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;}"
+                + "function text(n){return String((n&&(n.innerText||n.textContent))||'').replace(/\\s+/g,' ').trim();}"
+                + "var m=document.getElementById('mcode'),save=document.getElementById('saveDevice'),send=document.getElementById('sendCode');"
+                + "var challenge=visible(m)||visible(save)||visible(document.getElementById('second_valid_ok'));"
+                + "var errors=['errormsg'].map(function(id){var n=document.getElementById(id);return visible(n)?text(n):'';}).filter(Boolean);"
+                + "Array.prototype.slice.call(document.querySelectorAll('.layui-layer-content,.layui-layer-msg')).forEach(function(n){if(visible(n)){var t=text(n);if(t&&t.length<300)errors.push(t);}});"
+                + "return JSON.stringify({challenge:challenge,error:errors.join('；'),sendAvailable:visible(send)});"
+                + "})();";
+        portalWebView.evaluateJavascript(script, value -> {
+            if (!builtInLoginSubmissionPending) return;
+            try {
+                JSONObject result = new JSONObject(decodeJavascriptString(value));
+                String errorText = result.optString("error", "").trim();
+                boolean challenge = result.optBoolean("challenge", false);
+                if (challenge) {
+                    if (backgroundLoginInProgress) {
+                        finishBuiltInLoginFailure(
+                                "后台自动登录需要短信验证码。请点击手动登录完成验证，或改用原网页账密/二维码登录。",
+                                true
+                        );
+                        return;
+                    }
+                    builtInLoginChallengeVisible = true;
+                    showBuiltInChallenge(true);
+                    setBuiltInLoginStatus(
+                            errorText.isEmpty()
+                                    ? "学校要求二次验证。请获取并输入绑定手机收到的短信验证码；“信任此设备”已默认开启。"
+                                    : errorText,
+                            !errorText.isEmpty()
+                    );
+                    if (builtInLoginButton != null) {
+                        builtInLoginButton.setEnabled(true);
+                        builtInLoginButton.setText("验证并登录");
+                    }
+                    return;
+                }
+                if (!errorText.isEmpty()) {
+                    finishBuiltInLoginFailure("学校统一身份认证返回：" + errorText, backgroundLoginInProgress);
+                    return;
+                }
+            } catch (Exception ignored) {
+                // 页面仍在跳转时可能暂时无法读取结果，继续短暂轮询。
+            }
+            if (builtInLoginInspectionAttempts >= LOGIN_INSPECTION_MAX_ATTEMPTS) {
+                finishBuiltInLoginFailure("内置登录超时：学校页面没有返回明确结果，请检查网络后手动登录。", backgroundLoginInProgress);
+            } else {
+                portalWebView.postDelayed(this::inspectBuiltInLoginPage, 650);
+            }
+        });
+    }
+
+    private void requestBuiltInSmsCode() {
+        if (portalWebView == null || !builtInLoginChallengeVisible) return;
+        builtInCodeSendButton.setEnabled(false);
+        builtInCodeSendButton.setText("已请求");
+        String script = "(function(){var send=document.getElementById('sendCode');"
+                + "if(send&&typeof send.click==='function'){send.click();return true;}return false;})();";
+        portalWebView.evaluateJavascript(script, value -> {
+            if (!"true".equals(value)) {
+                builtInCodeSendButton.setEnabled(true);
+                builtInCodeSendButton.setText("重新获取");
+                setBuiltInLoginStatus("学校页面未找到验证码发送按钮，请切换到原网页账密登录完成验证。", true);
+                return;
+            }
+            setBuiltInLoginStatus("验证码请求已提交，请查看统一身份认证绑定的手机。学校限制重复发送频率，请勿连续点击。", false);
+        });
+    }
+
+    private void submitBuiltInVerificationCode() {
+        String code = builtInCodeInput == null ? "" : builtInCodeInput.getText().toString().trim();
+        if (code.isEmpty()) {
+            setBuiltInLoginStatus("请输入短信验证码。", true);
+            return;
+        }
         if (portalWebView == null) return;
+        if (builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+        String script = "(function(){var code=document.getElementById('mcode'),save=document.getElementById('saveDevice'),button=document.getElementById('second_valid_ok');"
+                + "if(!code||!button)return JSON.stringify({ok:false,error:'学校二次认证输入框不可用'});"
+                + "code.value=" + JSONObject.quote(code) + ";"
+                + "code.dispatchEvent(new Event('input',{bubbles:true}));"
+                + "if(save)save.checked=" + Boolean.toString(builtInTrustDeviceCheck == null || builtInTrustDeviceCheck.isChecked()) + ";"
+                + "button.click();return JSON.stringify({ok:true});})();";
+        portalWebView.evaluateJavascript(script, value -> {
+            try {
+                JSONObject result = new JSONObject(decodeJavascriptString(value));
+                if (!result.optBoolean("ok", false)) {
+                    setBuiltInLoginStatus(result.optString("error", "无法提交验证码"), true);
+                    if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+                    return;
+                }
+            } catch (Exception error) {
+                setBuiltInLoginStatus("无法确认验证码是否提交，请稍后重试。", true);
+                if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+                return;
+            }
+            setBuiltInLoginStatus("正在验证短信验证码并登记可信设备…", false);
+            builtInLoginInspectionAttempts = 0;
+            portalWebView.postDelayed(this::inspectBuiltInLoginPage, 700);
+        });
+    }
+
+    private void showBuiltInChallenge(boolean visible) {
+        if (builtInCodeRow != null) builtInCodeRow.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible && builtInCodeInput != null) builtInCodeInput.setText("");
+        if (builtInLoginButton != null) builtInLoginButton.setText(visible ? "验证并登录" : "登录");
+    }
+
+    private void setBuiltInLoginStatus(String message, boolean error) {
+        runOnUiThread(() -> {
+            if (builtInLoginStatus == null) return;
+            builtInLoginStatus.setText(message == null ? "" : message);
+            builtInLoginStatus.setTextColor(error ? Color.rgb(176, 57, 57) : Color.rgb(74, 94, 120));
+        });
+    }
+
+    private void setBuiltInLoginError(String message) {
+        setBuiltInLoginStatus(message, true);
+        setLastAcademicLoginError(message);
+    }
+
+    private void finishBuiltInLoginSuccess() {
+        boolean wasBackground = backgroundLoginInProgress;
+        if (!wasBackground && builtInTrustDeviceCheck != null && builtInTrustDeviceCheck.isChecked()) {
+            saveBuiltInCredentials(pendingBuiltInUsername, pendingBuiltInPassword);
+        } else if (!wasBackground && builtInTrustDeviceCheck != null && !builtInTrustDeviceCheck.isChecked()) {
+            clearBuiltInCredentials();
+        }
+        pendingBuiltInPassword = "";
+        builtInLoginSubmissionPending = false;
+        builtInLoginAwaitingPage = false;
+        builtInLoginChallengeVisible = false;
+        backgroundLoginInProgress = false;
+        backgroundLoginAttemptedForCurrentFailure = false;
+        if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
+        setLastAcademicLoginError("");
+        notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
+        if (wasBackground) {
+            if (portalWebView != null) portalWebView.setVisibility(View.GONE);
+            refreshDashboardData();
+        } else {
+            showDashboard();
+        }
+    }
+
+    private void finishBuiltInLoginFailure(String message, boolean background) {
+        String fullMessage = message == null || message.trim().isEmpty() ? "内置登录失败：未知错误" : message.trim();
+        pendingBuiltInPassword = "";
+        builtInLoginSubmissionPending = false;
+        builtInLoginAwaitingPage = false;
+        builtInLoginChallengeVisible = false;
+        backgroundLoginInProgress = false;
+        if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
+        setLastAcademicLoginError(fullMessage);
+        notifyDashboardLoginStatus("failed", fullMessage);
+        if (background) {
+            if (portalWebView != null) portalWebView.setVisibility(View.GONE);
+            if (dashboardHome != null) dashboardHome.setVisibility(View.VISIBLE);
+            dashboardVisible = true;
+        } else {
+            setBuiltInLoginStatus(fullMessage, true);
+            showBuiltInChallenge(false);
+            if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+        }
+    }
+
+    private void setLastAcademicLoginError(String message) {
+        lastAcademicLoginError = message == null ? "" : message.trim();
+        if (preferences == null) return;
+        SharedPreferences.Editor editor = preferences.edit();
+        if (lastAcademicLoginError.isEmpty()) editor.remove(LAST_ACADEMIC_LOGIN_ERROR);
+        else editor.putString(LAST_ACADEMIC_LOGIN_ERROR, lastAcademicLoginError);
+        editor.apply();
+    }
+
+    private void notifyDashboardLoginStatus(String status, String message) {
+        if (dashboardWebView == null) return;
+        String script = "window.__androidLoginStatus && window.__androidLoginStatus("
+                + JSONObject.quote(status == null ? "" : status) + ","
+                + JSONObject.quote(message == null ? "" : message) + ");";
+        runOnUiThread(() -> dashboardWebView.evaluateJavascript(script, null));
+    }
+
+    private boolean isAcademicPortalReadyUrl(String url) {
+        return isPortalPageUrl(url) && url != null && url.contains("/jwapp/");
+    }
+
+    private boolean isAcademicLoginInvalidResponse(int status, String body) {
+        if (status == 401) return true;
+        String text = body == null ? "" : body;
+        if (text.length() > 600000) text = text.substring(0, 600000);
+        String lower = text.toLowerCase(java.util.Locale.ROOT);
+        return (lower.contains("/tpass/login") || lower.contains("id=\"loginform\"")
+                || lower.contains("id='loginform'"))
+                && (text.contains("统一身份认证") || lower.contains("uniform identity authentication"));
+    }
+
+    private void handleAcademicSessionInvalid(String detail) {
+        runOnUiThread(() -> {
+            String reason = detail == null || detail.trim().isEmpty()
+                    ? "教务系统登录状态已失效"
+                    : detail.trim();
+            setLastAcademicLoginError(reason);
+            if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
+            LoginCredentials saved = loadBuiltInCredentials();
+            if (LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())
+                    && saved.isComplete()
+                    && !backgroundLoginInProgress
+                    && !backgroundLoginAttemptedForCurrentFailure) {
+                backgroundLoginAttemptedForCurrentFailure = true;
+                submitBuiltInCredentials(true);
+                return;
+            }
+            String failure = reason;
+            if (!LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())) {
+                failure += "。当前默认使用其他登录方式，请点击手动登录。";
+            } else if (!saved.isComplete()) {
+                failure += "。本机没有可用于后台登录的加密凭据，请点击手动登录。";
+            }
+            notifyDashboardLoginStatus("failed", failure);
+        });
+    }
+
+    private void selectPortalLoginMethod(String method) {
+        if (LOGIN_METHOD_WECHAT.equals(method)) loginMethodForCurrentPortal = LOGIN_METHOD_WECHAT;
+        else if (LOGIN_METHOD_PASSWORD.equals(method)) loginMethodForCurrentPortal = LOGIN_METHOD_PASSWORD;
+        else loginMethodForCurrentPortal = LOGIN_METHOD_BUILT_IN;
+        if (preferences != null) {
+            preferences.edit().putString(DEFAULT_LOGIN_METHOD, loginMethodForCurrentPortal).apply();
+        }
+        if (portalWebView == null) return;
+        applyPortalLoginMethodUi();
+        if (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)) return;
         showQrActionLoadingIfNeeded(portalWebView.getUrl());
         installPortalQrCapture();
         portalWebView.postDelayed(() -> {
@@ -2246,18 +2879,24 @@ public class MainActivity extends Activity {
 
         @android.webkit.JavascriptInterface
         public String getLoginMethod() {
-            return preferences == null ? LOGIN_METHOD_PASSWORD : readLoginMethodPreference();
+            return preferences == null ? LOGIN_METHOD_BUILT_IN : readLoginMethodPreference();
         }
 
         @android.webkit.JavascriptInterface
         public void setLoginMethod(String method) {
-            String normalized = LOGIN_METHOD_WECHAT.equals(method)
-                    ? LOGIN_METHOD_WECHAT
-                    : LOGIN_METHOD_PASSWORD;
+            String normalized;
+            if (LOGIN_METHOD_WECHAT.equals(method)) normalized = LOGIN_METHOD_WECHAT;
+            else if (LOGIN_METHOD_PASSWORD.equals(method)) normalized = LOGIN_METHOD_PASSWORD;
+            else normalized = LOGIN_METHOD_BUILT_IN;
             loginMethodForCurrentPortal = normalized;
             if (preferences != null) {
                 preferences.edit().putString(DEFAULT_LOGIN_METHOD, normalized).apply();
             }
+        }
+
+        @android.webkit.JavascriptInterface
+        public String getLoginError() {
+            return lastAcademicLoginError == null ? "" : lastAcademicLoginError;
         }
 
         @android.webkit.JavascriptInterface
@@ -2384,6 +3023,13 @@ public class MainActivity extends Activity {
             storeResponseCookies(urlText, connection.getHeaderFields());
             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
             String responseBody = readResponse(stream);
+            if (isAcademicLoginInvalidResponse(status, responseBody)) {
+                handleAcademicSessionInvalid(
+                        status == 401
+                                ? "教务系统返回 HTTP 401，登录状态已失效"
+                                : "教务接口返回统一身份认证登录页，当前会话已失效"
+                );
+            }
             deliver(requestId, status, responseBody);
         } catch (Exception error) {
             deliver(requestId, -1, error.getMessage() == null ? "原生网络请求失败" : error.getMessage());

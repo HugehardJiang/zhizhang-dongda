@@ -59,9 +59,19 @@ function writeStoredSetting(key, value) {
 function androidLoginMethod() {
   if (!IS_ANDROID_APP) return "password";
   try {
-    return globalThis.AndroidApi?.getLoginMethod?.() === "wechat" ? "wechat" : "password";
+    const method = globalThis.AndroidApi?.getLoginMethod?.();
+    return ["builtin", "password", "wechat"].includes(method) ? method : "builtin";
   } catch {
-    return "password";
+    return "builtin";
+  }
+}
+
+function androidLoginError() {
+  if (!IS_ANDROID_APP) return "";
+  try {
+    return String(globalThis.AndroidApi?.getLoginError?.() || "");
+  } catch {
+    return "";
   }
 }
 
@@ -84,6 +94,10 @@ const state = {
   // WebView 真正重新创建时回到 VISIBLE，SPA 页面 render 不得重置它。
   mobileShell: {
     campusHeaderState: CAMPUS_HEADER_VISIBLE
+  },
+  androidLogin: {
+    status: androidLoginError() ? "failed" : "",
+    message: androidLoginError()
   },
   view: "overview",
   terms: [],
@@ -241,6 +255,22 @@ const state = {
   },
   errors: [],
   updatedAt: ""
+};
+
+globalThis.__androidLoginStatus = (status, message) => {
+  if (!IS_ANDROID_APP) return;
+  state.androidLogin.status = String(status || "");
+  state.androidLogin.message = String(message || "");
+  if (state.androidLogin.status === "success") {
+    state.fatalError = "";
+    setNotice(state.androidLogin.message || "后台登录成功，正在刷新数据…", "success");
+    globalThis.__refreshDashboard?.(true);
+  } else if (state.androidLogin.status === "retrying") {
+    setNotice(state.androidLogin.message || "正在后台重新登录…", "");
+  } else if (state.androidLogin.status === "failed") {
+    setNotice(state.androidLogin.message || "后台自动登录失败，请手动登录。", "error");
+  }
+  render();
 };
 
 let filterRenderTimer = 0;
@@ -5688,9 +5718,21 @@ function renderSettingsWithLocalOverlay() {
   const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
   const localCount = (state.localSchedule.items || []).filter((item) => item.termCode === state.termCode || !state.termCode).length;
   const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
-  const cacheBlock = `<section class="settings-section"><div class="settings-intro"><h3>教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。只保存页面展示所需的查询结果，教务系统暂时不可用时仍可查看上次结果。</p></div>${IS_ANDROID_APP ? `<div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除教务缓存</button></div>` : ""}<div class="settings-callout"><strong>隐私</strong><span>缓存按学号隔离，只保存页面展示所需查询结果；不会保存密码、验证码、Cookie 或令牌。</span></div></section>`;
+  const cachePrivacy = IS_ANDROID_APP
+    ? "查询缓存按学号隔离，不包含密码、验证码、Cookie 或令牌；Android 内置登录凭据另行由 Keystore 加密保存。"
+    : "缓存按学号隔离，只保存页面展示所需查询结果；不会保存密码、验证码、Cookie 或令牌。";
+  const cacheBlock = `<section class="settings-section"><div class="settings-intro"><h3>教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。只保存页面展示所需的查询结果，教务系统暂时不可用时仍可查看上次结果。</p></div>${IS_ANDROID_APP ? `<div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除教务缓存</button></div>` : ""}<div class="settings-callout"><strong>隐私</strong><span>${escapeHtml(cachePrivacy)}</span></div></section>`;
   const localBlock = `<section class="settings-section"><div class="settings-intro"><h3>自定义课表</h3><p>${localCount} 条本地安排。手动创建的课程和日程仅保存在本机，并与教务缓存分开存储。</p></div><div class="settings-actions"><button class="button button-primary" type="button" data-action="open-local-manager">管理自定义安排</button><button class="button button-ghost" type="button" data-action="open-local-editor">+ 添加安排</button></div><div class="settings-actions"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button></div><div class="settings-callout"><strong>不会影响教务数据</strong><span>清除教务缓存不会删除自定义安排；清除自定义安排也不会删除成绩、考试或学校课表。</span></div></section>`;
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>下次打开教务系统登录页时默认进入所选方式。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option></select><small>应用不会保存账号、密码或验证码。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}${localBlock}</div></div>`;
+  const loginDescription = IS_ANDROID_APP
+    ? "内置登录默认开启可信设备与后台自动重登；学校原网页账密和二维码入口始终保留。"
+    : "下次打开教务系统登录页时默认进入所选方式。";
+  const loginOptions = IS_ANDROID_APP
+    ? `<option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option>`
+    : `<option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option>`;
+  const loginPrivacy = IS_ANDROID_APP
+    ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
+    : "插件不会保存账号、密码或验证码。";
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}${localBlock}</div></div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -8017,7 +8059,7 @@ function renderSettings() {
   const loginSettings = `<div class="settings-divider"></div><div class="settings-intro settings-login-intro"><span class="eyebrow">LOGIN</span><h3>教务系统默认登录方式</h3><p>账号密码和微信扫码登录仍然都保留。下次打开原系统登录页时，${IS_ANDROID_APP ? "手机端会优先显示这里选择的方式；微信扫码会先保存二维码图片，再打开微信供你从相册扫描" : "电脑端会自动切到这里选择的原系统标签"}。</p></div><label class="settings-field"><span>默认方式</span><select id="loginMethodSelect"><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option></select><small>应用不会保存账号、密码或验证码。</small></label>`;
   const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
   const cacheSettings = IS_ANDROID_APP
-    ? `<div class="settings-divider"></div><div class="settings-intro settings-login-intro"><span class="eyebrow">OFFLINE CACHE</span><h3>个人教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。成绩、考试、个人课表和总览会在成功读取后自动更新；教务系统暂时不可用时，应用仍会展示上次缓存。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私说明</strong><span>缓存按学号隔离，只保存页面展示所需的查询结果，不保存密码、验证码、Cookie 或令牌。</span></div>`
+    ? `<div class="settings-divider"></div><div class="settings-intro settings-login-intro"><span class="eyebrow">OFFLINE CACHE</span><h3>个人教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。成绩、考试、个人课表和总览会在成功读取后自动更新；教务系统暂时不可用时，应用仍会展示上次缓存。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私说明</strong><span>查询缓存按学号隔离，不包含密码、验证码、Cookie 或令牌；Android 内置登录凭据另行由 Keystore 加密保存。</span></div>`
     : "";
   return `<div>${sectionHeading("设置", "为手机端课表设置学周起点。东北大学每周从周日开始，请选择第一周的周日。", `<button class="button button-ghost" type="button" data-action="view-personal">返回课表</button>`)}<div class="panel settings-panel"><div class="settings-intro"><span class="eyebrow">CALENDAR</span><h3>第一周的第一天</h3><p>这个日期用于把课程列表中的“第几周、星期几、节次”换算成日历日期。保存后，个人课表日视图仍显示今天和明天；切换到周表时会默认定位当前周，也可以切回整个学期或其他周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">当前保存的日期不是周日，请重新选择后保存，否则可能造成整周错位。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存设置</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div><div class="settings-callout"><strong>显示规则</strong><span>日视图显示今天和明天；个人周表按开学日期默认定位当前周，并可切换全部周次或指定周；全校课表详情保持原先的全部周次显示逻辑。</span></div>${loginSettings}${cacheSettings}</div></div>`;
 }
@@ -8031,8 +8073,8 @@ function renderSettings() {
     : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
   const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
   const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
-  const cacheBlock = IS_ANDROID_APP ? `<section class="settings-section"><div class="settings-intro"><h3>数据缓存</h3><p>${escapeHtml(cacheStatus)}。成功读取后自动更新，离线时仍可查看上次结果。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私</strong><span>只保存页面展示所需的查询结果，不保存密码、验证码、Cookie 或令牌。</span></div></section>` : "";
-  return `<div>${sectionHeading("设置", "")}<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位当前学周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>下次打开教务系统登录页时默认进入所选方式。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option></select><small>应用不会保存账号、密码或验证码。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}</div></div>`;
+  const cacheBlock = IS_ANDROID_APP ? `<section class="settings-section"><div class="settings-intro"><h3>数据缓存</h3><p>${escapeHtml(cacheStatus)}。成功读取后自动更新，离线时仍可查看上次结果。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私</strong><span>查询缓存不包含密码、验证码、Cookie 或令牌；内置登录凭据另行由 Android Keystore 加密保存。</span></div></section>` : "";
+  return `<div>${sectionHeading("设置", "")}<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位当前学周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>内置登录默认开启可信设备与后台自动重登；原网页账密和二维码入口始终保留。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option></select><small>学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}</div></div>`;
 }
 
 function renderPersonal() {
@@ -8483,8 +8525,8 @@ function renderSettings() {
   const configuredLoginMethod = IS_ANDROID_APP ? androidLoginMethod() : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
   const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
   const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
-  const cacheBlock = IS_ANDROID_APP ? `<section class="settings-section"><div class="settings-intro"><h3>数据缓存</h3><p>${escapeHtml(cacheStatus)}。成功读取后自动更新，离线时仍可查看上次结果。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私</strong><span>只保存页面展示所需的查询结果，不保存密码、验证码、Cookie 或令牌。</span></div></section>` : "";
-  return `<div>${sectionHeading("设置", "")}<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位当前学周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>下次打开教务系统登录页时默认进入所选方式。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option></select><small>应用不会保存账号、密码或验证码。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}</div></div>`;
+  const cacheBlock = IS_ANDROID_APP ? `<section class="settings-section"><div class="settings-intro"><h3>数据缓存</h3><p>${escapeHtml(cacheStatus)}。成功读取后自动更新，离线时仍可查看上次结果。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私</strong><span>查询缓存不包含密码、验证码、Cookie 或令牌；内置登录凭据另行由 Android Keystore 加密保存。</span></div></section>` : "";
+  return `<div>${sectionHeading("设置", "")}<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位当前学周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>内置登录默认开启可信设备与后台自动重登；原网页账密和二维码入口始终保留。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option></select><small>学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}</div></div>`;
 }
 
 function renderAll() {
@@ -8508,9 +8550,17 @@ function renderAllUtilities() {
 }
 
 function renderAndroidLoginEntry() {
-  if (!IS_ANDROID_APP || !state.personalCache.available || state.connected || state.fatalError) return "";
+  if (!IS_ANDROID_APP) return "";
+  const loginStatus = state.androidLogin.status;
+  const loginMessage = state.androidLogin.message;
+  const shouldShow = loginStatus === "retrying" || loginStatus === "failed"
+    || (state.personalCache.available && !state.connected);
+  if (!shouldShow || state.fatalError) return "";
   const savedAt = cacheDateText(state.personalCache.savedAt);
-  return `<section class="android-login-entry" aria-live="polite"><div class="android-login-entry-copy"><strong>当前显示本机缓存</strong><p>教务系统登录会话已失效或暂时不可用。登录后点击“完成教务系统登录，进入执掌东大”，应用会自动刷新成绩、考试和个人课表。</p>${savedAt ? `<small>缓存时间：${escapeHtml(savedAt)}</small>` : ""}</div><button class="button button-primary" type="button" data-action="open-portal">重新登录教务系统</button></section>`;
+  const retrying = loginStatus === "retrying";
+  const title = retrying ? "正在后台重新登录" : loginStatus === "failed" ? "后台自动登录失败" : "当前显示本机缓存";
+  const detail = loginMessage || "教务系统登录会话已失效或暂时不可用。";
+  return `<section class="android-login-entry" aria-live="polite"><div class="android-login-entry-copy"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p>${savedAt ? `<small>缓存时间：${escapeHtml(savedAt)}</small>` : ""}</div><button class="button button-primary" type="button" data-action="open-portal">手动登录 / 其他方式</button></section>`;
 }
 
 function render() {
@@ -8524,7 +8574,12 @@ function render() {
   // Mobile Shell；每次 render 只重新套用已有状态，绝不默认显示。
   applyNativeEcodePlaceholderState();
   if (state.fatalError && state.view !== "settings" && !localScheduleItemsForTerm(state.termCode).length) {
-    elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(state.fatalError)}。插件不会保存账号或密码，只会复用浏览器当前的登录会话。登录完成后点击“刷新数据”即可。</p><button class="button button-primary" type="button" data-action="open-portal">打开教务系统</button></div>`;
+    const completeError = IS_ANDROID_APP ? (state.androidLogin.message || state.fatalError) : state.fatalError;
+    const loginPrivacy = IS_ANDROID_APP
+      ? `<p class="muted">内置登录凭据仅使用 Android Keystore 加密保存在本机；也可以改用学校原网页账密或二维码登录。</p>`
+      : `<p class="muted">插件不会保存账号或密码，只会复用浏览器当前的登录会话。登录完成后点击“刷新数据”即可。</p>`;
+    const loginButtonLabel = IS_ANDROID_APP ? "手动登录 / 其他方式" : "打开教务系统";
+    elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(completeError)}</p>${loginPrivacy}<button class="button button-primary" type="button" data-action="open-portal">${loginButtonLabel}</button></div>`;
     return;
   }
   if (state.loading && !state.data.scores.length && !state.data.exams.length && !state.data.courses.length && !localScheduleItemsForTerm(state.termCode).length && state.view === "overview") {
@@ -9742,11 +9797,15 @@ elements.content.addEventListener("change", (event) => {
     return;
   }
   if (event.target.id === "loginMethodSelect") {
-    const method = event.target.value === "wechat" ? "wechat" : "password";
+    const requestedMethod = String(event.target.value || "");
+    const method = IS_ANDROID_APP
+      ? (["builtin", "password", "wechat"].includes(requestedMethod) ? requestedMethod : "builtin")
+      : (requestedMethod === "wechat" ? "wechat" : "password");
     try {
       if (IS_ANDROID_APP) globalThis.AndroidApi?.setLoginMethod?.(method);
       else writeStoredSetting("zhizhang.loginMethod", method);
-      setNotice(`已保存默认登录方式：${method === "wechat" ? "微信扫码登录" : "账号密码登录"}。`, "success");
+      const methodLabel = method === "builtin" ? "内置登录" : method === "wechat" ? "微信扫码登录" : "原网页账密登录";
+      setNotice(`已保存默认登录方式：${methodLabel}。`, "success");
     } catch (error) {
       setNotice(`默认登录方式保存失败：${error.message || "原生设置不可用"}`, "error");
     }

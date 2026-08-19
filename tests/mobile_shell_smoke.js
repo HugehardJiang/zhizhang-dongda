@@ -22,7 +22,7 @@ function createElementStub() {
   return {
     value: "", textContent: "", innerHTML: "", className: "", disabled: false, hidden: false, src: "",
     dataset: {}, selectedOptions: [], classList: createClassList(),
-    addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, setSelectionRange() {}, click() {},
+    addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, setSelectionRange() {}, click() {}, insertAdjacentHTML() {},
     querySelector() { return null; }, querySelectorAll() { return []; }, matches() { return false; }, closest() { return null; }
   };
 }
@@ -50,7 +50,10 @@ androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; }
 global.window = global;
 global.AndroidApi = {
   request() {},
-  setEcodePanelHidden(hidden) { nativeCalls.push(Boolean(hidden)); }
+  setEcodePanelHidden(hidden) { nativeCalls.push(Boolean(hidden)); },
+  getLoginMethod() { return "builtin"; },
+  getLoginError() { return ""; },
+  setLoginMethod(method) { nativeCalls.push(`login:${method}`); }
 };
 global.document = {
   documentElement: { classList: createClassList() },
@@ -79,6 +82,9 @@ code += `
 globalThis.__mobileShellAudit = {
   state,
   render,
+  androidLoginMethod,
+  renderSettings,
+  renderAndroidLoginEntry,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
 };
@@ -90,6 +96,36 @@ const card = audit.card;
 const touch = (clientY) => ({ touches: [{ clientY }], changedTouches: [{ clientY }] });
 
 assert.strictEqual(androidCurriculumEntry.removed, true);
+
+// Android defaults to the native built-in login while preserving both school
+// page fallbacks in settings.
+const loginSettings = audit.renderSettings();
+assert.strictEqual(audit.androidLoginMethod(), 'builtin');
+assert.ok(loginSettings.includes('<option value="builtin"'));
+assert.ok(loginSettings.includes('内置登录（默认）'));
+assert.ok(loginSettings.includes('<option value="password"'));
+assert.ok(loginSettings.includes('<option value="wechat"'));
+assert.ok(loginSettings.includes('Android Keystore'));
+
+// A background failure keeps the complete school error beside the manual
+// fallback entry instead of collapsing it to a generic toast.
+const completeLoginError = '学校统一身份认证返回：账号或密码错误（错误码 AUTH-401）';
+global.__androidLoginStatus('failed', completeLoginError);
+audit.state.personalCache.available = true;
+audit.state.connected = false;
+const loginEntry = audit.renderAndroidLoginEntry();
+assert.ok(loginEntry.includes(completeLoginError));
+assert.ok(loginEntry.includes('手动登录 / 其他方式'));
+
+const mainActivitySource = fs.readFileSync(path.join(
+  __dirname, '..', 'android', 'app', 'src', 'main', 'java', 'cn', 'neu',
+  'zhizhangdongda', 'MainActivity.java'
+), 'utf8');
+assert.ok(mainActivitySource.includes('KeyStore.getInstance("AndroidKeyStore")'));
+assert.ok(mainActivitySource.includes('AES/GCM/NoPadding'));
+assert.ok(mainActivitySource.includes('submitBuiltInCredentials(true)'));
+assert.ok(mainActivitySource.includes('后台自动登录需要短信验证码'));
+assert.ok(mainActivitySource.includes('LOGIN_METHOD_BUILT_IN'));
 
 audit.prepare();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
