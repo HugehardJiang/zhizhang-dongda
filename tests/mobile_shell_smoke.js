@@ -126,7 +126,24 @@ assert.ok(mainActivitySource.includes('AES/GCM/NoPadding'));
 assert.ok(mainActivitySource.includes('submitBuiltInCredentials(true)'));
 assert.ok(mainActivitySource.includes('后台自动登录需要短信验证码'));
 assert.ok(mainActivitySource.includes('LOGIN_METHOD_BUILT_IN'));
-assert.ok(/handleAcademicSessionInvalid[\s\S]*if \(backgroundLoginInProgress\) return;[\s\S]*setLastAcademicLoginError\(reason\)/.test(mainActivitySource));
+assert.ok(/handleAcademicSessionInvalid[\s\S]*if \(academicSsoRecoveryInProgress \|\| backgroundLoginInProgress\) return;[\s\S]*startAcademicSsoRecovery\(reason\)/.test(mainActivitySource));
+assert.ok(/startAcademicSsoRecovery[\s\S]*portalWebView\.loadUrl\(ECODE_URL\)/.test(mainActivitySource));
+assert.ok(/finishAcademicSsoRecoveryFailure[\s\S]*attemptBuiltInBackgroundLoginOrReport/.test(mainActivitySource));
+
+const androidManifestSource = fs.readFileSync(path.join(
+  __dirname, '..', 'android', 'app', 'src', 'main', 'AndroidManifest.xml'
+), 'utf8');
+const adaptiveIconSource = fs.readFileSync(path.join(
+  __dirname, '..', 'android', 'app', 'src', 'main', 'res', 'drawable-v26', 'ic_app.xml'
+), 'utf8');
+const iconForegroundSource = fs.readFileSync(path.join(
+  __dirname, '..', 'android', 'app', 'src', 'main', 'res', 'drawable', 'ic_app_foreground.xml'
+), 'utf8');
+assert.ok(androidManifestSource.includes('android:icon="@drawable/ic_app"'));
+assert.ok(androidManifestSource.includes('android:roundIcon="@drawable/ic_app"'));
+assert.ok(adaptiveIconSource.includes('<adaptive-icon'));
+assert.ok(adaptiveIconSource.includes('@drawable/ic_app_foreground'));
+assert.ok(iconForegroundSource.includes('#FFFFC857'));
 
 audit.prepare();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");

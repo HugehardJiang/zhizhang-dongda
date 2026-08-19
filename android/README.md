@@ -5,7 +5,8 @@ Android 应用名为“执掌东大”，包名为 `cn.neu.zhizhangdongda`。
 ## 功能
 
 - 登录页并列内置登录、学校原网页账密和二维码登录，默认选中内置登录；
-- 内置登录支持学号、密码及学校短信验证码，默认信任设备；登录成功后使用 Android Keystore AES-GCM 加密保存凭据，会话失效时在隐藏 WebView 后台重登，失败时在主页底部显示完整错误与其他登录入口；
+- 内置登录支持学号、密码及学校短信验证码，默认信任设备；登录成功后使用 Android Keystore AES-GCM 加密保存凭据。教务会话失效时，隐藏 WebView 先复用 E 码通/统一认证长会话换取新 Session，失败后才使用加密账密重登；两级恢复均失败时在主页底部显示完整错误与其他登录入口；
+- 蓝色书本应用图标，Android 8.0 及以上使用自适应图标，同时提供旧系统兼容图层；
 - 独立持久化教务系统 WebView Cookie/SSO 会话，下次启动复用教务登录状态；
 - 进入首页后独立加载校园 E 码通官方原网页，默认以约 112dp 的紧凑卡片展示二维码缩略图和更新时间；缩略图优先按 DOM 二维码节点裁切，失败时按整页截图的高对比度方形区域分析兜底；卡片随课表页内滚动向下隐藏、向上或回到顶部显示，点击卡片可展开完整原网页；
 - E 码通原网页支持单独登录和刷新，E 码通失效不会阻塞教务查询；
@@ -34,7 +35,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 构建产物位于：
 
 ```text
-app/build/outputs/apk/debug/执掌东大-Android-0.1.42-debug.apk
+app/build/outputs/apk/debug/执掌东大-Android-0.1.43-debug.apk
 ```
 
 根目录的 `dashboard.html`、`dashboard.css`、`dashboard.js` 会在构建前自动同步到 Android assets，因此接口解析和界面逻辑与浏览器插件共用一套代码。
@@ -43,7 +44,7 @@ app/build/outputs/apk/debug/执掌东大-Android-0.1.42-debug.apk
 
 ## 登录持久化说明
 
-应用使用 Android `CookieManager` 持久化学校 WebVPN/统一认证会话，并用 `SharedPreferences` 保存默认登录方式、教务登录标记、缓存索引和 Keystore 加密凭据的密文封装。个人查询结果写入应用内部的 `personal-cache` 目录，文件名是学号的 SHA-256 哈希，不同账号不会共用缓存；设置页可以清除本机缓存。应用重启时先展示缓存，再复用 Cookie 请求最新数据；如果会话过期且用户已保存内置登录凭据，隐藏的登录 WebView 会在后台自动重试。
+应用使用 Android `CookieManager` 持久化学校 WebVPN/统一认证会话，并用 `SharedPreferences` 保存默认登录方式、教务登录标记、缓存索引和 Keystore 加密凭据的密文封装。个人查询结果写入应用内部的 `personal-cache` 目录，文件名是学号的 SHA-256 哈希，不同账号不会共用缓存；设置页可以清除本机缓存。应用重启时先展示缓存，再复用 Cookie 请求最新数据。教务会话过期时，隐藏 WebView 先访问已长时登录的 E 码通目标刷新共享 SSO/WebVPN Cookie，再打开教务入口换取新教务业务 Session；只有这一步失败时才使用 Keystore 加密凭据。
 
 本地课表覆盖层写入独立的 `local-schedule/` 目录，文件名同样按学号或匿名 profile key 的 SHA-256 哈希生成；写入先落到同目录临时文件，再尝试原子替换，避免半截 JSON 覆盖旧数据。它只保存 `zhizhang-local-schedule/v1` 结构中的本地课程、一次性日程和本地隐藏教务排课键，不保存 Cookie、密码或网络响应；“清除教务缓存”与“清除全部自定义安排”是两个互不影响的操作。
 

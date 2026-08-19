@@ -95,7 +95,8 @@ public class MainActivity extends Activity {
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.42";
+    private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.43";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -380,6 +381,10 @@ public class MainActivity extends Activity {
     private static final String LOGIN_METHOD_WECHAT = "wechat";
     private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
     private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
+    private static final int ACADEMIC_SSO_RECOVERY_IDLE = 0;
+    private static final int ACADEMIC_SSO_RECOVERY_ECODE = 1;
+    private static final int ACADEMIC_SSO_RECOVERY_PORTAL = 2;
+    private static final long ACADEMIC_SSO_RECOVERY_TIMEOUT_MS = 16000L;
     private static final int WRITE_QR_STORAGE_REQUEST = 2201;
     private static final int WRITE_DASHBOARD_IMAGE_REQUEST = 2202;
     private static final int WRITE_DASHBOARD_CSV_REQUEST = 2203;
@@ -576,6 +581,12 @@ public class MainActivity extends Activity {
     private boolean builtInLoginChallengeVisible;
     private boolean backgroundLoginInProgress;
     private boolean backgroundLoginAttemptedForCurrentFailure;
+    private boolean academicSsoRecoveryInProgress;
+    private boolean academicSsoRecoveryAttemptedForCurrentFailure;
+    private int academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
+    private int academicSsoRecoveryToken;
+    private boolean academicSsoEcodeNavigationStarted;
+    private String pendingAcademicFailureReason = "";
     private int builtInLoginInspectionAttempts;
     private String pendingBuiltInUsername = "";
     private String pendingBuiltInPassword = "";
@@ -688,13 +699,15 @@ public class MainActivity extends Activity {
             // 只根据教务系统登录标记进入查询页。E 码通是否有效由上方独立
             // 原网页自己判断，不能再阻塞教务成绩、考试和课表查询。
             showDashboard();
-        } else if (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)
-                && loadBuiltInCredentials().isComplete()) {
-            // 上一次已确认会话失效，但本机仍有 Keystore 加密凭据：先显示
-            // 查询页/缓存，再让隐藏的登录 WebView 在后台重新认证。
+        } else if (!lastAcademicLoginError.isEmpty()
+                || (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)
+                && loadBuiltInCredentials().isComplete())) {
+            // 上一次已确认教务会话失效：先显示查询页/缓存，再让
+            // 隐藏 WebView 优先复用 E 码通/统一认证长会话，失败后才降级到加密账密。
             showDashboard();
-            backgroundLoginAttemptedForCurrentFailure = true;
-            root.postDelayed(() -> submitBuiltInCredentials(true), 180);
+            academicSsoRecoveryAttemptedForCurrentFailure = true;
+            root.postDelayed(() -> startAcademicSsoRecovery(
+                    "应用启动时发现教务会话已失效"), 180);
         } else {
             // 首次默认显示内置登录，同时始终保留学校原网页账密和二维码入口。
             showPortal();
@@ -727,6 +740,11 @@ public class MainActivity extends Activity {
                 if (view == portalWebView) {
                     clearPendingQrUrl();
                     portalLoginService = extractLoginService(url);
+                    if (academicSsoRecoveryInProgress
+                            && academicSsoRecoveryStage == ACADEMIC_SSO_RECOVERY_ECODE
+                            && url != null && url.contains(ECODE_TARGET_TOKEN)) {
+                        academicSsoEcodeNavigationStarted = true;
+                    }
                     updatePortalActionLabel(url);
                 }
                 if (view == ecodeWebView) {
@@ -749,6 +767,10 @@ public class MainActivity extends Activity {
                 cookieManager.flush();
                 if (view == portalWebView) {
                     portalLoginService = extractLoginService(url);
+                    if (academicSsoRecoveryInProgress) {
+                        handleAcademicSsoRecoveryPage(url);
+                        return;
+                    }
                     updatePortalActionLabel(url);
                     installPortalQrCapture();
                     showQrActionLoadingIfNeeded(url);
@@ -1037,6 +1059,7 @@ public class MainActivity extends Activity {
 
     private void openPortalForReauthentication() {
         runOnUiThread(() -> {
+            cancelAutomaticAcademicRecovery();
             if (dashboardVisible && portalWebView != null) {
                 // 从查询页点击“打开原系统”时重新走一次统一认证入口，
                 // 这样 Cookie 失效后不会停留在旧的远程页面。
@@ -1045,6 +1068,20 @@ public class MainActivity extends Activity {
             }
             showPortal();
         });
+    }
+
+    private void cancelAutomaticAcademicRecovery() {
+        academicSsoRecoveryInProgress = false;
+        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
+        academicSsoEcodeNavigationStarted = false;
+        academicSsoRecoveryToken += 1;
+        if (backgroundLoginInProgress) {
+            backgroundLoginInProgress = false;
+            builtInLoginSubmissionPending = false;
+            builtInLoginAwaitingPage = false;
+            builtInLoginChallengeVisible = false;
+            pendingBuiltInPassword = "";
+        }
     }
 
     private void showDashboard() {
@@ -1675,13 +1712,15 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
-        backgroundLoginAttemptedForCurrentFailure = false;
+        if (!wasBackground) {
+            backgroundLoginAttemptedForCurrentFailure = false;
+            academicSsoRecoveryAttemptedForCurrentFailure = false;
+        }
         if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
         setLastAcademicLoginError("");
         notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
         if (wasBackground) {
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
-            refreshDashboardData();
         } else {
             showDashboard();
         }
@@ -1739,6 +1778,128 @@ public class MainActivity extends Activity {
                 && (text.contains("统一身份认证") || lower.contains("uniform identity authentication"));
     }
 
+    private void startAcademicSsoRecovery(String reason) {
+        if (portalWebView == null || academicSsoRecoveryInProgress || backgroundLoginInProgress) return;
+        pendingAcademicFailureReason = reason == null || reason.trim().isEmpty()
+                ? "教务系统登录状态已失效"
+                : reason.trim();
+        academicSsoRecoveryInProgress = true;
+        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_ECODE;
+        academicSsoEcodeNavigationStarted = false;
+        int token = ++academicSsoRecoveryToken;
+        notifyDashboardLoginStatus(
+                "retrying",
+                "教务会话已失效，正在后台复用 E 码通/统一认证长会话…"
+        );
+        portalWebView.setVisibility(View.GONE);
+        portalWebView.stopLoading();
+        // 先访问已能长时保持登录的 E 码通目标，让学校 SSO/WebVPN
+        // 刷新共享 Cookie；随后再打开教务入口换取新的教务业务 Session。
+        portalWebView.loadUrl(ECODE_URL);
+        portalWebView.postDelayed(() -> {
+            if (academicSsoRecoveryInProgress && academicSsoRecoveryToken == token) {
+                finishAcademicSsoRecoveryFailure("复用 E 码通/统一认证会话超时");
+            }
+        }, ACADEMIC_SSO_RECOVERY_TIMEOUT_MS);
+    }
+
+    private void handleAcademicSsoRecoveryPage(String url) {
+        if (!academicSsoRecoveryInProgress || portalWebView == null) return;
+        if (academicSsoRecoveryStage == ACADEMIC_SSO_RECOVERY_ECODE) {
+            if (!academicSsoEcodeNavigationStarted) return;
+            academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_PORTAL;
+            cookieManager.flush();
+            portalWebView.postDelayed(() -> {
+                if (academicSsoRecoveryInProgress
+                        && academicSsoRecoveryStage == ACADEMIC_SSO_RECOVERY_PORTAL) {
+                    portalWebView.loadUrl(PORTAL_URL);
+                }
+            }, 220);
+            return;
+        }
+        if (academicSsoRecoveryStage != ACADEMIC_SSO_RECOVERY_PORTAL) return;
+        if (isAcademicPortalReadyUrl(url)) {
+            finishAcademicSsoRecoverySuccess();
+            return;
+        }
+        if (isPortalLoginPage(url)) {
+            int token = academicSsoRecoveryToken;
+            portalWebView.postDelayed(() -> {
+                if (!academicSsoRecoveryInProgress || academicSsoRecoveryToken != token) return;
+                String currentUrl = portalWebView.getUrl();
+                if (isAcademicPortalReadyUrl(currentUrl)) finishAcademicSsoRecoverySuccess();
+                else if (isPortalLoginPage(currentUrl)) {
+                    finishAcademicSsoRecoveryFailure("学校统一认证长会话已失效");
+                }
+            }, 650);
+        }
+    }
+
+    private void finishAcademicSsoRecoverySuccess() {
+        if (!academicSsoRecoveryInProgress) return;
+        academicSsoRecoveryInProgress = false;
+        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
+        academicSsoEcodeNavigationStarted = false;
+        academicSsoRecoveryToken += 1;
+        if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
+        setLastAcademicLoginError("");
+        if (portalWebView != null) portalWebView.setVisibility(View.GONE);
+        notifyDashboardLoginStatus(
+                "success",
+                "已在后台通过 E 码通/统一认证会话恢复教务登录，正在刷新数据…"
+        );
+    }
+
+    private void finishAcademicSsoRecoveryFailure(String recoveryError) {
+        if (!academicSsoRecoveryInProgress) return;
+        academicSsoRecoveryInProgress = false;
+        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
+        academicSsoEcodeNavigationStarted = false;
+        academicSsoRecoveryToken += 1;
+        String detail = recoveryError == null || recoveryError.trim().isEmpty()
+                ? "复用 E 码通/统一认证会话失败"
+                : recoveryError.trim();
+        attemptBuiltInBackgroundLoginOrReport(pendingAcademicFailureReason + "。" + detail);
+    }
+
+    private void attemptBuiltInBackgroundLoginOrReport(String reason) {
+        LoginCredentials saved = loadBuiltInCredentials();
+        if (LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())
+                && saved.isComplete()
+                && !backgroundLoginAttemptedForCurrentFailure) {
+            backgroundLoginAttemptedForCurrentFailure = true;
+            notifyDashboardLoginStatus(
+                    "retrying",
+                    "E 码通/统一认证会话无法恢复教务，正在后台使用本机加密凭据重登…"
+            );
+            submitBuiltInCredentials(true);
+            return;
+        }
+        String failure = reason == null || reason.trim().isEmpty()
+                ? "教务系统后台恢复失败"
+                : reason.trim();
+        if (!LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())) {
+            failure += "。当前默认使用其他登录方式，请点击手动登录。";
+        } else if (!saved.isComplete()) {
+            failure += "。本机没有可用于后台登录的加密凭据，请点击手动登录。";
+        } else {
+            failure += "。加密凭据后台重登也未成功，请点击手动登录。";
+        }
+        setLastAcademicLoginError(failure);
+        notifyDashboardLoginStatus("failed", failure);
+    }
+
+    private void markAcademicSessionHealthy() {
+        runOnUiThread(() -> {
+            if (academicSsoRecoveryInProgress || backgroundLoginInProgress) return;
+            academicSsoRecoveryAttemptedForCurrentFailure = false;
+            backgroundLoginAttemptedForCurrentFailure = false;
+            pendingAcademicFailureReason = "";
+            if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
+            if (!lastAcademicLoginError.isEmpty()) setLastAcademicLoginError("");
+        });
+    }
+
     private void handleAcademicSessionInvalid(String detail) {
         runOnUiThread(() -> {
             String reason = detail == null || detail.trim().isEmpty()
@@ -1747,25 +1908,16 @@ public class MainActivity extends Activity {
             // 一次刷新会并发请求多个教务接口，会话过期时它们可能
             // 同时返回登录页。后台重登已在进行时忽略后续重复通知，避免
             // “正在重登”被误覆盖成“登录失败”。
-            if (backgroundLoginInProgress) return;
+            if (academicSsoRecoveryInProgress || backgroundLoginInProgress) return;
             setLastAcademicLoginError(reason);
             if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
-            LoginCredentials saved = loadBuiltInCredentials();
-            if (LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())
-                    && saved.isComplete()
-                    && !backgroundLoginInProgress
-                    && !backgroundLoginAttemptedForCurrentFailure) {
-                backgroundLoginAttemptedForCurrentFailure = true;
-                submitBuiltInCredentials(true);
+            pendingAcademicFailureReason = reason;
+            if (!academicSsoRecoveryAttemptedForCurrentFailure) {
+                academicSsoRecoveryAttemptedForCurrentFailure = true;
+                startAcademicSsoRecovery(reason);
                 return;
             }
-            String failure = reason;
-            if (!LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())) {
-                failure += "。当前默认使用其他登录方式，请点击手动登录。";
-            } else if (!saved.isComplete()) {
-                failure += "。本机没有可用于后台登录的加密凭据，请点击手动登录。";
-            }
-            notifyDashboardLoginStatus("failed", failure);
+            attemptBuiltInBackgroundLoginOrReport(reason);
         });
     }
 
@@ -3027,12 +3179,15 @@ public class MainActivity extends Activity {
             storeResponseCookies(urlText, connection.getHeaderFields());
             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
             String responseBody = readResponse(stream);
-            if (isAcademicLoginInvalidResponse(status, responseBody)) {
+            boolean loginInvalid = isAcademicLoginInvalidResponse(status, responseBody);
+            if (loginInvalid) {
                 handleAcademicSessionInvalid(
                         status == 401
                                 ? "教务系统返回 HTTP 401，登录状态已失效"
                                 : "教务接口返回统一身份认证登录页，当前会话已失效"
                 );
+            } else if (status >= 200 && status < 400) {
+                markAcademicSessionHealthy();
             }
             deliver(requestId, status, responseBody);
         } catch (Exception error) {

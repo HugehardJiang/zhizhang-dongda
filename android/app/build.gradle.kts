@@ -10,8 +10,8 @@ android {
         applicationId = "cn.neu.zhizhangdongda"
         minSdk = 24
         targetSdk = 35
-        versionCode = 42
-        versionName = "0.1.42"
+        versionCode = 43
+        versionName = "0.1.43"
     }
 
     buildTypes {

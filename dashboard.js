@@ -5724,7 +5724,7 @@ function renderSettingsWithLocalOverlay() {
   const cacheBlock = `<section class="settings-section"><div class="settings-intro"><h3>教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。只保存页面展示所需的查询结果，教务系统暂时不可用时仍可查看上次结果。</p></div>${IS_ANDROID_APP ? `<div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除教务缓存</button></div>` : ""}<div class="settings-callout"><strong>隐私</strong><span>${escapeHtml(cachePrivacy)}</span></div></section>`;
   const localBlock = `<section class="settings-section"><div class="settings-intro"><h3>自定义课表</h3><p>${localCount} 条本地安排。手动创建的课程和日程仅保存在本机，并与教务缓存分开存储。</p></div><div class="settings-actions"><button class="button button-primary" type="button" data-action="open-local-manager">管理自定义安排</button><button class="button button-ghost" type="button" data-action="open-local-editor">+ 添加安排</button></div><div class="settings-actions"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button></div><div class="settings-callout"><strong>不会影响教务数据</strong><span>清除教务缓存不会删除自定义安排；清除自定义安排也不会删除成绩、考试或学校课表。</span></div></section>`;
   const loginDescription = IS_ANDROID_APP
-    ? "内置登录默认开启可信设备与后台自动重登；学校原网页账密和二维码入口始终保留。"
+    ? "教务会话失效时先在后台复用 E 码通/统一认证，失败后才使用本机加密凭据；学校原网页入口始终保留。"
     : "下次打开教务系统登录页时默认进入所选方式。";
   const loginOptions = IS_ANDROID_APP
     ? `<option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option>`
