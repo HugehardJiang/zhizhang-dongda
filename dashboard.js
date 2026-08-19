@@ -4978,20 +4978,18 @@ function showToast(text = "", type = "success") {
   toast.setAttribute("role", type === "error" ? "alert" : "status");
   toast.textContent = text;
   elements.toastRegion.replaceChildren(toast);
+  const duration = type === "error" ? 5600 : type === "info" ? 4200 : 3200;
   toastTimer = window.setTimeout(() => {
     if (toast.parentElement === elements.toastRegion) elements.toastRegion.replaceChildren();
-  }, 3400);
+  }, duration);
 }
 
 function setNotice(text = "", type = "") {
-  if (type === "success") {
+  if (elements.notice) {
     elements.notice.textContent = "";
     elements.notice.className = "notice";
-    showToast(text, "success");
-    return;
   }
-  elements.notice.textContent = text;
-  elements.notice.className = `notice${type ? ` is-${type}` : ""}`;
+  showToast(text, type || "info");
 }
 
 function numberOrDash(value) {

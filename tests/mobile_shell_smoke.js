@@ -19,12 +19,18 @@ function createClassList() {
 }
 
 function createElementStub() {
-  return {
+  const element = {
     value: "", textContent: "", innerHTML: "", className: "", disabled: false, hidden: false, src: "",
-    dataset: {}, selectedOptions: [], classList: createClassList(),
+    dataset: {}, selectedOptions: [], classList: createClassList(), children: [], parentElement: null,
     addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, setSelectionRange() {}, click() {}, insertAdjacentHTML() {},
+    replaceChildren(...children) {
+      this.children.forEach((child) => { child.parentElement = null; });
+      this.children = children;
+      children.forEach((child) => { child.parentElement = this; });
+    },
     querySelector() { return null; }, querySelectorAll() { return []; }, matches() { return false; }, closest() { return null; }
   };
+  return element;
 }
 
 function createEventTarget() {
@@ -85,6 +91,7 @@ globalThis.__mobileShellAudit = {
   androidLoginMethod,
   renderSettings,
   renderAndroidLoginEntry,
+  setNotice,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
 };
@@ -116,6 +123,25 @@ audit.state.connected = false;
 const loginEntry = audit.renderAndroidLoginEntry();
 assert.ok(loginEntry.includes(completeLoginError));
 assert.ok(loginEntry.includes('手动登录 / 其他方式'));
+
+// Transient loading, success, and error feedback stays outside page flow in
+// one bottom snackbar. It must never repopulate the legacy top notice.
+const notice = elements.get('notice');
+const toastRegion = elements.get('toastRegion');
+audit.setNotice('正在后台重新登录…');
+assert.strictEqual(notice.textContent, '');
+assert.strictEqual(toastRegion.children.length, 1);
+assert.strictEqual(toastRegion.children[0].className, 'toast toast-info');
+audit.setNotice('数据已更新。', 'success');
+assert.strictEqual(toastRegion.children[0].className, 'toast toast-success');
+audit.setNotice('登录失败。', 'error');
+assert.strictEqual(toastRegion.children[0].className, 'toast toast-error');
+
+const dashboardCss = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+assert.ok(dashboardCss.includes('.notice { display: none; }'));
+assert.ok(dashboardCss.includes('bottom: calc(64px + env(safe-area-inset-bottom) + 10px)'));
+assert.ok(!dashboardCss.includes('.toast-region { top: calc(var(--toolbar-height) + 10px)'));
+audit.setNotice('');
 
 const mainActivitySource = fs.readFileSync(path.join(
   __dirname, '..', 'android', 'app', 'src', 'main', 'java', 'cn', 'neu',
