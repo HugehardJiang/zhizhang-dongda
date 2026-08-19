@@ -1704,6 +1704,21 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .local-conflict-row strong { color: #6b4b2b; font-size: 12px; }.local-conflict-row span, .local-conflict-row small { color: #957b60; font-size: 10px; }.local-conflict-choice { padding-top: 14px; border-top: 1px solid var(--border, #e4e9ef); }.local-conflict-choice strong { color: var(--text-primary, #263b49); font-size: 12px; }.local-conflict-choice p { margin: 5px 0 12px; color: var(--text-tertiary, #87929f); font-size: 11px; line-height: 1.55; }.local-conflict-actions { display: flex; flex-wrap: wrap; gap: 8px; }.local-conflict-actions small { font-size: 9px; font-weight: 500; }
 .local-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--border, #e4e9ef); }
 
+.settings-tools-section { padding-top: 0; }
+.webvpn-tool-modal { width: min(680px, 100%); }
+.webvpn-quick-sites { display: grid; gap: 8px; margin-bottom: 18px; }
+.webvpn-quick-sites > span, .webvpn-tool-field > span { color: var(--text-secondary); font-size: 11px; font-weight: 650; }
+.webvpn-quick-sites > div { display: flex; flex-wrap: wrap; gap: 7px; }
+.webvpn-quick-site { min-height: 30px; padding: 0 10px; color: var(--brand); background: var(--brand-50); border: 1px solid var(--brand-100); border-radius: 999px; font-size: 10px; font-weight: 600; }
+.webvpn-quick-site:hover { background: var(--brand-100); }
+.webvpn-tool-field { display: grid; gap: 7px; margin-top: 15px; }
+.webvpn-tool-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.webvpn-tool-input-row input { width: 100%; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.webvpn-tool-field textarea { width: 100%; min-height: 96px; padding: 10px 11px; resize: vertical; color: var(--text-secondary); background: var(--surface-subtle); border: 1px solid var(--border); border-radius: var(--radius-sm); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+.webvpn-tool-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.webvpn-tool-error { margin: 10px 0 0; padding: 9px 10px; color: var(--danger); background: var(--danger-soft); border: 1px solid #efd6d6; border-radius: var(--radius-sm); font-size: 11px; line-height: 1.5; }
+.webvpn-tool-privacy { margin-top: 17px; padding-top: 13px; border-top: 1px solid var(--border); }
+
 @media (max-width: 640px) {
   .local-schedule-record { align-items: flex-start; flex-direction: column; }
   .local-item-actions { width: 100%; justify-content: flex-start; }
@@ -1716,4 +1731,7 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .local-conflict-actions { display: grid; grid-template-columns: 1fr; }
   .local-conflict-actions .button { width: 100%; }
   .local-add-hint { align-items: flex-start; flex-direction: column; }
+  .webvpn-tool-input-row { grid-template-columns: 1fr; }
+  .webvpn-tool-input-row .button, .webvpn-tool-actions .button { width: 100%; }
+  .webvpn-tool-field textarea { min-height: 112px; }
 }

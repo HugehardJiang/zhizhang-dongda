@@ -35,6 +35,25 @@ const CAMPUS_HEADER_HIDDEN = "HIDDEN";
 const CAMPUS_HEADER_HIDDEN_AT_TOP = "HIDDEN_AT_TOP";
 const CAMPUS_HEADER_HIDE_SCROLL_TOP = 56;
 const CAMPUS_HEADER_REVEAL_PULL_DISTANCE = 64;
+const WEBVPN_COMPAT_KEY = "b0A58a69394ce73@";
+const WEBVPN_AES_SBOX = new Uint8Array([
+  0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+  0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+  0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+  0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+  0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+  0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+  0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+  0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+  0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+  0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+  0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+  0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+  0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+  0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+  0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+  0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+]);
 
 let nativeRequestSequence = 0;
 const nativeRequests = new Map();
@@ -194,6 +213,13 @@ const state = {
       all: "source",
       "all-detail": "source"
     }
+  },
+  // WebVPN 地址只在当前页面内生成和展示，不上传输入，也不写入本地存储。
+  webvpnTool: {
+    open: false,
+    input: "https://jwxt.neu.edu.cn",
+    output: "",
+    error: ""
   },
   // 点击体育课程名称后，原系统会额外请求“列表”弹窗中的体育项目明细。
   // 只在内存中缓存当前会话的结果，不保存账号、密码或接口响应到磁盘。
@@ -5708,6 +5734,171 @@ function renderPersonalWithLocalOverlay() {
   return `<div>${sectionHeading("课表", "周表同时显示教务课程、自定义课程和日程；没有节次的一次性日程会列在网格下方。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderScheduleWeekControls(scheduleRows, "personal")}${grid}${gridNotice}${localSummary}${schoolCourses.length ? `<details class="course-records-details" open><summary>本学期教务课程记录（${schoolCourses.length} 门课 · ${schoolPersonalScheduleRows(schoolCourses).length} 条排课）</summary>${renderCourseRowsTable(schoolCourses, false, "personal")}</details>` : ""}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}</div>`;
 }
 
+function webVpnBytesToHex(bytes) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function webVpnAesXtime(value) {
+  return ((value << 1) ^ (value & 0x80 ? 0x11b : 0)) & 0xff;
+}
+
+function webVpnAesExpandKey(key) {
+  if (!(key instanceof Uint8Array) || key.length !== 16) throw new Error("WebVPN 兼容密钥长度无效");
+  const expanded = new Uint8Array(176);
+  const temp = new Uint8Array(4);
+  expanded.set(key);
+  let generated = 16;
+  let rcon = 1;
+  while (generated < expanded.length) {
+    for (let index = 0; index < 4; index += 1) temp[index] = expanded[generated - 4 + index];
+    if (generated % 16 === 0) {
+      const first = temp[0];
+      temp[0] = WEBVPN_AES_SBOX[temp[1]] ^ rcon;
+      temp[1] = WEBVPN_AES_SBOX[temp[2]];
+      temp[2] = WEBVPN_AES_SBOX[temp[3]];
+      temp[3] = WEBVPN_AES_SBOX[first];
+      rcon = webVpnAesXtime(rcon);
+    }
+    for (let index = 0; index < 4; index += 1) {
+      expanded[generated] = expanded[generated - 16] ^ temp[index];
+      generated += 1;
+    }
+  }
+  return expanded;
+}
+
+function webVpnAesEncryptBlock(block, expandedKey) {
+  const value = Uint8Array.from(block);
+  const addRoundKey = (round) => {
+    const offset = round * 16;
+    for (let index = 0; index < 16; index += 1) value[index] ^= expandedKey[offset + index];
+  };
+  const shiftRows = () => {
+    let temp = value[1];
+    value[1] = value[5]; value[5] = value[9]; value[9] = value[13]; value[13] = temp;
+    temp = value[2]; value[2] = value[10]; value[10] = temp;
+    temp = value[6]; value[6] = value[14]; value[14] = temp;
+    temp = value[15];
+    value[15] = value[11]; value[11] = value[7]; value[7] = value[3]; value[3] = temp;
+  };
+  const mixColumns = () => {
+    for (let column = 0; column < 4; column += 1) {
+      const offset = column * 4;
+      const a0 = value[offset];
+      const a1 = value[offset + 1];
+      const a2 = value[offset + 2];
+      const a3 = value[offset + 3];
+      value[offset] = webVpnAesXtime(a0) ^ (webVpnAesXtime(a1) ^ a1) ^ a2 ^ a3;
+      value[offset + 1] = a0 ^ webVpnAesXtime(a1) ^ (webVpnAesXtime(a2) ^ a2) ^ a3;
+      value[offset + 2] = a0 ^ a1 ^ webVpnAesXtime(a2) ^ (webVpnAesXtime(a3) ^ a3);
+      value[offset + 3] = (webVpnAesXtime(a0) ^ a0) ^ a1 ^ a2 ^ webVpnAesXtime(a3);
+    }
+  };
+  addRoundKey(0);
+  for (let round = 1; round <= 10; round += 1) {
+    for (let index = 0; index < 16; index += 1) value[index] = WEBVPN_AES_SBOX[value[index]];
+    shiftRows();
+    if (round < 10) mixColumns();
+    addRoundKey(round);
+  }
+  return value;
+}
+
+function webVpnEncryptHostname(hostname) {
+  const encoder = new TextEncoder();
+  const key = encoder.encode(WEBVPN_COMPAT_KEY);
+  const plain = encoder.encode(String(hostname || ""));
+  const expandedKey = webVpnAesExpandKey(key);
+  let feedback = Uint8Array.from(key);
+  const encrypted = new Uint8Array(plain.length);
+  for (let offset = 0; offset < plain.length; offset += 16) {
+    const stream = webVpnAesEncryptBlock(feedback, expandedKey);
+    const size = Math.min(16, plain.length - offset);
+    const cipherBlock = new Uint8Array(16);
+    for (let index = 0; index < size; index += 1) {
+      cipherBlock[index] = plain[offset + index] ^ stream[index];
+      encrypted[offset + index] = cipherBlock[index];
+    }
+    feedback = cipherBlock;
+  }
+  return webVpnBytesToHex(encrypted);
+}
+
+function webVpnUrlFromInput(input) {
+  let source = String(input || "").trim();
+  if (!source) throw new Error("请输入需要通过 WebVPN 访问的网址");
+  if (!/^[a-z][a-z\d+.-]*:\/\//i.test(source)) source = `http://${source}`;
+  let parsed;
+  try {
+    parsed = new URL(source);
+  } catch {
+    throw new Error("网址格式无效，请输入完整域名或 http(s) 地址");
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error("仅支持 http:// 或 https:// 地址");
+  if (!parsed.hostname) throw new Error("网址中缺少可识别的域名");
+  if (parsed.username || parsed.password) throw new Error("请勿在网址中填写账号或密码");
+  if (parsed.port) throw new Error("暂不支持带自定义端口的网址");
+  const keyHex = webVpnBytesToHex(new TextEncoder().encode(WEBVPN_COMPAT_KEY));
+  const protocol = parsed.protocol.slice(0, -1);
+  const encryptedHostname = webVpnEncryptHostname(parsed.hostname);
+  return `https://webvpn.neu.edu.cn/${protocol}/${keyHex}${encryptedHostname}${parsed.pathname}${parsed.search}${parsed.hash}`;
+}
+
+const WEBVPN_QUICK_SITES = [
+  ["新版教务系统", "http://jwxt.neu.edu.cn"],
+  ["新版选课", "http://jwxk.neu.edu.cn"],
+  ["旧版教务系统", "http://219.216.96.4/eams"],
+  ["创新创业管理系统", "https://cxcy.neu.edu.cn"],
+  ["学生邮件系统", "https://mails.neu.edu.cn"]
+];
+
+function updateWebVpnTool(input) {
+  state.webvpnTool.input = String(input || "").trim();
+  try {
+    state.webvpnTool.output = webVpnUrlFromInput(state.webvpnTool.input);
+    state.webvpnTool.error = "";
+    return true;
+  } catch (error) {
+    state.webvpnTool.output = "";
+    state.webvpnTool.error = error.message || "WebVPN 地址生成失败";
+    return false;
+  }
+}
+
+function renderWebVpnToolModal() {
+  if (!state.webvpnTool.open) return "";
+  const quickSites = WEBVPN_QUICK_SITES.map(([name, url]) => `<button class="webvpn-quick-site" type="button" data-action="webvpn-use-site" data-webvpn-url="${escapeHtml(url)}">${escapeHtml(name)}</button>`).join("");
+  const output = state.webvpnTool.output
+    ? `<label class="webvpn-tool-field"><span>生成结果</span><textarea id="webvpnOutput" readonly>${escapeHtml(state.webvpnTool.output)}</textarea></label><div class="webvpn-tool-actions"><button class="button button-primary" type="button" data-action="copy-webvpn-url">复制地址</button><button class="button button-ghost" type="button" data-action="open-webvpn-url">直接访问</button></div>`
+    : "";
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal webvpn-tool-modal" role="dialog" aria-modal="true" aria-label="WebVPN 地址生成器"><div class="detail-modal-head"><div><p class="eyebrow">WEBVPN URL</p><h3>WebVPN 地址生成器</h3><p class="muted">把普通 HTTP(S) 地址转换成东北大学 WebVPN 代理地址。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-webvpn-tool">关闭</button></div><div class="webvpn-quick-sites"><span>常用网站</span><div>${quickSites}</div></div><label class="webvpn-tool-field"><span>原始网址</span><div class="webvpn-tool-input-row"><input id="webvpnUrlInput" type="url" inputmode="url" autocomplete="off" spellcheck="false" value="${escapeHtml(state.webvpnTool.input)}" placeholder="https://example.com/path" /><button class="button button-primary" type="button" data-action="generate-webvpn-url">转换</button></div></label>${state.webvpnTool.error ? `<p class="webvpn-tool-error" role="alert">${escapeHtml(state.webvpnTool.error)}</p>` : ""}${output}<div class="settings-callout webvpn-tool-privacy"><strong>完全本地处理</strong><span>网址不会上传到任何服务器；生成结果仍需使用东北大学统一身份认证登录 WebVPN。部分网站经代理后可能功能受限。</span></div></section></div>`;
+}
+
+async function copyGeneratedWebVpnUrl() {
+  const output = state.webvpnTool.output || "";
+  if (!output) return;
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(output);
+    else {
+      const textarea = document.getElementById("webvpnOutput");
+      textarea?.focus();
+      textarea?.select();
+      if (!document.execCommand("copy")) throw new Error("浏览器拒绝复制");
+    }
+    showToast("WebVPN 地址已复制。", "success");
+  } catch (error) {
+    showToast(`复制失败：${error.message || "请手动选中地址复制"}`, "error");
+  }
+}
+
+function openGeneratedWebVpnUrl() {
+  const url = state.webvpnTool.output || "";
+  if (!url.startsWith("https://webvpn.neu.edu.cn/")) return;
+  if (globalThis.AndroidApi?.openWebVpnUrl) globalThis.AndroidApi.openWebVpnUrl(url);
+  else if (globalThis.chrome?.tabs?.create) chrome.tabs.create({ url });
+  else window.open(url, "_blank", "noopener");
+}
+
 function renderSettingsWithLocalOverlay() {
   const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
   const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
@@ -5730,7 +5921,8 @@ function renderSettingsWithLocalOverlay() {
   const loginPrivacy = IS_ANDROID_APP
     ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
     : "插件不会保存账号、密码或验证码。";
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}${localBlock}</div></div>`;
+  const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -9674,6 +9866,7 @@ elements.content.addEventListener("input", (event) => {
   if (event.target.id === "allKeyword") state.filters.allKeyword = event.target.value;
   if (event.target.id === "allCode") state.filters.allCode = event.target.value;
   if (event.target.id === "allName") state.filters.allName = event.target.value;
+  if (event.target.id === "webvpnUrlInput") state.webvpnTool.input = event.target.value;
 });
 
 elements.content.addEventListener("change", (event) => {
@@ -9832,6 +10025,7 @@ elements.content.addEventListener("click", async (event) => {
     state.scoreDetail = null;
     state.curriculum.courseDetail = null;
     state.scheduleExport = null;
+    state.webvpnTool.open = false;
     clearCourseTransferModal();
     render();
     return;
@@ -9839,6 +10033,30 @@ elements.content.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   const action = button.dataset.action;
+  if (action === "open-webvpn-tool") {
+    state.webvpnTool.open = true;
+    updateWebVpnTool(state.webvpnTool.input);
+    render();
+    return;
+  }
+  if (action === "close-webvpn-tool") {
+    state.webvpnTool.open = false;
+    render();
+    return;
+  }
+  if (action === "webvpn-use-site") {
+    updateWebVpnTool(button.dataset.webvpnUrl || "");
+    render();
+    return;
+  }
+  if (action === "generate-webvpn-url") {
+    const input = document.getElementById("webvpnUrlInput");
+    updateWebVpnTool(input?.value || state.webvpnTool.input);
+    render();
+    return;
+  }
+  if (action === "copy-webvpn-url") return copyGeneratedWebVpnUrl();
+  if (action === "open-webvpn-url") return openGeneratedWebVpnUrl();
   if (action === "open-portal") return openPortal();
   if (action === "start-curriculum-bootstrap" || action === "open-curriculum-portal") return startCurriculumBootstrap();
   if (action === "open-schedule-image-export") return openScheduleImageExport(button.dataset.scheduleScope || "personal");
@@ -10063,7 +10281,8 @@ elements.content.addEventListener("click", async (event) => {
 setConnection("正在连接教务系统", "loading");
 globalThis.__refreshDashboard = refresh;
 globalThis.__handleAndroidBack = () => {
-  if (state.scheduleExport || state.courseTransfer.mode || state.selectedCourse || state.scoreDetail || state.curriculum.courseDetail) {
+  if (state.webvpnTool.open || state.scheduleExport || state.courseTransfer.mode || state.selectedCourse || state.scoreDetail || state.curriculum.courseDetail) {
+    state.webvpnTool.open = false;
     state.scheduleExport = null;
     state.selectedCourse = null;
     state.scoreDetail = null;

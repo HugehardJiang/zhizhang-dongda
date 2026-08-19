@@ -96,7 +96,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.44";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.45";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -1067,6 +1067,30 @@ public class MainActivity extends Activity {
                 portalWebView.loadUrl(PORTAL_URL);
             }
             showPortal();
+        });
+    }
+
+    private boolean isAllowedGeneratedWebVpnUrl(String url) {
+        if (url == null || url.isEmpty()) return false;
+        try {
+            Uri parsed = Uri.parse(url);
+            String path = parsed.getPath();
+            return "https".equalsIgnoreCase(parsed.getScheme())
+                    && "webvpn.neu.edu.cn".equalsIgnoreCase(parsed.getHost())
+                    && path != null
+                    && (path.startsWith("/http/") || path.startsWith("/https/"));
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void openGeneratedWebVpnUrl(String url) {
+        if (!isAllowedGeneratedWebVpnUrl(url)) return;
+        runOnUiThread(() -> {
+            cancelAutomaticAcademicRecovery();
+            clearPendingQrUrl();
+            showPortal();
+            portalWebView.loadUrl(url);
         });
     }
 
@@ -3024,6 +3048,11 @@ public class MainActivity extends Activity {
         @android.webkit.JavascriptInterface
         public void openPortal() {
             openPortalForReauthentication();
+        }
+
+        @android.webkit.JavascriptInterface
+        public void openWebVpnUrl(String url) {
+            openGeneratedWebVpnUrl(url);
         }
 
         @android.webkit.JavascriptInterface

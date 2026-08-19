@@ -91,6 +91,9 @@ globalThis.__mobileShellAudit = {
   androidLoginMethod,
   renderSettings,
   renderAndroidLoginEntry,
+  webVpnUrlFromInput,
+  webVpnEncryptHostname,
+  renderWebVpnToolModal,
   setNotice,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
@@ -113,6 +116,29 @@ assert.ok(loginSettings.includes('内置登录（默认）'));
 assert.ok(loginSettings.includes('<option value="password"'));
 assert.ok(loginSettings.includes('<option value="wechat"'));
 assert.ok(loginSettings.includes('Android Keystore'));
+assert.ok(loginSettings.indexOf('更多工具') < loginSettings.indexOf('第一周周日'));
+assert.ok(loginSettings.includes('WebVPN 地址生成器'));
+
+// The generator reproduces NEU WebVPN's AES-128-CFB hostname encoding while
+// preserving the original path, query, and hash entirely on-device.
+assert.strictEqual(audit.webVpnEncryptHostname('jwxt.neu.edu.cn'), 'baf6bc2bc4cb43c8bc1d6f66c806db');
+assert.strictEqual(audit.webVpnEncryptHostname('xn--xhq44jb2fzpc.com'), 'a8efe97292cd5789a6126921801fc5842a556a38');
+assert.strictEqual(
+  audit.webVpnUrlFromInput('http://jwxt.neu.edu.cn/jwapp/sys/homeapp?from=test#top'),
+  'https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db/jwapp/sys/homeapp?from=test#top'
+);
+assert.strictEqual(
+  audit.webVpnUrlFromInput('https://www.baidu.com/path'),
+  'https://webvpn.neu.edu.cn/https/62304135386136393339346365373340a7f6b37188c44fd9e756687c8b/path'
+);
+assert.throws(() => audit.webVpnUrlFromInput('ftp://example.com/file'), /仅支持/);
+assert.throws(() => audit.webVpnUrlFromInput('http://example.com:8080/'), /自定义端口/);
+audit.state.webvpnTool.open = true;
+audit.state.webvpnTool.output = audit.webVpnUrlFromInput('http://jwxt.neu.edu.cn');
+const webVpnModal = audit.renderWebVpnToolModal();
+assert.ok(webVpnModal.includes('完全本地处理'));
+assert.ok(webVpnModal.includes('data-action="copy-webvpn-url"'));
+audit.state.webvpnTool.open = false;
 
 // A background failure keeps the complete school error beside the manual
 // fallback entry instead of collapsing it to a generic toast.
@@ -152,6 +178,8 @@ assert.ok(mainActivitySource.includes('AES/GCM/NoPadding'));
 assert.ok(mainActivitySource.includes('submitBuiltInCredentials(true)'));
 assert.ok(mainActivitySource.includes('后台自动登录需要短信验证码'));
 assert.ok(mainActivitySource.includes('LOGIN_METHOD_BUILT_IN'));
+assert.ok(mainActivitySource.includes('public void openWebVpnUrl(String url)'));
+assert.ok(mainActivitySource.includes('"webvpn.neu.edu.cn".equalsIgnoreCase(parsed.getHost())'));
 assert.ok(/handleAcademicSessionInvalid[\s\S]*if \(academicSsoRecoveryInProgress \|\| backgroundLoginInProgress\) return;[\s\S]*startAcademicSsoRecovery\(reason\)/.test(mainActivitySource));
 assert.ok(/startAcademicSsoRecovery[\s\S]*portalWebView\.loadUrl\(ECODE_URL\)/.test(mainActivitySource));
 assert.ok(/finishAcademicSsoRecoveryFailure[\s\S]*attemptBuiltInBackgroundLoginOrReport/.test(mainActivitySource));
