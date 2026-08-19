@@ -54,7 +54,7 @@ globalThis.__auditTest = {
   localScheduleRowHasConflict, syncLocalScheduleEndSectionSelect, analyzeCourseTransferCollisions, renderCourseTransferCollisionResult,
   matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
-  scheduleCsvHasRows, renderPersonal, renderOverview, renderSettings, renderCourseDetailModal,
+  scheduleCsvHasRows, renderPersonal, renderOverview, renderOverviewPriority, renderSettings, renderCourseDetailModal,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -520,6 +520,13 @@ const t = global.__auditTest;
   assert.ok(!localSettingsMarkup.includes('Android Keystore'));
   t.state.selectedCourse = t.localScheduleItemToCourseRow(localEvent);
   assert.ok(t.renderCourseDetailModal().includes('自定义安排详情'));
+  assert.ok(t.renderOverview().includes('自定义安排详情'));
+  const overviewPriorityMarkup = t.renderOverviewPriority({
+    state: 'next', course: localRows.find((row) => row.localId === 'local-course-a'), until: 30
+  });
+  assert.ok(overviewPriorityMarkup.startsWith('<button'));
+  assert.ok(overviewPriorityMarkup.includes('data-action="show-local-schedule"'));
+  assert.ok(t.renderOverviewPriority({ state: 'next', course: localSchool, until: 30 }).includes('data-action="show-course"'));
   t.state.selectedCourse = null;
   assert.ok(t.renderOverview().includes('今天安排'));
 

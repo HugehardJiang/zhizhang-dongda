@@ -5638,7 +5638,7 @@ function renderOverviewPriority(next) {
   const stateLabel = isActive ? (isEvent ? "正在进行" : "正在上课") : next.state === "started" ? "已开始" : isEvent ? "下一项安排" : "下一节课";
   const stateMeta = isActive ? `已开始 ${overviewDurationText(next.elapsed)}` : next.until !== undefined ? `还有 ${overviewDurationText(next.until)}` : "时间已到";
   const badge = isEvent || course?.source === "local" ? localScheduleSourceBadge(course) : "";
-  return `<div class="overview-priority-main ${isActive ? "is-active" : ""} ${isEvent ? "local-priority" : ""}"><div class="overview-priority-time"><strong>${escapeHtml(range.startText || (course?.localAllDay ? "全天" : overviewCourseTime(course)))}</strong><span>${escapeHtml(range.endText ? `至 ${range.endText}` : overviewCourseMeta(course))}</span></div><div class="overview-priority-copy"><strong>${escapeHtml(course?.name || "未命名安排")} ${badge}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></div><div class="overview-priority-status"><strong>${escapeHtml(stateLabel)}</strong><span>${escapeHtml(stateMeta)}</span></div></div>`;
+  return `<button class="overview-priority-main ${isActive ? "is-active" : ""} ${isEvent ? "local-priority" : ""}" ${courseActionAttributes(course, "personal")} aria-label="查看${escapeHtml(course?.name || "当前安排")}详情"><div class="overview-priority-time"><strong>${escapeHtml(range.startText || (course?.localAllDay ? "全天" : overviewCourseTime(course)))}</strong><span>${escapeHtml(range.endText ? `至 ${range.endText}` : overviewCourseMeta(course))}</span></div><div class="overview-priority-copy"><strong>${escapeHtml(course?.name || "未命名安排")} ${badge}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></div><div class="overview-priority-status"><strong>${escapeHtml(stateLabel)}</strong><span>${escapeHtml(stateMeta)}</span></div></button>`;
 }
 
 function renderOverview() {
@@ -5669,7 +5669,7 @@ function renderOverview() {
   const weekContext = dateLabel.weekNumber === null
     ? `<span class="overview-week-context">教学周未设置 <button class="button button-link" type="button" data-action="view-settings">设置 →</button></span>`
     : `<span class="overview-week-context">${escapeHtml(dateLabel.week)}</span>`;
-  return `<div class="overview-page">${sectionHeading("总览", "") }<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>今日安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天安排</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}${localNote}</div>`;
+  return `<div class="overview-page">${sectionHeading("总览", "") }<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>今日安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天安排</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}${localNote}</div>${renderCourseDetailModal()}`;
 }
 
 function renderLocalScheduleDetailModal(row) {
@@ -9803,7 +9803,12 @@ function renderSettings() {
 
 document.querySelectorAll("[data-view]").forEach((tab) => {
   tab.addEventListener("click", async () => {
-    state.view = tab.dataset.view;
+    const nextView = tab.dataset.view;
+    if (nextView !== state.view) {
+      state.selectedCourse = null;
+      state.selectedCourseScope = "personal";
+    }
+    state.view = nextView;
     if (state.view === "curriculum" && !curriculumBootstrapIsActive()) {
       invalidateCurriculum();
       state.curriculum.bootstrap = { status: "idle", message: "", error: "", tabId: null, reading: false };
@@ -10115,6 +10120,8 @@ elements.content.addEventListener("click", async (event) => {
   if (action === "confirm-schedule-image-export") return exportScheduleImage();
   if (action === "refresh") return refresh();
   if (action === "view-settings") {
+    state.selectedCourse = null;
+    state.selectedCourseScope = "personal";
     state.view = "settings";
     render();
     return;
@@ -10246,6 +10253,10 @@ elements.content.addEventListener("click", async (event) => {
   }
   if (action === "show-all-detail") {
     return queryAllScheduleDetail(Number(button.dataset.rowIndex));
+  }
+  if (["view-scores", "view-curriculum", "view-exams", "view-personal", "view-all"].includes(action)) {
+    state.selectedCourse = null;
+    state.selectedCourseScope = "personal";
   }
   if (action === "view-scores") state.view = "scores";
   if (action === "view-curriculum" && !IS_ANDROID_APP) {
