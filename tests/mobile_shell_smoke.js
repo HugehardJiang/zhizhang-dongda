@@ -151,7 +151,7 @@ assert.ok(loginSettings.indexOf('更多工具') < loginSettings.indexOf('第一�
 assert.ok(loginSettings.includes('WebVPN 地址生成器'));
 assert.ok(loginSettings.includes('id="toastNotificationsEnabled"'));
 assert.ok(loginSettings.includes('class="settings-switch-track"'));
-assert.ok(loginSettings.includes('只保留正在使用缓存或数据已刷新的提示'));
+assert.ok(loginSettings.includes('隐藏所有底部 Toast，包括登录状态、缓存和数据刷新提示'));
 assert.ok(loginSettings.includes('id="currentTermSelect"'));
 assert.ok(loginSettings.includes('从教务系统同步'));
 assert.ok(loginSettings.indexOf('当前学期') < loginSettings.indexOf('第一周周日'));
@@ -234,17 +234,18 @@ assert.strictEqual(toastRegion.children[0].className, 'toast toast-success');
 audit.setNotice('登录失败。', 'error');
 assert.strictEqual(toastRegion.children[0].className, 'toast toast-error');
 
-// Disabling general Toast feedback suppresses login/operation chatter, while
-// cache-use and completed-refresh messages explicitly marked essential remain.
+// Disabling Toast feedback suppresses every bottom Toast, including messages
+// explicitly marked essential for cache-use and completed-refresh states.
 audit.setToastNotificationsEnabled(false);
 assert.strictEqual(nativeToastNotificationsEnabled, false);
 assert.strictEqual(localStorage.getItem('zhizhang.toastNotifications'), 'off');
-audit.setNotice('');
+assert.strictEqual(toastRegion.children.length, 0);
+audit.setNotice('此前提示。', 'success');
+assert.strictEqual(toastRegion.children.length, 0);
 audit.setNotice('正在后台重新登录…');
 assert.strictEqual(toastRegion.children.length, 0);
 audit.setNotice('数据已更新，个人结果已缓存到本机。', 'success', 'essential');
-assert.strictEqual(toastRegion.children.length, 1);
-assert.strictEqual(toastRegion.children[0].className, 'toast toast-success');
+assert.strictEqual(toastRegion.children.length, 0);
 audit.setNotice('');
 audit.setNotice('普通操作已完成。', 'success');
 assert.strictEqual(toastRegion.children.length, 0);

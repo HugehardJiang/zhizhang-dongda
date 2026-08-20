@@ -206,6 +206,8 @@ function setToastNotificationsEnabled(enabled) {
   if (IS_ANDROID_APP) {
     try { globalThis.AndroidApi?.setToastNotificationsEnabled?.(toastNotificationsPreference); } catch { /* current session still works */ }
   }
+  // 关闭开关时立即清掉已经显示的 Toast，避免用户还看到旧提示。
+  if (!toastNotificationsPreference) showToast("");
 }
 
 function androidLoginMethod() {
@@ -5380,9 +5382,13 @@ function showToast(text = "", type = "success", category = "default") {
     elements.toastRegion.replaceChildren();
     return;
   }
-  // 关闭一般提示后，仅保留会改变用户对当前数据时效判断的两类消息：
-  // 正在使用缓存、实时数据已刷新。登录过程和普通操作反馈不再打扰页面。
-  if (!toastNotificationsEnabled() && category !== TOAST_CATEGORY_ESSENTIAL) return;
+  // 关闭开关后完全隐藏底部 Toast，包括缓存、刷新和登录状态提示。
+  // category 保留用于兼容已有调用方，但不再绕过此开关。
+  if (!toastNotificationsEnabled()) {
+    window.clearTimeout(toastTimer);
+    elements.toastRegion.replaceChildren();
+    return;
+  }
   window.clearTimeout(toastTimer);
   const toast = document.createElement("div");
   toast.className = `toast toast-${type || "info"}`;
@@ -6381,7 +6387,7 @@ function renderSettingsWithLocalOverlay() {
     ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
     : "插件不会保存账号、密码或验证码。";
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
-  const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
+  const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示底部 Toast 提示</strong><small>关闭后隐藏所有底部 Toast，包括登录状态、缓存和数据刷新提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
   const campusBlock = `<section class="settings-section campus-settings"><div class="settings-intro"><h3>默认校区与上课时间</h3><p>当教务课表只提供节次时，用于计算正在上课、下一节课和今日是否结束。课程地点中明确的校区会优先于此设置。</p></div><label class="settings-field"><span>默认校区</span><select id="campusSettingSelect"><option value="" ${state.campus.code ? "" : "selected"}>未设置</option><option value="nanhu" ${state.campus.code === CAMPUS_CODES.NANHU ? "selected" : ""}>南湖校区</option><option value="hunnan" ${state.campus.code === CAMPUS_CODES.HUNNAN ? "selected" : ""}>浑南校区</option></select><small>当前：${escapeHtml(campusLabel(state.campus.code))}。南湖早课 08:00 开始，浑南早课 08:30 开始；第 5–12 节时间相同。</small></label><div class="settings-actions"><button class="button button-primary" type="button" data-action="save-campus-setting">保存校区</button></div><div class="settings-callout"><strong>节次时间</strong><span>南湖1–4节：08:00–11:40；浑南1–4节：08:30–12:10；5–8节：14:00–17:40；9–12节：18:30–22:00。</span></div></section>`;
   return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}${campusBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
 }
