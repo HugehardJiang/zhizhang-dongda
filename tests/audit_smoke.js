@@ -59,6 +59,7 @@ globalThis.__auditTest = {
   localScheduleModalMarkup, hasActiveModalState, clearActiveModalState,
   localScheduleDefaultCourseOccurrence,
   localScheduleRowHasConflict, syncLocalScheduleEndSectionSelect, analyzeCourseTransferCollisions, renderCourseTransferCollisionResult,
+  localScheduleClockRange, courseClockText, campusPeriodClockRange, renderCampusPromptModal, prepareCampusPromptForPersonalView,
   matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
   currentTermCandidates, configuredCurrentTermCode, currentTermCodeFor, applyCurrentTermDefaults,
   scoreReminderFingerprint, scoreReminderStorageKey, queueNewScoreReminder,
@@ -224,6 +225,43 @@ const t = global.__auditTest;
   assert.strictEqual(mapped.section, '第5-8节');
   assert.strictEqual(mapped.requirement, '必修');
   assert.strictEqual(mapped.assessment, '考试课');
+
+  // School rows that only expose section numbers use the campus timetable.
+  // A location-specific campus wins over the default, while an explicit clock
+  // from the school always remains the highest-priority source.
+  const savedCampusFixture = { ...t.state.campus };
+  const savedCampusCalendarStart = t.state.calendar.firstWeekStart;
+  t.state.campus.code = 'hunnan';
+  const hunnanMorning = t.localScheduleClockRange({ section: '第3-4节', location: '' });
+  assert.deepStrictEqual([hunnanMorning.startText, hunnanMorning.endText, hunnanMorning.source], ['10:30', '12:10', 'campus-period']);
+  const nanhuByLocation = t.localScheduleClockRange({ section: '第3-4节', location: '南湖校区 逸201' });
+  assert.deepStrictEqual([nanhuByLocation.startText, nanhuByLocation.endText, nanhuByLocation.campusCode], ['10:00', '11:40', 'nanhu']);
+  const sharedEvening = t.localScheduleClockRange({ section: '第9-10节', location: '' });
+  assert.deepStrictEqual([sharedEvening.startText, sharedEvening.endText], ['18:30', '20:10']);
+  const explicitSchoolTime = t.localScheduleClockRange({ section: '第3-4节', time: '08:05-09:35', location: '浑南校区' });
+  assert.deepStrictEqual([explicitSchoolTime.startText, explicitSchoolTime.endText, explicitSchoolTime.source], ['08:05', '09:35', 'explicit']);
+
+  // At noon an evening class must be "next", not "ended". Without a campus
+  // and without a location, the safe state is time-unknown and the timetable
+  // entry prompt must be shown rather than guessing.
+  t.state.calendar.firstWeekStart = '2026-08-09';
+  const eveningOnly = [{ name: '复变函数与积分变换', weekday: '星期四', weeks: '2周', section: '第9-10节', location: '' }];
+  const noon = new Date(2026, 7, 20, 12, 30, 0);
+  t.state.campus.code = 'nanhu';
+  assert.strictEqual(t.overviewNextCourse(eveningOnly, noon).state, 'next');
+  assert.strictEqual(t.overviewNextCourse(eveningOnly, noon).until, 360);
+  t.state.campus.code = '';
+  assert.strictEqual(t.overviewNextCourse(eveningOnly, noon).state, 'time-unknown');
+  t.prepareCampusPromptForPersonalView('personal', 'overview');
+  assert.strictEqual(t.state.campus.promptOpen, true);
+  assert.ok(t.renderCampusPromptModal().includes('请先选择默认校区'));
+  assert.ok(t.renderCampusPromptModal().includes('id="campusPromptSelect"'));
+  const campusSettingsMarkup = t.renderSettings();
+  assert.ok(campusSettingsMarkup.includes('id="campusSettingSelect"'));
+  assert.ok(campusSettingsMarkup.includes('南湖早课 08:00'));
+  assert.ok(campusSettingsMarkup.includes('浑南早课 08:30'));
+  t.state.campus = savedCampusFixture;
+  t.state.calendar.firstWeekStart = savedCampusCalendarStart;
 
   // The personal grid can return multiple weekday/section segments inside one
   // classDateAndPlace string. Every segment must become an independent grid

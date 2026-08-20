@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.52";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.53";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -375,6 +375,7 @@ public class MainActivity extends Activity {
     private static final String DEFAULT_LOGIN_METHOD = "default_login_method";
     private static final String TOAST_NOTIFICATIONS_ENABLED = "toast_notifications_enabled";
     private static final String CURRENT_TERM_SETTINGS = "current_term_settings_v1";
+    private static final String CAMPUS_SETTING = "campus_setting_v1";
     private static final String BUILT_IN_CREDENTIALS = "built_in_credentials";
     private static final String LAST_ACADEMIC_LOGIN_ERROR = "last_academic_login_error";
     private static final String SAVED_QR_IMAGE_URI = "saved_qr_image_uri";
@@ -3181,6 +3182,22 @@ public class MainActivity extends Activity {
             if (normalized.length() > 4096) return;
             if (normalized.isEmpty()) preferences.edit().remove(CURRENT_TERM_SETTINGS).apply();
             else preferences.edit().putString(CURRENT_TERM_SETTINGS, normalized).apply();
+        }
+
+        @android.webkit.JavascriptInterface
+        public String getCampusSetting() {
+            return preferences == null ? "" : preferences.getString(CAMPUS_SETTING, "");
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setCampusSetting(String value) {
+            if (preferences == null) return;
+            String normalized = value == null ? "" : value.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!"nanhu".equals(normalized) && !"hunnan".equals(normalized)) {
+                preferences.edit().remove(CAMPUS_SETTING).apply();
+                return;
+            }
+            preferences.edit().putString(CAMPUS_SETTING, normalized).apply();
         }
 
         @android.webkit.JavascriptInterface

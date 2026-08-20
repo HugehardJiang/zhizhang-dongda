@@ -54,6 +54,7 @@ const pageWrap = createEventTarget();
 let activeModal = null;
 let nativeToastNotificationsEnabled = true;
 let nativeCurrentTermSettings = "";
+let nativeCampusSetting = "";
 const nativeCalls = [];
 const androidCurriculumEntry = createElementStub();
 androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; };
@@ -73,6 +74,11 @@ global.AndroidApi = {
   setCurrentTermSettings(payload) {
     nativeCurrentTermSettings = String(payload || "");
     nativeCalls.push("current-term");
+  },
+  getCampusSetting() { return nativeCampusSetting; },
+  setCampusSetting(value) {
+    nativeCampusSetting = String(value || "");
+    nativeCalls.push(`campus:${nativeCampusSetting}`);
   }
 };
 global.document = {
@@ -118,6 +124,7 @@ globalThis.__mobileShellAudit = {
   setToastNotificationsEnabled,
   saveCurrentTermPreference,
   currentTermCodeFor,
+  persistCampusCode,
   syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
@@ -148,6 +155,14 @@ assert.ok(loginSettings.includes('只保留正在使用缓存或数据已刷新�
 assert.ok(loginSettings.includes('id="currentTermSelect"'));
 assert.ok(loginSettings.includes('从教务系统同步'));
 assert.ok(loginSettings.indexOf('当前学期') < loginSettings.indexOf('第一周周日'));
+assert.ok(loginSettings.includes('id="campusSettingSelect"'));
+assert.ok(loginSettings.indexOf('默认校区与上课时间') < loginSettings.indexOf('第一周周日'));
+
+// Campus preference is mirrored to the native settings bridge so it survives
+// WebView storage cleanup and can drive section-only time calculations.
+assert.strictEqual(audit.persistCampusCode('hunnan'), 'hunnan');
+assert.strictEqual(nativeCampusSetting, 'hunnan');
+assert.ok(nativeCalls.includes('campus:hunnan'));
 
 // Local-schedule controls opened from Settings must render on Settings itself,
 // and Android Back must dismiss their state before changing the current page.

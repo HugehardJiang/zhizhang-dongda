@@ -37,6 +37,7 @@ const CAMPUS_HEADER_HIDE_SCROLL_TOP = 56;
 const CAMPUS_HEADER_REVEAL_PULL_DISTANCE = 64;
 const TOAST_SETTING_KEY = "zhizhang.toastNotifications";
 const CURRENT_TERM_SETTING_KEY = "zhizhang.currentTerm.v1";
+const CAMPUS_SETTING_KEY = "zhizhang.campus.v1";
 const SCORE_REMINDER_STORAGE_PREFIX = "zhizhang.scoreReminder.v1";
 const TOAST_CATEGORY_ESSENTIAL = "essential";
 const WEBVPN_COMPAT_KEY = "b0A58a69394ce73@";
@@ -58,6 +59,25 @@ const WEBVPN_AES_SBOX = new Uint8Array([
   0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
   0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
 ]);
+const CAMPUS_CODES = Object.freeze({ NANHU: "nanhu", HUNNAN: "hunnan" });
+const SHARED_AFTERNOON_PERIODS = Object.freeze({
+  5: ["14:00", "14:45"], 6: ["14:55", "15:40"],
+  7: ["16:00", "16:45"], 8: ["16:55", "17:40"],
+  9: ["18:30", "19:15"], 10: ["19:25", "20:10"],
+  11: ["20:20", "21:05"], 12: ["21:15", "22:00"]
+});
+const CAMPUS_PERIOD_TIMES = Object.freeze({
+  [CAMPUS_CODES.NANHU]: Object.freeze({
+    1: ["08:00", "08:45"], 2: ["08:55", "09:40"],
+    3: ["10:00", "10:45"], 4: ["10:55", "11:40"],
+    ...SHARED_AFTERNOON_PERIODS
+  }),
+  [CAMPUS_CODES.HUNNAN]: Object.freeze({
+    1: ["08:30", "09:15"], 2: ["09:25", "10:10"],
+    3: ["10:30", "11:15"], 4: ["11:25", "12:10"],
+    ...SHARED_AFTERNOON_PERIODS
+  })
+});
 
 let nativeRequestSequence = 0;
 const nativeRequests = new Map();
@@ -122,6 +142,37 @@ function persistCurrentTermPreference(preference) {
 }
 
 const storedCurrentTermPreference = initialCurrentTermPreference();
+
+function normalizeCampusCode(value) {
+  const code = String(value || "").trim().toLowerCase();
+  return code === CAMPUS_CODES.NANHU || code === CAMPUS_CODES.HUNNAN ? code : "";
+}
+
+function initialCampusCode() {
+  if (IS_ANDROID_APP) {
+    try {
+      const nativeValue = normalizeCampusCode(globalThis.AndroidApi?.getCampusSetting?.());
+      if (nativeValue) {
+        writeStoredSetting(CAMPUS_SETTING_KEY, nativeValue);
+        return nativeValue;
+      }
+    } catch {
+      // 旧版 Android 原生桥没有该方法时继续读取 WebView 本地存储。
+    }
+  }
+  return normalizeCampusCode(readStoredSetting(CAMPUS_SETTING_KEY, ""));
+}
+
+function persistCampusCode(value) {
+  const code = normalizeCampusCode(value);
+  writeStoredSetting(CAMPUS_SETTING_KEY, code);
+  if (IS_ANDROID_APP) {
+    try { globalThis.AndroidApi?.setCampusSetting?.(code); } catch { /* 当前会话仍可使用 */ }
+  }
+  return code;
+}
+
+const storedCampusCode = initialCampusCode();
 
 function initialToastNotificationsEnabled() {
   const stored = readStoredSetting(TOAST_SETTING_KEY, "");
@@ -208,6 +259,10 @@ const state = {
     ...storedCurrentTermPreference,
     syncing: false,
     error: ""
+  },
+  campus: {
+    code: storedCampusCode,
+    promptOpen: false
   },
   // 教务系统返回的当前学期。它只用于初始化各个学期选择器；用户手动
   // 切换后的 state.termCode 不会反过来覆盖这个检测结果。
@@ -5446,15 +5501,10 @@ function overviewDateLabel(date = new Date()) {
 }
 
 function overviewClockRange(course) {
-  const text = extractClockText(course?.time);
-  const match = text.match(/(\d{1,2}:\d{2})[-–](\d{1,2}:\d{2})/);
-  if (!match) return { start: null, end: null, startText: "", endText: "", text };
+  const range = localScheduleClockRange(course);
   return {
-    start: overviewClockMinutes(match[1]),
-    end: overviewClockMinutes(match[2]),
-    startText: match[1],
-    endText: match[2],
-    text
+    ...range,
+    text: range.startText && range.endText ? `${range.startText}-${range.endText}` : range.startText || ""
   };
 }
 
@@ -5940,6 +5990,7 @@ function hasActiveModalState() {
     || state.localSchedule.editorOpen
     || state.localSchedule.managerOpen
     || state.localSchedule.conflict
+    || state.campus.promptOpen
   );
 }
 
@@ -5957,6 +6008,7 @@ function clearActiveModalState() {
   state.localSchedule.editingId = "";
   state.localSchedule.draft = null;
   state.localSchedule.editorError = "";
+  state.campus.promptOpen = false;
   clearCourseTransferModal();
 }
 
@@ -5980,7 +6032,7 @@ function renderDailyScheduleWithLocalOverlay(rows, scope = "personal") {
     const weekText = info.week ? `第${info.week}周` : "教学周未设置";
     const courseMarkup = courses.length
       ? courses.map((course) => {
-        const sectionText = [courseSectionLabel(course) === "节次待识别" ? "" : courseSectionLabel(course), extractClockText(course.time) || localScheduleClockText(course)].filter(Boolean).join(" · ") || (course.localAllDay ? "全天" : "时间待识别");
+        const sectionText = [courseSectionLabel(course) === "节次待识别" ? "" : courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" · ") || (course.localAllDay ? "全天" : "时间待识别");
         const placeText = course.location || course.detail || "地点待识别";
         const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
         const conflict = localScheduleRowHasConflict(course, rows);
@@ -6004,6 +6056,10 @@ function renderOverviewPriority(next) {
   }
   if (next.state === "all-day") {
     return `<div class="overview-no-class local-priority"><strong>今天有全天安排</strong><span>${escapeHtml(next.course?.name || "未命名日程")} · 不计入下一项时间提醒</span><button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
+  }
+  if (next.state === "time-unknown") {
+    const campusMissing = !state.campus.code;
+    return `<div class="overview-week-unknown"><strong>还不能判断今日安排是否结束</strong><p>${campusMissing ? "教务系统只提供了节次；设置默认校区后即可按校区作息时间准确计算。" : "部分安排缺少可识别的节次或时间，为避免误判，不会提前显示“已结束”。"}</p><div class="overview-inline-actions">${campusMissing ? `<button class="button button-link" type="button" data-action="view-settings">设置校区 →</button>` : ""}<button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div></div>`;
   }
   if (next.state === "ended") {
     const tomorrow = next.tomorrow;
@@ -6078,11 +6134,20 @@ function renderCourseDetailWithLocalOverlay() {
   const sportDetails = sport
     ? `<div class="course-included-panel sport-project-panel"><div class="sport-project-head"><span>原系统体育课“列表”</span>${sportEntries.length ? `<em>${escapeHtml(`${sportEntries.length} 个项目/教学班`)}</em>` : ""}</div>${course.sportProjectLoading ? `<p class="sport-project-status">正在读取原系统弹窗中的项目名称、教师和排课信息…</p>` : ""}${course.sportProjectError ? `<p class="sport-project-status sport-project-error">${escapeHtml(course.sportProjectError)}</p>` : ""}${sportEntries.length ? `<ul>${sportEntries.map((entry) => `<li><strong>${escapeHtml(entry.project || entry.name || entry.text || "体育课程")}</strong><span>${escapeHtml([entry.name !== entry.project && entry.name ? `课程：${entry.name}` : "", entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`, entry.weeks, entry.weekday, entry.section, entry.teacher && `教师：${entry.teacher}`, entry.location && `地点：${entry.location}`].filter(Boolean).join(" ｜ "))}</span></li>`).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统项目列表；原系统没有提供的字段会自动留空。</small></div>`
     : "";
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(course.location || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(course.location || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
 }
 
 function personalScheduleActions() {
   return `<div class="button-row schedule-export-action-row"><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button><button class="button button-soft button-small" type="button" data-action="open-local-manager">管理自定义安排</button>${scheduleExportActions("personal").replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "")}</div>`;
+}
+
+function renderCampusPromptModal() {
+  if (!state.campus.promptOpen || state.campus.code) return "";
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal campus-setting-modal" role="dialog" aria-modal="true" aria-label="设置默认校区"><div class="detail-modal-head"><div><p class="eyebrow">CAMPUS &amp; CLASS TIME</p><h3>请先选择默认校区</h3><p class="muted">教务系统有时只返回节次。选择校区后，课表才能准确判断上课、下课和“今天已结束”。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="dismiss-campus-prompt">稍后设置</button></div><label class="settings-field"><span>默认校区</span><select id="campusPromptSelect"><option value="">请选择</option><option value="nanhu">南湖校区</option><option value="hunnan">浑南校区</option></select><small>课程地点如果明确写了“南湖”或“浑南”，会自动优先使用该校区时间。</small></label><div class="settings-actions"><button class="button button-primary" type="button" data-action="save-campus-prompt">保存并查看课表</button></div></section></div>`;
+}
+
+function prepareCampusPromptForPersonalView(nextView, previousView = state.view) {
+  if (nextView === "personal" && previousView !== "personal" && !state.campus.code) state.campus.promptOpen = true;
 }
 
 function renderPersonalWithLocalOverlay() {
@@ -6101,7 +6166,7 @@ function renderPersonalWithLocalOverlay() {
     const records = schoolCourses.length
       ? `<details class="course-records-details"><summary>查看本学期教务课程记录（${schoolCourses.length} 条）</summary>${renderCourseRowsTable(schoolCourses, false, "personal")}</details>`
       : "";
-    return `<div>${sectionHeading("课表", "今天 / 明天会把教务课程、自定义课程和一次性日程放进同一条时间线。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderDailySchedule(scheduleRows, "personal")}${localSummary}${records}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}</div>`;
+    return `<div>${sectionHeading("课表", "今天 / 明天会把教务课程、自定义课程和一次性日程放进同一条时间线。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderDailySchedule(scheduleRows, "personal")}${localSummary}${records}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}${renderCampusPromptModal()}</div>`;
   }
   const weekRows = filterScheduleWeekRows(scheduleRows, "personal");
   const grid = renderScheduleGrid(weekRows, "personal");
@@ -6109,7 +6174,7 @@ function renderPersonalWithLocalOverlay() {
   const gridNotice = scheduleRows.length && !grid
     ? `<div class="schedule-note">当前没有可铺入周表网格的节次；带具体时间的一次性日程会在周表下方的其他日程区域显示。</div>`
     : "";
-  return `<div>${sectionHeading("课表", "周表同时显示教务课程、自定义课程和日程；没有节次的一次性日程会列在网格下方。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderScheduleWeekControls(scheduleRows, "personal")}${grid}${gridNotice}${localSummary}${schoolCourses.length ? `<details class="course-records-details" open><summary>本学期教务课程记录（${schoolCourses.length} 门课 · ${schoolPersonalScheduleRows(schoolCourses).length} 条排课）</summary>${renderCourseRowsTable(schoolCourses, false, "personal")}</details>` : ""}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}</div>`;
+  return `<div>${sectionHeading("课表", "周表同时显示教务课程、自定义课程和日程；没有节次的一次性日程会列在网格下方。", personalScheduleActions())}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点、周次或日程" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">${escapeHtml(counts)}</span></div>${renderScheduleDisplayControls()}${renderScheduleWeekControls(scheduleRows, "personal")}${grid}${gridNotice}${localSummary}${schoolCourses.length ? `<details class="course-records-details" open><summary>本学期教务课程记录（${schoolCourses.length} 门课 · ${schoolPersonalScheduleRows(schoolCourses).length} 条排课）</summary>${renderCourseRowsTable(schoolCourses, false, "personal")}</details>` : ""}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}${localScheduleModalMarkup()}${renderCampusPromptModal()}</div>`;
 }
 
 function webVpnBytesToHex(bytes) {
@@ -6317,7 +6382,8 @@ function renderSettingsWithLocalOverlay() {
     : "插件不会保存账号、密码或验证码。";
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
   const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
+  const campusBlock = `<section class="settings-section campus-settings"><div class="settings-intro"><h3>默认校区与上课时间</h3><p>当教务课表只提供节次时，用于计算正在上课、下一节课和今日是否结束。课程地点中明确的校区会优先于此设置。</p></div><label class="settings-field"><span>默认校区</span><select id="campusSettingSelect"><option value="" ${state.campus.code ? "" : "selected"}>未设置</option><option value="nanhu" ${state.campus.code === CAMPUS_CODES.NANHU ? "selected" : ""}>南湖校区</option><option value="hunnan" ${state.campus.code === CAMPUS_CODES.HUNNAN ? "selected" : ""}>浑南校区</option></select><small>当前：${escapeHtml(campusLabel(state.campus.code))}。南湖早课 08:00 开始，浑南早课 08:30 开始；第 5–12 节时间相同。</small></label><div class="settings-actions"><button class="button button-primary" type="button" data-action="save-campus-setting">保存校区</button></div><div class="settings-callout"><strong>节次时间</strong><span>南湖1–4节：08:00–11:40；浑南1–4节：08:30–12:10；5–8节：14:00–17:40；9–12节：18:30–22:00。</span></div></section>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}${campusBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -6446,7 +6512,7 @@ function scheduleExportCourseBadge(course, scope = "personal") {
 function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
   const range = courseSectionRange(course);
   const section = range ? (range.start === range.end ? `第${range.start}节` : `第${range.start}-${range.end}节`) : "";
-  const clock = extractClockText(course.time) || localScheduleClockText(course);
+  const clock = courseClockText(course);
   const weekText = selectedWeek === "all" ? (course.weeks || (course.localDate ? localScheduleDateText(course.localDate) : "周次待识别")) : `第${selectedWeek}周`;
   return {
     title: course.name || "未命名安排",
@@ -9169,7 +9235,7 @@ function render() {
       ? `<p class="muted">内置登录凭据仅使用 Android Keystore 加密保存在本机；也可以改用学校原网页账密或二维码登录。</p>`
       : `<p class="muted">插件不会保存账号或密码，只会复用浏览器当前的登录会话。登录完成后点击“刷新数据”即可。</p>`;
     const loginButtonLabel = IS_ANDROID_APP ? "手动登录 / 其他方式" : "打开教务系统";
-    elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(completeError)}</p>${loginPrivacy}<button class="button button-primary" type="button" data-action="open-portal">${loginButtonLabel}</button></div>`;
+    elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(completeError)}</p>${loginPrivacy}<button class="button button-primary" type="button" data-action="open-portal">${loginButtonLabel}</button></div>${state.view === "personal" ? renderCampusPromptModal() : ""}`;
     return;
   }
   if (state.loading && !state.data.scores.length && !state.data.exams.length && !state.data.courses.length && !localScheduleItemsForTerm(state.termCode).length && state.view === "overview") {
@@ -9180,7 +9246,7 @@ function render() {
   if (state.view === "scores") elements.content.innerHTML = state.loading && !state.data.scores.length ? loadingCard() : renderScores();
   if (state.view === "curriculum") elements.content.innerHTML = renderCurriculum();
   if (state.view === "exams") elements.content.innerHTML = state.loading && !state.data.exams.length ? loadingCard() : renderExams();
-  if (state.view === "personal") elements.content.innerHTML = state.loading && !state.data.courses.length ? loadingCard() : renderPersonal();
+  if (state.view === "personal") elements.content.innerHTML = state.loading && !state.data.courses.length ? `${loadingCard()}${renderCampusPromptModal()}` : renderPersonal();
   if (state.view === "all") elements.content.innerHTML = renderAll();
   if (state.view === "settings") elements.content.innerHTML = renderSettings();
   if (state.view === "all" && state.allTypeCode) {
@@ -9893,6 +9959,37 @@ function scheduleClockRangeFromText(value) {
   };
 }
 
+function campusLabel(code) {
+  return normalizeCampusCode(code) === CAMPUS_CODES.HUNNAN ? "浑南校区" : normalizeCampusCode(code) === CAMPUS_CODES.NANHU ? "南湖校区" : "未设置";
+}
+
+function campusCodeForScheduleItem(item) {
+  const campusText = [item?.location, item?.detail, rawScheduleText(item?.raw)].filter(Boolean).join(" ");
+  if (/浑南/.test(campusText)) return CAMPUS_CODES.HUNNAN;
+  if (/南湖/.test(campusText)) return CAMPUS_CODES.NANHU;
+  return normalizeCampusCode(state.campus.code);
+}
+
+function campusPeriodClockRange(item) {
+  const section = courseSectionRange(item);
+  const campusCode = campusCodeForScheduleItem(item);
+  const periods = CAMPUS_PERIOD_TIMES[campusCode];
+  const startPeriod = section && periods?.[section.start];
+  const endPeriod = section && periods?.[section.end];
+  if (!startPeriod || !endPeriod) return null;
+  return {
+    start: overviewClockMinutes(startPeriod[0]),
+    end: overviewClockMinutes(endPeriod[1]),
+    startText: startPeriod[0],
+    endText: endPeriod[1],
+    hasStart: true,
+    hasEnd: true,
+    hasRange: true,
+    source: "campus-period",
+    campusCode
+  };
+}
+
 function localScheduleClockRange(item) {
   const row = item?.source === "local" && item?.localType
     ? item
@@ -9912,7 +10009,14 @@ function localScheduleClockRange(item) {
       hasRange: directStart !== null && directEnd !== null && directEnd > directStart
     };
   }
-  return scheduleClockRangeFromText([row?.time, row?.detail, rawScheduleText(row?.raw)].filter(Boolean).join(" "));
+  const explicitRange = scheduleClockRangeFromText([row?.time, row?.detail, rawScheduleText(row?.raw)].filter(Boolean).join(" "));
+  if (explicitRange.hasStart || explicitRange.hasEnd) return { ...explicitRange, source: "explicit" };
+  return campusPeriodClockRange(row) || { ...explicitRange, source: "unknown", campusCode: "" };
+}
+
+function courseClockText(course) {
+  const range = localScheduleClockRange(course);
+  return range.startText && range.endText ? `${range.startText}-${range.endText}` : range.startText || "";
 }
 
 function scheduleItemIsEvent(item) {
@@ -10140,7 +10244,16 @@ function overviewNextCourse(rows, date = new Date()) {
     return { course: null, state: "unknown", tomorrow: null };
   }
   const now = date.getHours() * 60 + date.getMinutes();
-  const timedRows = todayRows.filter((course) => !course.localAllDay);
+  const nonAllDayRows = todayRows.filter((course) => !course.localAllDay);
+  const timedRows = nonAllDayRows.filter((course) => {
+    const range = localScheduleClockRange(course);
+    return range.start !== null || range.end !== null;
+  });
+  const untimedRows = nonAllDayRows.filter((course) => {
+    const range = localScheduleClockRange(course);
+    return range.start === null && range.end === null;
+  });
+  if (untimedRows.length) return { course: untimedRows[0], state: "time-unknown", untimedCount: untimedRows.length };
   const active = timedRows.find((course) => {
     const range = localScheduleClockRange(course);
     return range.start !== null && range.end !== null && now >= range.start && now < range.end;
@@ -10153,7 +10266,8 @@ function overviewNextCourse(rows, date = new Date()) {
   if (upcoming) return { course: upcoming, state: "next", until: localScheduleClockRange(upcoming).start - now };
   const started = timedRows.find((course) => localScheduleClockRange(course).start !== null && localScheduleClockRange(course).start < now && localScheduleClockRange(course).end === null);
   if (started) return { course: started, state: "started", elapsed: now - localScheduleClockRange(started).start };
-  if (!timedRows.length && todayRows.length) return { course: todayRows[0], state: "all-day", allDayCount: todayRows.length };
+  const allDayRows = todayRows.filter((course) => course.localAllDay);
+  if (allDayRows.length) return { course: allDayRows[0], state: "all-day", allDayCount: allDayRows.length };
   const tomorrow = overviewTodayCourses(rows, addCalendarDays(date, 1));
   if (todayRows.length) return { course: null, state: "ended", tomorrow: tomorrow[0] || null };
   if (tomorrow.length) return { course: null, state: "none", tomorrow: tomorrow[0] };
@@ -10273,9 +10387,11 @@ function renderSettings() {
 document.querySelectorAll("[data-view]").forEach((tab) => {
   tab.addEventListener("click", async () => {
     const nextView = tab.dataset.view;
+    const previousView = state.view;
     if (nextView !== state.view) {
       clearActiveModalState();
     }
+    prepareCampusPromptForPersonalView(nextView, previousView);
     state.view = nextView;
     if (state.view === "curriculum" && !curriculumBootstrapIsActive()) {
       invalidateCurriculum();
@@ -10518,6 +10634,24 @@ elements.content.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   const action = button.dataset.action;
+  if (action === "save-campus-setting" || action === "save-campus-prompt") {
+    const select = document.getElementById(action === "save-campus-prompt" ? "campusPromptSelect" : "campusSettingSelect");
+    const code = normalizeCampusCode(select?.value);
+    if (action === "save-campus-prompt" && !code) {
+      setNotice("请先选择南湖校区或浑南校区。", "error");
+      return;
+    }
+    state.campus.code = persistCampusCode(code);
+    state.campus.promptOpen = false;
+    setNotice(code ? `已设置默认校区：${campusLabel(code)}。` : "已清除默认校区。", "success");
+    render();
+    return;
+  }
+  if (action === "dismiss-campus-prompt") {
+    state.campus.promptOpen = false;
+    render();
+    return;
+  }
   if (action === "open-webvpn-tool") {
     state.webvpnTool.open = true;
     updateWebVpnTool(state.webvpnTool.input);
@@ -10639,6 +10773,7 @@ elements.content.addEventListener("click", async (event) => {
     // “全部周次”或其他周次仍会继续保留，直到再次切换学期/改日期。
     state.scheduleWeek.personal = "";
     state.scheduleDisplay.personal = "days";
+    prepareCampusPromptForPersonalView("personal", state.view);
     state.view = "personal";
     setNotice(value ? "学周设置已保存，课表已按周日重新计算。" : "已清除学周设置；设置教学周后才能准确显示今天和明天的课程。", "success");
     render();
@@ -10649,6 +10784,7 @@ elements.content.addEventListener("click", async (event) => {
     writeStoredSetting("zhizhang.firstWeekStart", "");
     state.scheduleWeek.personal = "";
     state.scheduleDisplay.personal = "days";
+    prepareCampusPromptForPersonalView("personal", state.view);
     state.view = "personal";
     setNotice("已清除学周设置；设置教学周后才能准确显示今天和明天的课程。", "success");
     render();
@@ -10751,7 +10887,10 @@ elements.content.addEventListener("click", async (event) => {
     state.curriculum.bootstrap = { status: "idle", message: "", error: "", tabId: null, reading: false };
   }
   if (action === "view-exams") state.view = "exams";
-  if (action === "view-personal") state.view = "personal";
+  if (action === "view-personal") {
+    prepareCampusPromptForPersonalView("personal", state.view);
+    state.view = "personal";
+  }
   if (action === "view-all") state.view = "all";
   if (action === "search-all") {
     const mode = document.getElementById("allMode");
