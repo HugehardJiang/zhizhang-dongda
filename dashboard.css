@@ -1229,6 +1229,9 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .mobile-bottom-nav { position: fixed; z-index: 12; right: 0; bottom: 0; left: 0; height: 64px; display: grid; grid-template-columns: repeat(5, 1fr); padding: 5px 7px max(5px, env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--border); }
   .mobile-nav-item { flex-direction: column; justify-content: center; gap: 3px; padding: 0; color: var(--text-tertiary); text-align: center; font-size: 10px; }
   .mobile-nav-item .nav-icon { width: 18px; height: 18px; }
+  /* Gear outlines are slightly top-heavy optically; lift only the inner
+     circle in the mobile bottom bar so it sits on the gear's visual center. */
+  .mobile-nav-item .settings-nav-center { transform: translateY(-0.75px); }
   .mobile-nav-item.is-active { color: var(--brand); font-weight: 650; }
   .overview-date { margin: -7px 0 18px; }
   .overview-next { grid-template-columns: 74px minmax(0, 1fr); gap: 12px; padding: 15px 0; }
