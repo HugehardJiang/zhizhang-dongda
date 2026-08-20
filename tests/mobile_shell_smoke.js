@@ -149,6 +149,15 @@ assert.ok(loginSettings.includes('id="currentTermSelect"'));
 assert.ok(loginSettings.includes('从教务系统同步'));
 assert.ok(loginSettings.indexOf('当前学期') < loginSettings.indexOf('第一周周日'));
 
+// Local-schedule controls opened from Settings must render on Settings itself,
+// and Android Back must dismiss their state before changing the current page.
+audit.state.view = 'settings';
+audit.state.localSchedule.managerOpen = true;
+assert.ok(audit.renderSettings().includes('aria-label="管理自定义安排"'));
+assert.strictEqual(global.__handleAndroidBack(), true);
+assert.strictEqual(audit.state.localSchedule.managerOpen, false);
+assert.strictEqual(audit.state.view, 'settings');
+
 // Android mirrors the central current-term preference into SharedPreferences,
 // so a WebView storage cleanup does not make every page choose a different term.
 audit.state.terms = [

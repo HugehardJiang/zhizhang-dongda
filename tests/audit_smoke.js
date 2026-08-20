@@ -56,6 +56,7 @@ globalThis.__auditTest = {
   normalizeLocalScheduleItem, localScheduleItemToCourseRow, mergedPersonalScheduleRows,
   compareScheduleItemsOverlap, SCHEDULE_COLLISION_STATUS, filterCoursesForDate, overviewTodayCourses, overviewNextCourse, schoolScheduleOccurrenceKey,
   findLocalScheduleConflicts, localScheduleDraftFromItem, localScheduleEditorMarkup, localScheduleSectionOptions,
+  localScheduleModalMarkup, hasActiveModalState, clearActiveModalState,
   localScheduleDefaultCourseOccurrence,
   localScheduleRowHasConflict, syncLocalScheduleEndSectionSelect, analyzeCourseTransferCollisions, renderCourseTransferCollisionResult,
   matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
@@ -658,8 +659,21 @@ const t = global.__auditTest;
   assert.ok(localSettingsMarkup.includes('清除全部自定义安排'));
   assert.ok(!localSettingsMarkup.includes('value="builtin"'));
   assert.ok(!localSettingsMarkup.includes('Android Keystore'));
+  // Settings owns the same local-schedule workflow as the timetable page. Its
+  // manager, editor, conflict, and detail overlays must render immediately on
+  // the page where the action was triggered instead of appearing after a later
+  // route switch.
+  t.state.localSchedule.managerOpen = true;
+  assert.ok(t.renderSettings().includes('aria-label="管理自定义安排"'));
+  t.state.localSchedule.managerOpen = false;
+  t.state.localSchedule.editorOpen = true;
+  t.state.localSchedule.draft = t.localScheduleDraftFromItem(localCourse, 'course');
+  assert.ok(t.renderSettings().includes('aria-label="编辑本地课程"'));
+  t.state.localSchedule.editorOpen = false;
+  t.state.localSchedule.draft = null;
   t.state.selectedCourse = t.localScheduleItemToCourseRow(localEvent);
   assert.ok(t.renderCourseDetailModal().includes('自定义安排详情'));
+  assert.ok(t.renderSettings().includes('自定义安排详情'));
   assert.ok(t.renderOverview().includes('自定义安排详情'));
   const overviewPriorityMarkup = t.renderOverviewPriority({
     state: 'next', course: localRows.find((row) => row.localId === 'local-course-a'), until: 30
@@ -668,6 +682,13 @@ const t = global.__auditTest;
   assert.ok(overviewPriorityMarkup.includes('data-action="show-local-schedule"'));
   assert.ok(t.renderOverviewPriority({ state: 'next', course: localSchool, until: 30 }).includes('data-action="show-course"'));
   t.state.selectedCourse = null;
+  t.state.localSchedule.managerOpen = true;
+  assert.strictEqual(t.hasActiveModalState(), true);
+  t.clearActiveModalState();
+  assert.strictEqual(t.hasActiveModalState(), false);
+  assert.strictEqual(t.state.localSchedule.managerOpen, false);
+  assert.strictEqual(t.state.localSchedule.editorOpen, false);
+  assert.strictEqual(t.state.localSchedule.conflict, null);
   assert.ok(t.renderOverview().includes('今天安排'));
 
   // An exact-date event is visible without firstWeekStart; a recurring school

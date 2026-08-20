@@ -5929,6 +5929,37 @@ function localScheduleModalMarkup() {
   return `${localScheduleEditorMarkup()}${localScheduleManagerMarkup()}${localScheduleConflictMarkup()}`;
 }
 
+function hasActiveModalState() {
+  return Boolean(
+    state.webvpnTool.open
+    || state.scheduleExport
+    || state.courseTransfer.mode
+    || state.selectedCourse
+    || state.scoreDetail
+    || state.curriculum.courseDetail
+    || state.localSchedule.editorOpen
+    || state.localSchedule.managerOpen
+    || state.localSchedule.conflict
+  );
+}
+
+function clearActiveModalState() {
+  sportProjectRequestSequence += 1;
+  state.webvpnTool.open = false;
+  state.scheduleExport = null;
+  state.selectedCourse = null;
+  state.selectedCourseScope = "personal";
+  state.scoreDetail = null;
+  state.curriculum.courseDetail = null;
+  state.localSchedule.editorOpen = false;
+  state.localSchedule.managerOpen = false;
+  state.localSchedule.conflict = null;
+  state.localSchedule.editingId = "";
+  state.localSchedule.draft = null;
+  state.localSchedule.editorError = "";
+  clearCourseTransferModal();
+}
+
 function localScheduleRowHasConflict(row, rows = mergedPersonalScheduleRows()) {
   return rows.some((candidate) => candidate !== row
     && compareScheduleItemsOverlap(row, candidate).status === SCHEDULE_COLLISION_STATUS.CONFIRMED);
@@ -6286,7 +6317,7 @@ function renderSettingsWithLocalOverlay() {
     : "插件不会保存账号、密码或验证码。";
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
   const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -10243,8 +10274,7 @@ document.querySelectorAll("[data-view]").forEach((tab) => {
   tab.addEventListener("click", async () => {
     const nextView = tab.dataset.view;
     if (nextView !== state.view) {
-      state.selectedCourse = null;
-      state.selectedCourseScope = "personal";
+      clearActiveModalState();
     }
     state.view = nextView;
     if (state.view === "curriculum" && !curriculumBootstrapIsActive()) {
@@ -10481,13 +10511,7 @@ elements.content.addEventListener("click", async (event) => {
       acknowledgeCurrentScoreReminder();
       return;
     }
-    sportProjectRequestSequence += 1;
-    state.selectedCourse = null;
-    state.scoreDetail = null;
-    state.curriculum.courseDetail = null;
-    state.scheduleExport = null;
-    state.webvpnTool.open = false;
-    clearCourseTransferModal();
+    clearActiveModalState();
     render();
     return;
   }
@@ -10761,13 +10785,8 @@ globalThis.__handleAndroidBack = () => {
     acknowledgeCurrentScoreReminder();
     return true;
   }
-  if (state.webvpnTool.open || state.scheduleExport || state.courseTransfer.mode || state.selectedCourse || state.scoreDetail || state.curriculum.courseDetail) {
-    state.webvpnTool.open = false;
-    state.scheduleExport = null;
-    state.selectedCourse = null;
-    state.scoreDetail = null;
-    state.curriculum.courseDetail = null;
-    clearCourseTransferModal();
+  if (hasActiveModalState()) {
+    clearActiveModalState();
     render();
     return true;
   }
