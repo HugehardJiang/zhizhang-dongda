@@ -314,6 +314,19 @@ audit.prepare();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
 assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), false);
 
+// Android WebView can emit many small scroll events for one gesture. The
+// header must hide after the cumulative threshold, not only after one large
+// event delta.
+pageWrap.scrollTop = 40;
+pageWrap.dispatch("scroll");
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
+pageWrap.scrollTop = 48;
+pageWrap.dispatch("scroll");
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
+pageWrap.scrollTop = 56;
+pageWrap.dispatch("scroll");
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
+
 // Scrolling down hides the shell header; ordinary upward scrolling never shows it.
 pageWrap.scrollTop = 120;
 pageWrap.dispatch("scroll");

@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.55";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.56";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -2643,7 +2643,9 @@ public class MainActivity extends Activity {
     }
 
     private void setEcodePanelHidden(boolean hidden) {
-        if (ecodePanel == null || ecodeExpanded) return;
+        if (ecodePanel == null) return;
+        // 展开状态也必须参与主页面的滚动联动。否则展开面板会一直覆盖
+        // 主页面的大部分触摸区域，用户只能在底部极窄的区域里尝试滚动。
         boolean nextHidden = Boolean.parseBoolean(String.valueOf(hidden));
         if (ecodePanelHidden == nextHidden && ecodePanel.getAnimation() == null) return;
         ecodePanelHidden = nextHidden;

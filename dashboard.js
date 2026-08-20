@@ -914,30 +914,28 @@ function bindNativeEcodeScroll() {
   if (!pageWrap || pageWrap.__nativeEcodeScrollBound) return;
   pageWrap.__nativeEcodeScrollBound = true;
   const shell = state.mobileShell;
-  shell.lastCampusScrollTop = Math.max(0, pageWrap.scrollTop || 0);
   shell.topPullStartY = null;
   shell.topPullActive = false;
 
   const update = () => {
     const currentTop = Math.max(0, pageWrap.scrollTop || 0);
-    const delta = currentTop - shell.lastCampusScrollTop;
     const currentState = state.mobileShell.campusHeaderState;
     if (currentState === CAMPUS_HEADER_VISIBLE) {
-      if (delta >= 8 && currentTop >= CAMPUS_HEADER_HIDE_SCROLL_TOP) {
+      // 不要用单次 scroll 事件的 delta 判断：Android WebView 的触摸滚动
+      // 会把一次手势拆成许多小于 8px 的事件，累计滚过阈值也不能触发隐藏。
+      if (currentTop >= CAMPUS_HEADER_HIDE_SCROLL_TOP) {
         setCampusHeaderState(CAMPUS_HEADER_HIDDEN);
       }
     } else if (currentState === CAMPUS_HEADER_HIDDEN) {
       // 到达顶部只“武装”下一次下拉，不直接显示校园码。
       if (currentTop <= 1) setCampusHeaderState(CAMPUS_HEADER_HIDDEN_AT_TOP);
-    } else if (currentState === CAMPUS_HEADER_HIDDEN_AT_TOP && currentTop > 8 && delta > 0) {
+    } else if (currentState === CAMPUS_HEADER_HIDDEN_AT_TOP && currentTop > 8) {
       // 用户从顶部重新向下滚内容，仍然保持隐藏；只有额外的顶部下拉
       // 手势才允许回到 VISIBLE。
       setCampusHeaderState(CAMPUS_HEADER_HIDDEN);
       shell.topPullActive = false;
       shell.topPullStartY = null;
     }
-
-    shell.lastCampusScrollTop = currentTop;
   };
 
   const readTouchY = (event) => {
