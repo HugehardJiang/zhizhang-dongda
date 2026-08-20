@@ -22,7 +22,12 @@ global.document = {
   querySelectorAll() { return []; },
   createElement() { return createElementStub(); }
 };
-global.localStorage = { getItem(){ return null; }, setItem(){}, removeItem(){} };
+const storedSettings = new Map();
+global.localStorage = {
+  getItem(key){ return storedSettings.has(key) ? storedSettings.get(key) : null; },
+  setItem(key, value){ storedSettings.set(key, String(value)); },
+  removeItem(key){ storedSettings.delete(key); }
+};
 global.location = { href: 'chrome-extension://test/dashboard.html' };
 global.navigator = {};
 global.open = () => null;
@@ -55,6 +60,8 @@ globalThis.__auditTest = {
   localScheduleRowHasConflict, syncLocalScheduleEndSectionSelect, analyzeCourseTransferCollisions, renderCourseTransferCollisionResult,
   matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
   currentTermCandidates, configuredCurrentTermCode, currentTermCodeFor, applyCurrentTermDefaults,
+  scoreReminderFingerprint, scoreReminderStorageKey, queueNewScoreReminder,
+  currentScoreReminder, acknowledgeCurrentScoreReminder, renderNewScoreReminderModal,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
   scheduleCsvHasRows, renderPersonal, renderOverview, renderOverviewPriority, renderSettings, renderCourseDetailModal,
   state,
@@ -135,6 +142,57 @@ const t = global.__auditTest;
   t.state.termSelectionTouched = savedCurrentTermFixture.termSelectionTouched;
   t.state.allTermSelectionTouched = savedCurrentTermFixture.allTermSelectionTouched;
   t.state.currentTerm = savedCurrentTermFixture.currentTerm;
+
+  // New-score alerts are isolated by student and term. The first visit seeds a
+  // baseline without alerting, while a later network-only row is queued only
+  // when the user is actually on the matching score page.
+  const savedScoreReminderFixture = {
+    studentId: t.state.studentId,
+    termCode: t.state.termCode,
+    view: t.state.view,
+    loading: t.state.loading,
+    terms: t.state.terms,
+    scores: t.state.data.scores,
+    pendingByScope: t.state.scoreReminder.pendingByScope
+  };
+  const oldScore = { detailId: 'score-old', code: 'A1001', name: '高等数学', credit: '5', score: '88', gpa: '3.7', status: '已通过' };
+  const newScore = { detailId: 'score-new', code: 'A1002', name: '大学物理', credit: '4', score: '95', gpa: '4.5', status: '已通过' };
+  t.state.studentId = '20250001';
+  t.state.termCode = '2025-2026-2';
+  t.state.view = 'scores';
+  t.state.loading = false;
+  t.state.terms = [{ code: '2025-2026-2', name: '2025-2026学年春季学期' }, { code: '2024-2025-1', name: '2024-2025学年秋季学期' }];
+  t.state.scoreReminder.pendingByScope = {};
+  assert.deepStrictEqual(t.queueNewScoreReminder('2025-2026-2', [oldScore]), []);
+  assert.strictEqual(t.currentScoreReminder(), null);
+  assert.deepStrictEqual(t.queueNewScoreReminder('2025-2026-2', [oldScore, newScore], [oldScore]), [newScore]);
+  assert.strictEqual(t.currentScoreReminder().rows.length, 1);
+  assert.ok(t.renderNewScoreReminderModal().includes('有新成绩了'));
+  assert.ok(t.renderNewScoreReminderModal().includes('大学物理'));
+  t.state.data.scores = [oldScore, newScore];
+  t.acknowledgeCurrentScoreReminder();
+  assert.strictEqual(t.currentScoreReminder(), null);
+  assert.deepStrictEqual(t.queueNewScoreReminder('2025-2026-2', [oldScore, newScore], [oldScore]), []);
+  const currentTermKey = t.scoreReminderStorageKey('2025-2026-2', '20250001');
+  const historicalTermKey = t.scoreReminderStorageKey('2024-2025-1', '20250001');
+  assert.notStrictEqual(currentTermKey, historicalTermKey);
+  t.state.termCode = '2024-2025-1';
+  assert.deepStrictEqual(t.queueNewScoreReminder('2024-2025-1', [oldScore, newScore], []), []);
+  assert.strictEqual(t.currentScoreReminder(), null);
+  // A pending result from another term must remain invisible after switching.
+  t.state.termCode = '2025-2026-2';
+  const thirdScore = { detailId: 'score-third', code: 'A1003', name: '程序设计', credit: '3', score: '91', gpa: '4.1', status: '已通过' };
+  t.queueNewScoreReminder('2025-2026-2', [oldScore, newScore, thirdScore], [oldScore, newScore]);
+  assert.strictEqual(t.currentScoreReminder().rows[0].name, '程序设计');
+  t.state.termCode = '2024-2025-1';
+  assert.strictEqual(t.currentScoreReminder(), null);
+  t.state.studentId = savedScoreReminderFixture.studentId;
+  t.state.termCode = savedScoreReminderFixture.termCode;
+  t.state.view = savedScoreReminderFixture.view;
+  t.state.loading = savedScoreReminderFixture.loading;
+  t.state.terms = savedScoreReminderFixture.terms;
+  t.state.data.scores = savedScoreReminderFixture.scores;
+  t.state.scoreReminder.pendingByScope = savedScoreReminderFixture.pendingByScope;
 
   // Configured first-week Sunday drives only the personal schedule default.
   const today = new Date();

@@ -37,6 +37,7 @@ const CAMPUS_HEADER_HIDE_SCROLL_TOP = 56;
 const CAMPUS_HEADER_REVEAL_PULL_DISTANCE = 64;
 const TOAST_SETTING_KEY = "zhizhang.toastNotifications";
 const CURRENT_TERM_SETTING_KEY = "zhizhang.currentTerm.v1";
+const SCORE_REMINDER_STORAGE_PREFIX = "zhizhang.scoreReminder.v1";
 const TOAST_CATEGORY_ESSENTIAL = "essential";
 const WEBVPN_COMPAT_KEY = "b0A58a69394ce73@";
 const WEBVPN_AES_SBOX = new Uint8Array([
@@ -359,6 +360,11 @@ const state = {
     lastCsvSkipped: 0
   },
   scoreDetail: null,
+  // 只在内存里保存尚未确认的成绩明细；本地持久化仅保存不可逆指纹，
+  // 并按学号与学期双重隔离，避免切换历史学期时交叉提醒。
+  scoreReminder: {
+    pendingByScope: {}
+  },
   filters: {
     scores: "",
     exams: "",
@@ -479,6 +485,131 @@ function cacheDateText(value) {
   return Number.isFinite(date.getTime())
     ? date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })
     : text;
+}
+
+function scoreReminderHash(value) {
+  let hash = 0x811c9dc5;
+  const text = String(value ?? "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function scoreReminderProfile() {
+  return String(state.studentId || state.personalCache.studentId || "").trim();
+}
+
+function scoreReminderScope(termCode, profile = scoreReminderProfile()) {
+  const term = String(termCode || "").trim();
+  const owner = String(profile || "").trim();
+  return owner && term ? `${scoreReminderHash(owner)}.${scoreReminderHash(term)}` : "";
+}
+
+function scoreReminderStorageKey(termCode, profile = scoreReminderProfile()) {
+  const scope = scoreReminderScope(termCode, profile);
+  return scope ? `${SCORE_REMINDER_STORAGE_PREFIX}.${scope}` : "";
+}
+
+function scoreReminderText(value) {
+  return String(value ?? "").toLowerCase().replace(/[\s_\-—–·•:：,，.。/\\]+/g, "").trim();
+}
+
+function scoreReminderFingerprint(row = {}, termCode = state.termCode) {
+  const identity = scoreReminderText(row.detailId)
+    || [row.code, row.name, row.credit].map(scoreReminderText).join("|");
+  const result = [row.score, row.gpa, row.status, row.retake].map(scoreReminderText).join("|");
+  return identity && result ? scoreReminderHash(`${scoreReminderText(termCode)}|${identity}|${result}`) : "";
+}
+
+function scoreReminderHasPublishedResult(row = {}) {
+  const score = String(row.score ?? "").trim();
+  return Boolean(score && score !== "—" && !/待发布|修读中|进行中/.test(score));
+}
+
+function scoreReminderFingerprints(rows, termCode) {
+  return [...new Set((rows || [])
+    .filter(scoreReminderHasPublishedResult)
+    .map((row) => scoreReminderFingerprint(row, termCode))
+    .filter(Boolean))];
+}
+
+function readScoreReminderBaseline(termCode, profile = scoreReminderProfile()) {
+  const key = scoreReminderStorageKey(termCode, profile);
+  if (!key) return null;
+  const raw = readStoredSetting(key, "");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.map(String).filter(Boolean)) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeScoreReminderBaseline(termCode, fingerprints, profile = scoreReminderProfile()) {
+  const key = scoreReminderStorageKey(termCode, profile);
+  if (!key) return false;
+  writeStoredSetting(key, JSON.stringify([...new Set(fingerprints || [])].slice(-3000)));
+  return true;
+}
+
+function queueNewScoreReminder(termCode, liveScores, cachedScores = null) {
+  const profile = scoreReminderProfile();
+  const scope = scoreReminderScope(termCode, profile);
+  if (!scope || !Array.isArray(liveScores)) return [];
+  let baseline = readScoreReminderBaseline(termCode, profile);
+  if (baseline === null) {
+    // 升级后的第一次比较优先用该学期已有缓存建基线；如果连该学期缓存
+    // 都没有，则把本次结果视为初始快照，不能把整个历史学期误报为新成绩。
+    const cachedFingerprints = Array.isArray(cachedScores)
+      ? scoreReminderFingerprints(cachedScores, termCode)
+      : [];
+    const canCompareWithCache = cachedFingerprints.length > 0;
+    baseline = new Set(canCompareWithCache
+      ? cachedFingerprints
+      : scoreReminderFingerprints(liveScores, termCode));
+    writeScoreReminderBaseline(termCode, baseline, profile);
+    if (!canCompareWithCache) return [];
+  }
+  const newRows = liveScores.filter((row) => {
+    if (!scoreReminderHasPublishedResult(row)) return false;
+    const fingerprint = scoreReminderFingerprint(row, termCode);
+    return fingerprint && !baseline.has(fingerprint);
+  });
+  if (!newRows.length) return [];
+  const existing = state.scoreReminder.pendingByScope[scope];
+  const merged = new Map();
+  [...(existing?.rows || []), ...newRows].forEach((row) => {
+    const fingerprint = scoreReminderFingerprint(row, termCode);
+    if (fingerprint) merged.set(fingerprint, row);
+  });
+  state.scoreReminder.pendingByScope[scope] = {
+    scope,
+    profile,
+    termCode: String(termCode || ""),
+    rows: [...merged.values()]
+  };
+  return newRows;
+}
+
+function currentScoreReminder() {
+  if (state.view !== "scores" || state.loading) return null;
+  const scope = scoreReminderScope(state.termCode);
+  const pending = scope ? state.scoreReminder.pendingByScope[scope] : null;
+  return pending?.termCode === state.termCode && pending.rows?.length ? pending : null;
+}
+
+function acknowledgeCurrentScoreReminder() {
+  const pending = currentScoreReminder();
+  if (!pending) return;
+  const baseline = readScoreReminderBaseline(pending.termCode, pending.profile) || new Set();
+  scoreReminderFingerprints([...(state.data.scores || []), ...(pending.rows || [])], pending.termCode)
+    .forEach((fingerprint) => baseline.add(fingerprint));
+  writeScoreReminderBaseline(pending.termCode, baseline, pending.profile);
+  delete state.scoreReminder.pendingByScope[pending.scope];
+  render();
 }
 
 function personalCacheStatusText() {
@@ -4817,6 +4948,11 @@ async function loadTermData(requestId = refreshRequestSequence) {
 
   if (scoreEndpointLive) {
     state.data.scores = scoreRows.map(mapScore);
+    queueNewScoreReminder(
+      termCode,
+      state.data.scores,
+      cachedTerm && Array.isArray(cachedTerm.scores) ? cachedTerm.scores : null
+    );
   } else if (Array.isArray(cachedTerm?.scores)) {
     state.data.scores = cachedTerm.scores;
   }
@@ -5495,6 +5631,14 @@ async function openScoreDetail(index) {
   render();
 }
 
+function renderNewScoreReminderModal() {
+  const pending = currentScoreReminder();
+  if (!pending) return "";
+  const termName = state.terms.find((term) => term.code === pending.termCode)?.name || pending.termCode;
+  const rows = pending.rows.map((row) => `<article class="new-score-reminder-row"><div><strong>${escapeHtml(row.name || "未命名课程")}</strong><small>${escapeHtml([row.code, row.credit ? `${row.credit} 学分` : "", row.status].filter(Boolean).join(" · "))}</small></div><span class="${scoreSemanticClass(row)}">${escapeHtml(row.score || "—")}</span></article>`).join("");
+  return `<div class="modal-backdrop" role="presentation" data-score-reminder-scope="${escapeHtml(pending.scope)}"><section class="detail-modal new-score-reminder-modal" role="dialog" aria-modal="true" aria-label="新成绩提醒"><div class="detail-modal-head"><div><p class="eyebrow">NEW SCORES</p><h3>有新成绩了</h3><p class="muted">${escapeHtml(termName)} · ${pending.rows.length} 门课程</p></div><button class="button button-primary detail-modal-close" type="button" data-action="acknowledge-new-scores">知道了</button></div><div class="new-score-reminder-list">${rows}</div><div class="settings-callout new-score-reminder-note"><strong>严格按学期提醒</strong><span>这里只比较当前查询学期与该学期已经确认过的成绩；首次查看其他学期只会建立基线，不会把整学期成绩都当成新增。</span></div></section></div>`;
+}
+
 function renderScores() {
   const rows = filterRows(state.data.scores, ["name", "code", "term", "category", "nature"], state.filters.scores);
   const scoreMeta = (row) => [row.code, row.category, row.examType, row.retake, row.status].filter(Boolean).join(" · ");
@@ -5517,7 +5661,7 @@ function renderScores() {
   const gpaNote = meta.rule
     ? `${termScope} · ${meta.rule} · 纳入 ${meta.included || 0} 门，排除 ${meta.excluded || 0} 门 · 计入 ${meta.credit || 0} 学分${excludedLabel ? ` · 已排除：${excludedLabel}` : ""}`
     : "等待成绩接口返回完整绩点字段";
-  return `<div>${sectionHeading("成绩", "") }<div class="panel"><div class="gpa-summary"><div><span>平均绩点</span><strong>${escapeHtml(state.data.gpa)}</strong></div><p>${escapeHtml(meta.reported !== "—" && meta.reported !== state.data.gpa ? `原系统累计总绩点 ${meta.reported}` : `已修 ${meta.total || state.data.scores.length} 门课程`)}</p></div><details class="gpa-details"><summary>计算规则</summary><p>${escapeHtml(gpaNote)}</p></details><div class="toolbar"><input id="scoreFilter" data-filter="scores" value="${escapeHtml(state.filters.scores)}" placeholder="搜索课程名、课程号或类别" /><span class="muted">${rows.length} / ${state.data.scores.length} 条</span></div>${table}${mobileList}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`)}${renderScoreDetailModal()}</div>`;
+  return `<div>${sectionHeading("成绩", "") }<div class="panel"><div class="gpa-summary"><div><span>平均绩点</span><strong>${escapeHtml(state.data.gpa)}</strong></div><p>${escapeHtml(meta.reported !== "—" && meta.reported !== state.data.gpa ? `原系统累计总绩点 ${meta.reported}` : `已修 ${meta.total || state.data.scores.length} 门课程`)}</p></div><details class="gpa-details"><summary>计算规则</summary><p>${escapeHtml(gpaNote)}</p></details><div class="toolbar"><input id="scoreFilter" data-filter="scores" value="${escapeHtml(state.filters.scores)}" placeholder="搜索课程名、课程号或类别" /><span class="muted">${rows.length} / ${state.data.scores.length} 条</span></div>${table}${mobileList}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`)}${renderNewScoreReminderModal()}${renderScoreDetailModal()}</div>`;
 }
 
 function renderExams() {
@@ -6132,7 +6276,7 @@ function renderSettingsWithLocalOverlay() {
   const cacheBlock = `<section class="settings-section"><div class="settings-intro"><h3>教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。只保存页面展示所需的查询结果，教务系统暂时不可用时仍可查看上次结果。</p></div>${IS_ANDROID_APP ? `<div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除教务缓存</button></div>` : ""}<div class="settings-callout"><strong>隐私</strong><span>${escapeHtml(cachePrivacy)}</span></div></section>`;
   const localBlock = `<section class="settings-section"><div class="settings-intro"><h3>自定义课表</h3><p>${localCount} 条本地安排。手动创建的课程和日程仅保存在本机，并与教务缓存分开存储。</p></div><div class="settings-actions"><button class="button button-primary" type="button" data-action="open-local-manager">管理自定义安排</button><button class="button button-ghost" type="button" data-action="open-local-editor">+ 添加安排</button></div><div class="settings-actions"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button></div><div class="settings-callout"><strong>不会影响教务数据</strong><span>清除教务缓存不会删除自定义安排；清除自定义安排也不会删除成绩、考试或学校课表。</span></div></section>`;
   const loginDescription = IS_ANDROID_APP
-    ? "教务会话失效时先在后台复用 E 码通/统一认证，失败后才使用本机加密凭据；学校原网页入口始终保留。"
+    ? "教务或 E 码通任一会话失效时，都会独立在后台使用本机加密凭据恢复；学校原网页入口始终保留。"
     : "下次打开教务系统登录页时默认进入所选方式。";
   const loginOptions = IS_ANDROID_APP
     ? `<option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option>`
@@ -10108,7 +10252,11 @@ document.querySelectorAll("[data-view]").forEach((tab) => {
       state.curriculum.bootstrap = { status: "idle", message: "", error: "", tabId: null, reading: false };
     }
     render();
-    if (IS_ANDROID_APP && ["overview", "scores", "exams", "personal"].includes(state.view) && !state.loading) {
+    if (state.view === "scores" && !state.loading) {
+      // 成绩提醒只以进入成绩页后得到的最新网络结果为准。各平台都在
+      // 进入时刷新；学号与当前查询学期仍由提醒作用域严格隔离。
+      refresh();
+    } else if (IS_ANDROID_APP && ["overview", "exams", "personal"].includes(state.view) && !state.loading) {
       // 进入个人功能时再尝试一次网络刷新；缓存已经先渲染出来，离线时不会阻塞页面。
       refresh();
     }
@@ -10329,6 +10477,10 @@ elements.content.addEventListener("click", async (event) => {
     }
   }
   if (event.target.classList.contains("modal-backdrop")) {
+    if (event.target.dataset.scoreReminderScope) {
+      acknowledgeCurrentScoreReminder();
+      return;
+    }
     sportProjectRequestSequence += 1;
     state.selectedCourse = null;
     state.scoreDetail = null;
@@ -10490,6 +10642,10 @@ elements.content.addEventListener("click", async (event) => {
     render();
     return;
   }
+  if (action === "acknowledge-new-scores") {
+    acknowledgeCurrentScoreReminder();
+    return;
+  }
   if (action === "show-score-detail") {
     return openScoreDetail(Number(button.dataset.scoreIndex));
   }
@@ -10587,6 +10743,9 @@ elements.content.addEventListener("click", async (event) => {
     return queryAllSchedule();
   }
   render();
+  if (action === "view-scores" && !state.loading) {
+    await refresh();
+  }
   if (state.view === "all") {
     const tasks = [];
     if (!state.scheduleTypesLoaded) tasks.push(loadScheduleTypes());
@@ -10598,6 +10757,10 @@ elements.content.addEventListener("click", async (event) => {
 setConnection("正在连接教务系统", "loading");
 globalThis.__refreshDashboard = refresh;
 globalThis.__handleAndroidBack = () => {
+  if (currentScoreReminder()) {
+    acknowledgeCurrentScoreReminder();
+    return true;
+  }
   if (state.webvpnTool.open || state.scheduleExport || state.courseTransfer.mode || state.selectedCourse || state.scoreDetail || state.curriculum.courseDetail) {
     state.webvpnTool.open = false;
     state.scheduleExport = null;

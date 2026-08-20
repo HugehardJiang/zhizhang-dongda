@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.50";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.51";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -385,10 +385,6 @@ public class MainActivity extends Activity {
     private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
     private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
     private static final int BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS = 2;
-    private static final int ACADEMIC_SSO_RECOVERY_IDLE = 0;
-    private static final int ACADEMIC_SSO_RECOVERY_ECODE = 1;
-    private static final int ACADEMIC_SSO_RECOVERY_PORTAL = 2;
-    private static final long ACADEMIC_SSO_RECOVERY_TIMEOUT_MS = 16000L;
     private static final int WRITE_QR_STORAGE_REQUEST = 2201;
     private static final int WRITE_DASHBOARD_IMAGE_REQUEST = 2202;
     private static final int WRITE_DASHBOARD_CSV_REQUEST = 2203;
@@ -566,8 +562,9 @@ public class MainActivity extends Activity {
     private boolean ecodeExpanded;
     private boolean ecodeAutoScrolled;
     private boolean ecodeSessionReady;
-    private boolean ecodeWarmupPending;
     private boolean ecodePanelHidden;
+    private boolean ecodeBackgroundLoginAttemptedForCurrentFailure;
+    private boolean ecodeReloadAfterBackgroundLogin;
     private int ecodeProbeAttempts;
     private String loginMethodForCurrentPortal = LOGIN_METHOD_BUILT_IN;
     private volatile String portalLoginService = "";
@@ -584,13 +581,10 @@ public class MainActivity extends Activity {
     private boolean builtInLoginAwaitingPage;
     private boolean builtInLoginChallengeVisible;
     private boolean backgroundLoginInProgress;
+    private boolean backgroundLoginForEcode;
     private boolean backgroundLoginAttemptedForCurrentFailure;
-    private boolean academicSsoRecoveryInProgress;
-    private boolean academicSsoRecoveryAttemptedForCurrentFailure;
-    private int academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
-    private int academicSsoRecoveryToken;
-    private boolean academicSsoEcodeNavigationStarted;
     private String pendingAcademicFailureReason = "";
+    private String pendingEcodeLoginUrl = "";
     private int builtInLoginInspectionAttempts;
     private int builtInLoginPortalProbeAttempts;
     private boolean builtInLoginPortalProbeScheduled;
@@ -708,11 +702,10 @@ public class MainActivity extends Activity {
         } else if (!lastAcademicLoginError.isEmpty()
                 || (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)
                 && loadBuiltInCredentials().isComplete())) {
-            // 上一次已确认教务会话失效：先显示查询页/缓存，再让
-            // 隐藏 WebView 优先复用 E 码通/统一认证长会话，失败后才降级到加密账密。
+            // 上一次已确认教务会话失效：先显示查询页/缓存，再直接使用
+            // 用户明确保存的加密凭据后台登录，不再绕行 E 码通页面。
             showDashboard();
-            academicSsoRecoveryAttemptedForCurrentFailure = true;
-            root.postDelayed(() -> startAcademicSsoRecovery(
+            root.postDelayed(() -> attemptBuiltInBackgroundLoginOrReport(
                     "应用启动时发现教务会话已失效"), 180);
         } else {
             // 首次默认显示内置登录，同时始终保留学校原网页账密和二维码入口。
@@ -746,15 +739,10 @@ public class MainActivity extends Activity {
                 if (view == portalWebView) {
                     clearPendingQrUrl();
                     portalLoginService = extractLoginService(url);
-                    if (academicSsoRecoveryInProgress
-                            && academicSsoRecoveryStage == ACADEMIC_SSO_RECOVERY_ECODE
-                            && url != null && url.contains(ECODE_TARGET_TOKEN)) {
-                        academicSsoEcodeNavigationStarted = true;
-                    }
                     updatePortalActionLabel(url);
                 }
                 if (view == ecodeWebView) {
-                    Log.d(LOG_TAG, "page-started url=" + url + " warmup=" + ecodeWarmupPending);
+                    Log.d(LOG_TAG, "page-started url=" + url);
                 }
                 if (view == dashboardWebView) {
                     dashboardPageReady = false;
@@ -773,15 +761,13 @@ public class MainActivity extends Activity {
                 cookieManager.flush();
                 if (view == portalWebView) {
                     portalLoginService = extractLoginService(url);
-                    if (academicSsoRecoveryInProgress) {
-                        handleAcademicSsoRecoveryPage(url);
-                        return;
-                    }
                     updatePortalActionLabel(url);
                     installPortalQrCapture();
                     showQrActionLoadingIfNeeded(url);
                     showLoginMethodChooserIfNeeded(url);
-                    if (builtInLoginSubmissionPending && isAcademicPortalReadyUrl(url)) {
+                    if (builtInLoginSubmissionPending
+                            && (isAcademicPortalReadyUrl(url)
+                            || (backgroundLoginForEcode && isEcodeTargetReadyUrl(url)))) {
                         finishBuiltInLoginSuccess();
                     } else if (builtInLoginSubmissionPending && isPortalLoginPage(url)) {
                         if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
@@ -793,13 +779,9 @@ public class MainActivity extends Activity {
                         scheduleBuiltInPortalProbe(url);
                     }
                 } else if (view == ecodeWebView) {
-                    Log.d(LOG_TAG, "page-finished url=" + url + " current=" + view.getUrl() + " title=" + view.getTitle() + " warmup=" + ecodeWarmupPending);
-                    if (ecodeWarmupPending) {
-                        // 兼容旧状态下手动刷新流程；正常首页加载不再依赖
-                        // 教务入口给 E 码通“预热”，两者可以分别登录。
-                        ecodeWarmupPending = false;
-                        setEcodeError("教务入口已响应，正在打开 E 码通原网页…");
-                        view.loadUrl(ECODE_URL);
+                    Log.d(LOG_TAG, "page-finished url=" + url + " current=" + view.getUrl() + " title=" + view.getTitle());
+                    if (isPortalLoginPage(url)) {
+                        handleEcodeSessionInvalid("E 码通登录状态已失效", url);
                         return;
                     }
                     setEcodeError("原网页已加载，正在定位二维码…");
@@ -838,7 +820,12 @@ public class MainActivity extends Activity {
                 if (view == ecodeWebView && request != null && request.isForMainFrame()) {
                     int status = response == null ? -1 : response.getStatusCode();
                     Log.e(LOG_TAG, "main-frame-http-error url=" + request.getUrl() + " status=" + status);
-                    setEcodeError("原网页返回 HTTP " + status + "，请检查 WebVPN 登录状态");
+                    if (status == 401 || status == 403) {
+                        handleEcodeSessionInvalid("E 码通原网页返回 HTTP " + status,
+                                request.getUrl() == null ? "" : request.getUrl().toString());
+                    } else {
+                        setEcodeError("原网页返回 HTTP " + status + "，请检查网络状态");
+                    }
                 }
             }
         });
@@ -1070,7 +1057,7 @@ public class MainActivity extends Activity {
 
     private void openPortalForReauthentication() {
         runOnUiThread(() -> {
-            cancelAutomaticAcademicRecovery();
+            cancelAutomaticBackgroundLogin();
             if (dashboardVisible && portalWebView != null) {
                 // 从查询页点击“打开原系统”时重新走一次统一认证入口，
                 // 这样 Cookie 失效后不会停留在旧的远程页面。
@@ -1098,18 +1085,14 @@ public class MainActivity extends Activity {
     private void openGeneratedWebVpnUrl(String url) {
         if (!isAllowedGeneratedWebVpnUrl(url)) return;
         runOnUiThread(() -> {
-            cancelAutomaticAcademicRecovery();
+            cancelAutomaticBackgroundLogin();
             clearPendingQrUrl();
             showPortal();
             portalWebView.loadUrl(url);
         });
     }
 
-    private void cancelAutomaticAcademicRecovery() {
-        academicSsoRecoveryInProgress = false;
-        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
-        academicSsoEcodeNavigationStarted = false;
-        academicSsoRecoveryToken += 1;
+    private void cancelAutomaticBackgroundLogin() {
         if (backgroundLoginInProgress) {
             backgroundLoginInProgress = false;
             builtInLoginSubmissionPending = false;
@@ -1117,6 +1100,9 @@ public class MainActivity extends Activity {
             builtInLoginChallengeVisible = false;
             builtInLoginPortalProbeScheduled = false;
             pendingBuiltInPassword = "";
+            backgroundLoginForEcode = false;
+            pendingEcodeLoginUrl = "";
+            ecodeReloadAfterBackgroundLogin = false;
         }
     }
 
@@ -1133,7 +1119,6 @@ public class MainActivity extends Activity {
             if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
             if (!dashboardLoaded) {
                 dashboardLoaded = true;
-                ecodeWarmupPending = false;
                 ecodeWebView.loadUrl(ECODE_URL);
                 dashboardWebView.loadUrl(DASHBOARD_URL);
             } else {
@@ -1568,8 +1553,14 @@ public class MainActivity extends Activity {
             showBuiltInChallenge(false);
             setBuiltInLoginStatus("正在连接学校统一身份认证…", false);
             if (builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+            backgroundLoginForEcode = false;
+            pendingEcodeLoginUrl = "";
         } else {
-            notifyDashboardLoginStatus("retrying", "登录状态已失效，正在后台使用本机加密凭据重新登录…");
+            if (backgroundLoginForEcode) {
+                setEcodeError("登录状态已失效，正在后台使用本机加密凭据重新登录…");
+            } else {
+                notifyDashboardLoginStatus("retrying", "登录状态已失效，正在后台使用本机加密凭据重新登录…");
+            }
         }
         if (portalWebView == null) {
             finishBuiltInLoginFailure("内置登录失败：学校登录页面不可用。", background);
@@ -1582,8 +1573,19 @@ public class MainActivity extends Activity {
             portalWebView.setVisibility(View.INVISIBLE);
         }
         String currentUrl = portalWebView.getUrl();
-        if (isPortalLoginPage(currentUrl)) injectBuiltInCredentialsIntoSchoolPage();
-        else portalWebView.loadUrl(PORTAL_URL);
+        if (background && backgroundLoginForEcode) {
+            if (isPortalLoginPage(pendingEcodeLoginUrl) && pendingEcodeLoginUrl.equals(currentUrl)) {
+                injectBuiltInCredentialsIntoSchoolPage();
+            } else {
+                portalWebView.loadUrl(isPortalLoginPage(pendingEcodeLoginUrl)
+                        ? pendingEcodeLoginUrl
+                        : ECODE_URL);
+            }
+        } else if (isPortalLoginPage(currentUrl)) {
+            injectBuiltInCredentialsIntoSchoolPage();
+        } else {
+            portalWebView.loadUrl(PORTAL_URL);
+        }
     }
 
     private String builtInLoginPageDescription(String url) {
@@ -1611,7 +1613,9 @@ public class MainActivity extends Activity {
         }
         builtInLoginPortalProbeAttempts += 1;
         cookieManager.flush();
-        String target = builtInLoginPortalProbeAttempts == 1 ? PORTAL_URL : PORTAL_FALLBACK_URL;
+        String target = backgroundLoginForEcode
+                ? ECODE_URL
+                : (builtInLoginPortalProbeAttempts == 1 ? PORTAL_URL : PORTAL_FALLBACK_URL);
         Log.d(LOG_TAG, "built-in login portal probe=" + builtInLoginPortalProbeAttempts
                 + " from=" + builtInLoginPageDescription(observedUrl));
         portalWebView.loadUrl(target);
@@ -1624,7 +1628,8 @@ public class MainActivity extends Activity {
             builtInLoginPortalProbeScheduled = false;
             if (portalWebView == null || !builtInLoginSubmissionPending) return;
             String currentUrl = portalWebView.getUrl();
-            if (isAcademicPortalReadyUrl(currentUrl)) {
+            if (isAcademicPortalReadyUrl(currentUrl)
+                    || (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl))) {
                 finishBuiltInLoginSuccess();
             } else if (isPortalLoginPage(currentUrl)) {
                 if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
@@ -1672,7 +1677,8 @@ public class MainActivity extends Activity {
     private void inspectBuiltInLoginPage() {
         if (portalWebView == null || !builtInLoginSubmissionPending) return;
         String currentUrl = portalWebView.getUrl();
-        if (isAcademicPortalReadyUrl(currentUrl)) {
+        if (isAcademicPortalReadyUrl(currentUrl)
+                || (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl))) {
             finishBuiltInLoginSuccess();
             return;
         }
@@ -1812,6 +1818,7 @@ public class MainActivity extends Activity {
 
     private void finishBuiltInLoginSuccess() {
         boolean wasBackground = backgroundLoginInProgress;
+        boolean wasForEcode = wasBackground && backgroundLoginForEcode;
         if (!wasBackground && builtInTrustDeviceCheck != null && builtInTrustDeviceCheck.isChecked()) {
             saveBuiltInCredentials(pendingBuiltInUsername, pendingBuiltInPassword);
         } else if (!wasBackground && builtInTrustDeviceCheck != null && !builtInTrustDeviceCheck.isChecked()) {
@@ -1823,15 +1830,32 @@ public class MainActivity extends Activity {
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
+        backgroundLoginForEcode = false;
+        pendingEcodeLoginUrl = "";
         if (!wasBackground) {
             backgroundLoginAttemptedForCurrentFailure = false;
-            academicSsoRecoveryAttemptedForCurrentFailure = false;
         }
         if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
         setLastAcademicLoginError("");
-        notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
         if (wasBackground) {
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
+            if (wasForEcode) {
+                reloadEcodeAfterBackgroundLogin();
+                if (!pendingAcademicFailureReason.isEmpty()) {
+                    pendingAcademicFailureReason = "";
+                    backgroundLoginAttemptedForCurrentFailure = false;
+                    notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
+                    refreshDashboardData();
+                }
+            } else {
+                pendingAcademicFailureReason = "";
+                backgroundLoginAttemptedForCurrentFailure = false;
+                notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
+                refreshDashboardData();
+                if (!ecodeSessionReady || ecodeReloadAfterBackgroundLogin) {
+                    reloadEcodeAfterBackgroundLogin();
+                }
+            }
         } else {
             showDashboard();
         }
@@ -1839,15 +1863,24 @@ public class MainActivity extends Activity {
 
     private void finishBuiltInLoginFailure(String message, boolean background) {
         String fullMessage = message == null || message.trim().isEmpty() ? "内置登录失败：未知错误" : message.trim();
+        boolean wasForEcode = background && backgroundLoginForEcode;
+        boolean academicAlsoInvalid = !pendingAcademicFailureReason.isEmpty();
         pendingBuiltInPassword = "";
         builtInLoginSubmissionPending = false;
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
-        if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
-        setLastAcademicLoginError(fullMessage);
-        notifyDashboardLoginStatus("failed", fullMessage);
+        backgroundLoginForEcode = false;
+        pendingEcodeLoginUrl = "";
+        ecodeReloadAfterBackgroundLogin = false;
+        if (!wasForEcode || academicAlsoInvalid) {
+            if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
+            setLastAcademicLoginError(fullMessage);
+            notifyDashboardLoginStatus("failed", fullMessage);
+        } else {
+            setEcodeError(fullMessage + " 请点击 E 码通区域的登录按钮手动完成登录。");
+        }
         if (background) {
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
             if (dashboardHome != null) dashboardHome.setVisibility(View.VISIBLE);
@@ -1880,6 +1913,10 @@ public class MainActivity extends Activity {
         return isPortalPageUrl(url) && url != null && url.contains("/jwapp/");
     }
 
+    private boolean isEcodeTargetReadyUrl(String url) {
+        return url != null && url.contains(ECODE_TARGET_TOKEN) && !isPortalLoginPage(url);
+    }
+
     private boolean isAcademicLoginInvalidResponse(int status, String body) {
         if (status == 401) return true;
         String text = body == null ? "" : body;
@@ -1890,101 +1927,15 @@ public class MainActivity extends Activity {
                 && (text.contains("统一身份认证") || lower.contains("uniform identity authentication"));
     }
 
-    private void startAcademicSsoRecovery(String reason) {
-        if (portalWebView == null || academicSsoRecoveryInProgress || backgroundLoginInProgress) return;
-        pendingAcademicFailureReason = reason == null || reason.trim().isEmpty()
-                ? "教务系统登录状态已失效"
-                : reason.trim();
-        academicSsoRecoveryInProgress = true;
-        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_ECODE;
-        academicSsoEcodeNavigationStarted = false;
-        int token = ++academicSsoRecoveryToken;
-        notifyDashboardLoginStatus(
-                "retrying",
-                "教务会话已失效，正在后台复用 E 码通/统一认证长会话…"
-        );
-        // 后台认证页保持 INVISIBLE 而不是 GONE，使 WebView 继续参与布局并
-        // 运行统一认证脚本；用户始终只看到 dashboard。
-        portalWebView.setVisibility(View.INVISIBLE);
-        portalWebView.stopLoading();
-        // 先访问已能长时保持登录的 E 码通目标，让学校 SSO/WebVPN
-        // 刷新共享 Cookie；随后再打开教务入口换取新的教务业务 Session。
-        portalWebView.loadUrl(ECODE_URL);
-        portalWebView.postDelayed(() -> {
-            if (academicSsoRecoveryInProgress && academicSsoRecoveryToken == token) {
-                finishAcademicSsoRecoveryFailure("复用 E 码通/统一认证会话超时");
-            }
-        }, ACADEMIC_SSO_RECOVERY_TIMEOUT_MS);
-    }
-
-    private void handleAcademicSsoRecoveryPage(String url) {
-        if (!academicSsoRecoveryInProgress || portalWebView == null) return;
-        if (academicSsoRecoveryStage == ACADEMIC_SSO_RECOVERY_ECODE) {
-            if (!academicSsoEcodeNavigationStarted) return;
-            academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_PORTAL;
-            cookieManager.flush();
-            portalWebView.postDelayed(() -> {
-                if (academicSsoRecoveryInProgress
-                        && academicSsoRecoveryStage == ACADEMIC_SSO_RECOVERY_PORTAL) {
-                    portalWebView.loadUrl(PORTAL_URL);
-                }
-            }, 220);
-            return;
-        }
-        if (academicSsoRecoveryStage != ACADEMIC_SSO_RECOVERY_PORTAL) return;
-        if (isAcademicPortalReadyUrl(url)) {
-            finishAcademicSsoRecoverySuccess();
-            return;
-        }
-        if (isPortalLoginPage(url)) {
-            int token = academicSsoRecoveryToken;
-            portalWebView.postDelayed(() -> {
-                if (!academicSsoRecoveryInProgress || academicSsoRecoveryToken != token) return;
-                String currentUrl = portalWebView.getUrl();
-                if (isAcademicPortalReadyUrl(currentUrl)) finishAcademicSsoRecoverySuccess();
-                else if (isPortalLoginPage(currentUrl)) {
-                    finishAcademicSsoRecoveryFailure("学校统一认证长会话已失效");
-                }
-            }, 650);
-        }
-    }
-
-    private void finishAcademicSsoRecoverySuccess() {
-        if (!academicSsoRecoveryInProgress) return;
-        academicSsoRecoveryInProgress = false;
-        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
-        academicSsoEcodeNavigationStarted = false;
-        academicSsoRecoveryToken += 1;
-        if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
-        setLastAcademicLoginError("");
-        if (portalWebView != null) portalWebView.setVisibility(View.GONE);
-        notifyDashboardLoginStatus(
-                "success",
-                "已在后台通过 E 码通/统一认证会话恢复教务登录，正在刷新数据…"
-        );
-    }
-
-    private void finishAcademicSsoRecoveryFailure(String recoveryError) {
-        if (!academicSsoRecoveryInProgress) return;
-        academicSsoRecoveryInProgress = false;
-        academicSsoRecoveryStage = ACADEMIC_SSO_RECOVERY_IDLE;
-        academicSsoEcodeNavigationStarted = false;
-        academicSsoRecoveryToken += 1;
-        String detail = recoveryError == null || recoveryError.trim().isEmpty()
-                ? "复用 E 码通/统一认证会话失败"
-                : recoveryError.trim();
-        attemptBuiltInBackgroundLoginOrReport(pendingAcademicFailureReason + "。" + detail);
-    }
-
     private void attemptBuiltInBackgroundLoginOrReport(String reason) {
         LoginCredentials saved = loadBuiltInCredentials();
-        if (LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())
-                && saved.isComplete()
-                && !backgroundLoginAttemptedForCurrentFailure) {
+        if (saved.isComplete() && !backgroundLoginAttemptedForCurrentFailure) {
             backgroundLoginAttemptedForCurrentFailure = true;
+            backgroundLoginForEcode = false;
+            pendingEcodeLoginUrl = "";
             notifyDashboardLoginStatus(
                     "retrying",
-                    "E 码通/统一认证会话无法恢复教务，正在后台使用本机加密凭据重登…"
+                    "教务会话已失效，正在后台使用本机加密凭据重登…"
             );
             submitBuiltInCredentials(true);
             return;
@@ -1992,9 +1943,7 @@ public class MainActivity extends Activity {
         String failure = reason == null || reason.trim().isEmpty()
                 ? "教务系统后台恢复失败"
                 : reason.trim();
-        if (!LOGIN_METHOD_BUILT_IN.equals(readLoginMethodPreference())) {
-            failure += "。当前默认使用其他登录方式，请点击手动登录。";
-        } else if (!saved.isComplete()) {
+        if (!saved.isComplete()) {
             failure += "。本机没有可用于后台登录的加密凭据，请点击手动登录。";
         } else {
             failure += "。加密凭据后台重登也未成功，请点击手动登录。";
@@ -2005,8 +1954,7 @@ public class MainActivity extends Activity {
 
     private void markAcademicSessionHealthy() {
         runOnUiThread(() -> {
-            if (academicSsoRecoveryInProgress || backgroundLoginInProgress) return;
-            academicSsoRecoveryAttemptedForCurrentFailure = false;
+            if (backgroundLoginInProgress) return;
             backgroundLoginAttemptedForCurrentFailure = false;
             pendingAcademicFailureReason = "";
             if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
@@ -2022,17 +1970,54 @@ public class MainActivity extends Activity {
             // 一次刷新会并发请求多个教务接口，会话过期时它们可能
             // 同时返回登录页。后台重登已在进行时忽略后续重复通知，避免
             // “正在重登”被误覆盖成“登录失败”。
-            if (academicSsoRecoveryInProgress || backgroundLoginInProgress) return;
+            if (backgroundLoginInProgress) {
+                pendingAcademicFailureReason = reason;
+                return;
+            }
             setLastAcademicLoginError(reason);
             if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
             pendingAcademicFailureReason = reason;
-            if (!academicSsoRecoveryAttemptedForCurrentFailure) {
-                academicSsoRecoveryAttemptedForCurrentFailure = true;
-                startAcademicSsoRecovery(reason);
-                return;
-            }
             attemptBuiltInBackgroundLoginOrReport(reason);
         });
+    }
+
+    private void handleEcodeSessionInvalid(String detail, String loginUrl) {
+        runOnUiThread(() -> {
+            String reason = detail == null || detail.trim().isEmpty()
+                    ? "E 码通登录状态已失效"
+                    : detail.trim();
+            ecodeSessionReady = false;
+            ecodeReloadAfterBackgroundLogin = true;
+            if (isPortalLoginPage(loginUrl)) pendingEcodeLoginUrl = loginUrl;
+            if (!dashboardVisible) return;
+            if (backgroundLoginInProgress) {
+                setEcodeError(reason + "，正在等待当前后台登录完成…");
+                return;
+            }
+            LoginCredentials saved = loadBuiltInCredentials();
+            if (saved.isComplete() && !ecodeBackgroundLoginAttemptedForCurrentFailure) {
+                ecodeBackgroundLoginAttemptedForCurrentFailure = true;
+                backgroundLoginForEcode = true;
+                setEcodeError(reason + "，正在后台使用本机加密凭据重新登录…");
+                submitBuiltInCredentials(true);
+                return;
+            }
+            if (!saved.isComplete()) {
+                setEcodeError(reason + "。本机没有可用于后台登录的加密凭据，请点击登录按钮手动登录。");
+            } else {
+                setEcodeError(reason + "。后台自动登录未成功，请点击登录按钮手动登录。");
+            }
+        });
+    }
+
+    private void reloadEcodeAfterBackgroundLogin() {
+        if (ecodeWebView == null) return;
+        ecodeReloadAfterBackgroundLogin = false;
+        ecodeAutoScrolled = false;
+        ecodeProbeAttempts = 0;
+        setEcodeError("后台登录成功，正在重新加载学校原网页…");
+        ecodeWebView.stopLoading();
+        ecodeWebView.loadUrl(ECODE_URL);
     }
 
     private void selectPortalLoginMethod(String method) {
@@ -2641,10 +2626,9 @@ public class MainActivity extends Activity {
         ecodeProbeAttempts = 0;
         setEcodeError("正在手动刷新学校 E 码通原网页…");
         ecodeWebView.stopLoading();
-        // 先顺序访问教务入口再进入 E 码通，保留 WebVPN Cookie、LocalStorage
-        // 和当前登录状态；不清理 WebView 数据，避免用户被迫重新登录。
-        ecodeWarmupPending = true;
-        ecodeWebView.loadUrl(PORTAL_URL);
+        // E 码通与教务系统分别检查业务会话。直接刷新 E 码通目标；若它
+        // 跳回统一认证页，由独立后台登录流程恢复，不再借道教务入口。
+        ecodeWebView.loadUrl(ECODE_URL);
     }
 
     private void openEcodeLogin() {
@@ -2711,6 +2695,9 @@ public class MainActivity extends Activity {
                     boolean firstReady = !ecodeAutoScrolled;
                     ecodeAutoScrolled = true;
                     ecodeSessionReady = true;
+                    ecodeBackgroundLoginAttemptedForCurrentFailure = false;
+                    ecodeReloadAfterBackgroundLogin = false;
+                    pendingEcodeLoginUrl = "";
                     ecodeProbeAttempts = 0;
                     captureEcodeThumbnail(payload.optString("time", ""));
                     clearEcodeError();

@@ -470,6 +470,15 @@ td.score-cell { color: #315cc9; font-size: 16px; font-weight: 800; }
 .gpa-summary p { max-width: 650px; margin: 0; color: #687895; font-size: 12px; line-height: 1.65; text-align: right; }
 .score-detail-modal { width: min(620px, 100%); }
 .score-detail-modal .detail-modal-head .muted { margin: 5px 0 0; font-size: 12px; }
+.new-score-reminder-modal { width: min(560px, 100%); }
+.new-score-reminder-list { display: grid; gap: 8px; }
+.new-score-reminder-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 14px; background: #f7f9fd; border: 1px solid #e4eaf4; border-radius: 11px; }
+.new-score-reminder-row > div { min-width: 0; }
+.new-score-reminder-row strong, .new-score-reminder-row small { display: block; }
+.new-score-reminder-row strong { color: var(--ink); font-size: 13px; }
+.new-score-reminder-row small { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.new-score-reminder-row > span { flex: 0 0 auto; color: var(--brand); font-size: 22px; font-weight: 800; }
+.new-score-reminder-note { margin-top: 16px; }
 .score-detail-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
 .score-detail-summary > div { padding: 13px; background: #f7f9fd; border-radius: 10px; }
 .score-detail-summary strong { color: var(--ink); font-size: 19px; }
@@ -1157,6 +1166,10 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .score-detail-summary > div { padding: 0; background: transparent; border-radius: 0; }
 .score-detail-summary strong { color: var(--text-primary); font-size: 20px; font-weight: 650; }
 .score-detail-heading { margin: 0 0 9px; color: var(--text-primary); font-size: 13px; }
+.new-score-reminder-row { padding: 12px 0; background: transparent; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
+.new-score-reminder-row strong { color: var(--text-primary); font-size: 12px; font-weight: 650; }
+.new-score-reminder-row small { color: var(--text-tertiary); font-size: 10px; }
+.new-score-reminder-row > span { color: var(--brand); font-size: 20px; font-weight: 700; }
 .raw-details { margin-top: 15px; color: var(--text-secondary); font-size: 11px; }
 .raw-details pre { padding: 10px; color: var(--text-secondary); background: var(--surface-subtle); border-radius: var(--radius-sm); }
 .course-collision-summary { gap: 16px; }
