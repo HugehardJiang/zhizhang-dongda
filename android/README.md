@@ -5,9 +5,9 @@ Android 应用名为“执掌东大”，包名为 `cn.neu.zhizhangdongda`。
 ## 功能
 
 - 登录页并列内置登录、学校原网页账密和二维码登录，默认选中内置登录；
-- 内置登录支持学号、密码及学校短信验证码，默认信任设备；登录成功后使用 Android Keystore AES-GCM 加密保存凭据。教务会话失效时，隐藏 WebView 先复用 E 码通/统一认证长会话换取新 Session，失败后才使用加密账密重登；两级恢复均失败时在主页底部显示完整错误与其他登录入口；
+- 内置登录支持学号、密码及学校短信验证码，默认信任设备；登录成功后使用 Android Keystore AES-GCM 加密保存凭据。教务会话失效时，不可见但持续运行的后台 WebView 先复用 E 码通/统一认证长会话，失败后再使用加密账密；认证后若停在中转页会主动探测教务入口，两级恢复均失败时在主页底部显示完整错误与其他登录入口；
 - 蓝色书本应用图标，Android 8.0 及以上使用自适应图标，同时提供旧系统兼容图层；
-- 加载、后台登录、数据更新和导出状态使用底部导航上方的轻量提示，不挤动页面内容；需要用户处理的完整登录错误仍显示在手动登录入口旁；
+- 加载、后台登录、数据更新和导出状态使用底部导航上方的轻量提示，不挤动页面内容；设置页可关闭一般 Toast，关闭后只显示缓存使用和数据刷新完成提示；需要用户处理的完整登录错误仍显示在手动登录入口旁；
 - “更多工具”置于更多页首位，内置纯本地 WebVPN 地址生成器，可保留网址路径、查询参数和锚点，并在应用的学校页面 WebView 中直接访问生成结果；
 - 首页当前/下一项和今天安排中的课程均可直接查看详情，页面切换时不会残留并在课表页延迟弹出；
 - 所有模态弹窗打开时都会锁定并隐藏校园码，弹窗自身滚动与主页面顶部下拉手势隔离；关闭弹窗后保持隐藏，需在主页面重新顶部下拉才会显示；
@@ -39,7 +39,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 构建产物位于：
 
 ```text
-app/build/outputs/apk/debug/执掌东大-Android-0.1.47-debug.apk
+app/build/outputs/apk/debug/执掌东大-Android-0.1.48-debug.apk
 ```
 
 根目录的 `dashboard.html`、`dashboard.css`、`dashboard.js` 会在构建前自动同步到 Android assets，因此接口解析和界面逻辑与浏览器插件共用一套代码。
@@ -48,7 +48,7 @@ app/build/outputs/apk/debug/执掌东大-Android-0.1.47-debug.apk
 
 ## 登录持久化说明
 
-应用使用 Android `CookieManager` 持久化学校 WebVPN/统一认证会话，并用 `SharedPreferences` 保存默认登录方式、教务登录标记、缓存索引和 Keystore 加密凭据的密文封装。个人查询结果写入应用内部的 `personal-cache` 目录，文件名是学号的 SHA-256 哈希，不同账号不会共用缓存；设置页可以清除本机缓存。应用重启时先展示缓存，再复用 Cookie 请求最新数据。教务会话过期时，隐藏 WebView 先访问已长时登录的 E 码通目标刷新共享 SSO/WebVPN Cookie，再打开教务入口换取新教务业务 Session；只有这一步失败时才使用 Keystore 加密凭据。
+应用使用 Android `CookieManager` 持久化学校 WebVPN/统一认证会话，并用 `SharedPreferences` 保存默认登录方式、教务登录标记、缓存索引和 Keystore 加密凭据的密文封装。个人查询结果写入应用内部的 `personal-cache` 目录，文件名是学号的 SHA-256 哈希，不同账号不会共用缓存；设置页可以清除本机缓存。应用重启时先展示缓存，再复用 Cookie 请求最新数据。教务会话过期时，后台认证 WebView 使用 `INVISIBLE` 保持页面布局、JavaScript 和重定向运行，但不会展示给用户；它先访问已长时登录的 E 码通目标刷新共享 SSO/WebVPN Cookie，再打开教务入口换取新业务 Session，只有这一步失败时才使用 Keystore 加密凭据。认证成功后若学校停在 CAS/WebVPN 中转页，应用会限次重开 `/http/` 与 `/https/` 教务入口验证 Cookie，而不是在未知页面持续轮询。
 
 本地课表覆盖层写入独立的 `local-schedule/` 目录，文件名同样按学号或匿名 profile key 的 SHA-256 哈希生成；写入先落到同目录临时文件，再尝试原子替换，避免半截 JSON 覆盖旧数据。它只保存 `zhizhang-local-schedule/v1` 结构中的本地课程、一次性日程和本地隐藏教务排课键，不保存 Cookie、密码或网络响应；“清除教务缓存”与“清除全部自定义安排”是两个互不影响的操作。
 

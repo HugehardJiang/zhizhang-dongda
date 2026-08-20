@@ -49,6 +49,7 @@ function createEventTarget() {
 }
 
 const elements = new Map();
+const storedSettings = new Map();
 const pageWrap = createEventTarget();
 let activeModal = null;
 const nativeCalls = [];
@@ -78,7 +79,11 @@ global.document = {
   },
   createElement() { return createElementStub(); }
 };
-global.localStorage = { getItem() { return null; }, setItem() {}, removeItem() {} };
+global.localStorage = {
+  getItem(key) { return storedSettings.has(key) ? storedSettings.get(key) : null; },
+  setItem(key, value) { storedSettings.set(key, String(value)); },
+  removeItem(key) { storedSettings.delete(key); }
+};
 global.location = { href: "file:///mobile-shell-test/dashboard.html" };
 global.navigator = {};
 global.open = () => null;
@@ -122,6 +127,8 @@ assert.ok(loginSettings.includes('<option value="wechat"'));
 assert.ok(loginSettings.includes('Android Keystore'));
 assert.ok(loginSettings.indexOf('更多工具') < loginSettings.indexOf('第一周周日'));
 assert.ok(loginSettings.includes('WebVPN 地址生成器'));
+assert.ok(loginSettings.includes('id="toastNotificationsEnabled"'));
+assert.ok(loginSettings.includes('只保留正在使用缓存或数据已刷新的提示'));
 
 // The generator reproduces NEU WebVPN's AES-128-CFB hostname encoding while
 // preserving the original path, query, and hash entirely on-device.
@@ -167,6 +174,20 @@ assert.strictEqual(toastRegion.children[0].className, 'toast toast-success');
 audit.setNotice('登录失败。', 'error');
 assert.strictEqual(toastRegion.children[0].className, 'toast toast-error');
 
+// Disabling general Toast feedback suppresses login/operation chatter, while
+// cache-use and completed-refresh messages explicitly marked essential remain.
+localStorage.setItem('zhizhang.toastNotifications', 'off');
+audit.setNotice('');
+audit.setNotice('正在后台重新登录…');
+assert.strictEqual(toastRegion.children.length, 0);
+audit.setNotice('数据已更新，个人结果已缓存到本机。', 'success', 'essential');
+assert.strictEqual(toastRegion.children.length, 1);
+assert.strictEqual(toastRegion.children[0].className, 'toast toast-success');
+audit.setNotice('');
+audit.setNotice('普通操作已完成。', 'success');
+assert.strictEqual(toastRegion.children.length, 0);
+localStorage.setItem('zhizhang.toastNotifications', 'on');
+
 const dashboardCss = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
 assert.ok(dashboardCss.includes('.notice { display: none; }'));
 assert.ok(dashboardCss.includes('bottom: calc(64px + env(safe-area-inset-bottom) + 10px)'));
@@ -189,6 +210,12 @@ assert.ok(mainActivitySource.includes('"webvpn.neu.edu.cn".equalsIgnoreCase(pars
 assert.ok(/handleAcademicSessionInvalid[\s\S]*if \(academicSsoRecoveryInProgress \|\| backgroundLoginInProgress\) return;[\s\S]*startAcademicSsoRecovery\(reason\)/.test(mainActivitySource));
 assert.ok(/startAcademicSsoRecovery[\s\S]*portalWebView\.loadUrl\(ECODE_URL\)/.test(mainActivitySource));
 assert.ok(/finishAcademicSsoRecoveryFailure[\s\S]*attemptBuiltInBackgroundLoginOrReport/.test(mainActivitySource));
+assert.ok(/submitBuiltInCredentials[\s\S]*if \(background\)[\s\S]*portalWebView\.setVisibility\(View\.INVISIBLE\)/.test(mainActivitySource));
+assert.ok(/startAcademicSsoRecovery[\s\S]*portalWebView\.setVisibility\(View\.INVISIBLE\)/.test(mainActivitySource));
+assert.ok(/onPageFinished[\s\S]*scheduleBuiltInPortalProbe\(url\)/.test(mainActivitySource));
+assert.ok(/inspectBuiltInLoginPage[\s\S]*!isPortalLoginPage\(currentUrl\)[\s\S]*scheduleBuiltInPortalProbe\(currentUrl\)/.test(mainActivitySource));
+assert.ok(mainActivitySource.includes('PORTAL_FALLBACK_URL'));
+assert.ok(mainActivitySource.includes('学校认证后连续返回非教务中转页'));
 
 const androidManifestSource = fs.readFileSync(path.join(
   __dirname, '..', 'android', 'app', 'src', 'main', 'AndroidManifest.xml'

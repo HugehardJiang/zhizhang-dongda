@@ -90,13 +90,14 @@ import javax.crypto.spec.GCMParameterSpec;
 public class MainActivity extends Activity {
     private static final String LOG_TAG = "ZhizhangEcode";
     private static final String PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
+    private static final String PORTAL_FALLBACK_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
     // 这是学校 E 码通对应的 WebVPN 目标地址；其中的代理标识必须与学校
     // 给出的地址完全一致，少一个字符都会被 WebVPN 解析成 PARSE_FAILED。
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.47";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.48";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -381,6 +382,7 @@ public class MainActivity extends Activity {
     private static final String LOGIN_METHOD_WECHAT = "wechat";
     private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
     private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
+    private static final int BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS = 2;
     private static final int ACADEMIC_SSO_RECOVERY_IDLE = 0;
     private static final int ACADEMIC_SSO_RECOVERY_ECODE = 1;
     private static final int ACADEMIC_SSO_RECOVERY_PORTAL = 2;
@@ -588,6 +590,8 @@ public class MainActivity extends Activity {
     private boolean academicSsoEcodeNavigationStarted;
     private String pendingAcademicFailureReason = "";
     private int builtInLoginInspectionAttempts;
+    private int builtInLoginPortalProbeAttempts;
+    private boolean builtInLoginPortalProbeScheduled;
     private String pendingBuiltInUsername = "";
     private String pendingBuiltInPassword = "";
     private String lastAcademicLoginError = "";
@@ -780,6 +784,11 @@ public class MainActivity extends Activity {
                     } else if (builtInLoginSubmissionPending && isPortalLoginPage(url)) {
                         if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
                         else view.postDelayed(MainActivity.this::inspectBuiltInLoginPage, 350);
+                    } else if (builtInLoginSubmissionPending) {
+                        // 统一认证成功后偶尔会停在 WebVPN/CAS 中转页，而不是
+                        // 直接进入 /jwapp/。主动重新打开教务入口验证 Cookie，
+                        // 避免后台登录只在未知页轮询直至超时。
+                        scheduleBuiltInPortalProbe(url);
                     }
                 } else if (view == ecodeWebView) {
                     Log.d(LOG_TAG, "page-finished url=" + url + " current=" + view.getUrl() + " title=" + view.getTitle() + " warmup=" + ecodeWarmupPending);
@@ -1104,6 +1113,7 @@ public class MainActivity extends Activity {
             builtInLoginSubmissionPending = false;
             builtInLoginAwaitingPage = false;
             builtInLoginChallengeVisible = false;
+            builtInLoginPortalProbeScheduled = false;
             pendingBuiltInPassword = "";
         }
     }
@@ -1550,6 +1560,8 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = true;
         builtInLoginChallengeVisible = false;
         builtInLoginInspectionAttempts = 0;
+        builtInLoginPortalProbeAttempts = 0;
+        builtInLoginPortalProbeScheduled = false;
         if (!background) {
             showBuiltInChallenge(false);
             setBuiltInLoginStatus("正在连接学校统一身份认证…", false);
@@ -1561,9 +1573,64 @@ public class MainActivity extends Activity {
             finishBuiltInLoginFailure("内置登录失败：学校登录页面不可用。", background);
             return;
         }
+        if (background) {
+            // GONE 会让部分 Android WebView 停止布局，学校页面的 DOM 可见性
+            // 与跳转脚本因此可能失真。INVISIBLE 仍不显示页面，但会保持页面
+            // 尺寸、JavaScript 和认证重定向正常运行，是真正的后台登录。
+            portalWebView.setVisibility(View.INVISIBLE);
+        }
         String currentUrl = portalWebView.getUrl();
         if (isPortalLoginPage(currentUrl)) injectBuiltInCredentialsIntoSchoolPage();
         else portalWebView.loadUrl(PORTAL_URL);
+    }
+
+    private String builtInLoginPageDescription(String url) {
+        if (url == null || url.trim().isEmpty()) return "无地址中转页";
+        try {
+            String path = Uri.parse(url).getPath();
+            if (path == null || path.trim().isEmpty()) return "WebVPN 中转页";
+            String normalized = path.trim();
+            return normalized.length() > 120 ? normalized.substring(0, 120) + "…" : normalized;
+        } catch (RuntimeException ignored) {
+            return "无法识别的学校中转页";
+        }
+    }
+
+    private void loadBuiltInAcademicPortalProbe(String observedUrl) {
+        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+        if (builtInLoginPortalProbeAttempts >= BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS) {
+            finishBuiltInLoginFailure(
+                    "内置登录未完成：学校认证后连续返回非教务中转页（"
+                            + builtInLoginPageDescription(observedUrl)
+                            + "）。已停止后台重试，请点击手动登录；也可以改用原网页账密或二维码登录。",
+                    backgroundLoginInProgress
+            );
+            return;
+        }
+        builtInLoginPortalProbeAttempts += 1;
+        cookieManager.flush();
+        String target = builtInLoginPortalProbeAttempts == 1 ? PORTAL_URL : PORTAL_FALLBACK_URL;
+        Log.d(LOG_TAG, "built-in login portal probe=" + builtInLoginPortalProbeAttempts
+                + " from=" + builtInLoginPageDescription(observedUrl));
+        portalWebView.loadUrl(target);
+    }
+
+    private void scheduleBuiltInPortalProbe(String observedUrl) {
+        if (portalWebView == null || !builtInLoginSubmissionPending || builtInLoginPortalProbeScheduled) return;
+        builtInLoginPortalProbeScheduled = true;
+        portalWebView.postDelayed(() -> {
+            builtInLoginPortalProbeScheduled = false;
+            if (portalWebView == null || !builtInLoginSubmissionPending) return;
+            String currentUrl = portalWebView.getUrl();
+            if (isAcademicPortalReadyUrl(currentUrl)) {
+                finishBuiltInLoginSuccess();
+            } else if (isPortalLoginPage(currentUrl)) {
+                if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
+                else inspectBuiltInLoginPage();
+            } else {
+                loadBuiltInAcademicPortalProbe(currentUrl == null ? observedUrl : currentUrl);
+            }
+        }, 700);
     }
 
     private void injectBuiltInCredentialsIntoSchoolPage() {
@@ -1602,15 +1669,25 @@ public class MainActivity extends Activity {
 
     private void inspectBuiltInLoginPage() {
         if (portalWebView == null || !builtInLoginSubmissionPending) return;
+        String currentUrl = portalWebView.getUrl();
+        if (isAcademicPortalReadyUrl(currentUrl)) {
+            finishBuiltInLoginSuccess();
+            return;
+        }
+        if (!isPortalLoginPage(currentUrl)) {
+            scheduleBuiltInPortalProbe(currentUrl);
+            return;
+        }
         builtInLoginInspectionAttempts += 1;
         String script = "(function(){"
                 + "function visible(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;}"
                 + "function text(n){return String((n&&(n.innerText||n.textContent))||'').replace(/\\s+/g,' ').trim();}"
                 + "var m=document.getElementById('mcode'),save=document.getElementById('saveDevice'),send=document.getElementById('sendCode');"
+                + "var loginForm=document.getElementById('loginForm')||document.getElementById('loginform')||document.getElementById('un')||document.getElementById('pd');"
                 + "var challenge=visible(m)||visible(save)||visible(document.getElementById('second_valid_ok'));"
                 + "var errors=['errormsg'].map(function(id){var n=document.getElementById(id);return visible(n)?text(n):'';}).filter(Boolean);"
                 + "Array.prototype.slice.call(document.querySelectorAll('.layui-layer-content,.layui-layer-msg')).forEach(function(n){if(visible(n)){var t=text(n);if(t&&t.length<300)errors.push(t);}});"
-                + "return JSON.stringify({challenge:challenge,error:errors.join('；'),sendAvailable:visible(send)});"
+                + "return JSON.stringify({challenge:challenge,error:errors.join('；'),sendAvailable:visible(send),loginForm:Boolean(loginForm)});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
             if (!builtInLoginSubmissionPending) return;
@@ -1618,6 +1695,7 @@ public class MainActivity extends Activity {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 String errorText = result.optString("error", "").trim();
                 boolean challenge = result.optBoolean("challenge", false);
+                boolean loginForm = result.optBoolean("loginForm", false);
                 if (challenge) {
                     if (backgroundLoginInProgress) {
                         finishBuiltInLoginFailure(
@@ -1642,6 +1720,12 @@ public class MainActivity extends Activity {
                 }
                 if (!errorText.isEmpty()) {
                     finishBuiltInLoginFailure("学校统一身份认证返回：" + errorText, backgroundLoginInProgress);
+                    return;
+                }
+                if (!loginForm && builtInLoginInspectionAttempts >= 3) {
+                    // 某些成功回调仍保留 /tpass/login 地址，但登录表单已经被
+                    // 中转内容替换。此时直接用新 Cookie 探测教务入口。
+                    loadBuiltInAcademicPortalProbe(currentUrl);
                     return;
                 }
             } catch (Exception ignored) {
@@ -1736,6 +1820,7 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
+        builtInLoginPortalProbeScheduled = false;
         if (!wasBackground) {
             backgroundLoginAttemptedForCurrentFailure = false;
             academicSsoRecoveryAttemptedForCurrentFailure = false;
@@ -1757,6 +1842,7 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
+        builtInLoginPortalProbeScheduled = false;
         if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, false).apply();
         setLastAcademicLoginError(fullMessage);
         notifyDashboardLoginStatus("failed", fullMessage);
@@ -1815,7 +1901,9 @@ public class MainActivity extends Activity {
                 "retrying",
                 "教务会话已失效，正在后台复用 E 码通/统一认证长会话…"
         );
-        portalWebView.setVisibility(View.GONE);
+        // 后台认证页保持 INVISIBLE 而不是 GONE，使 WebView 继续参与布局并
+        // 运行统一认证脚本；用户始终只看到 dashboard。
+        portalWebView.setVisibility(View.INVISIBLE);
         portalWebView.stopLoading();
         // 先访问已能长时保持登录的 E 码通目标，让学校 SSO/WebVPN
         // 刷新共享 Cookie；随后再打开教务入口换取新的教务业务 Session。

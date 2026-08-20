@@ -35,6 +35,8 @@ const CAMPUS_HEADER_HIDDEN = "HIDDEN";
 const CAMPUS_HEADER_HIDDEN_AT_TOP = "HIDDEN_AT_TOP";
 const CAMPUS_HEADER_HIDE_SCROLL_TOP = 56;
 const CAMPUS_HEADER_REVEAL_PULL_DISTANCE = 64;
+const TOAST_SETTING_KEY = "zhizhang.toastNotifications";
+const TOAST_CATEGORY_ESSENTIAL = "essential";
 const WEBVPN_COMPAT_KEY = "b0A58a69394ce73@";
 const WEBVPN_AES_SBOX = new Uint8Array([
   0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
@@ -5016,13 +5018,21 @@ function setConnection(text, type) {
   elements.connection.className = `connection is-${type}`;
 }
 
-function showToast(text = "", type = "success") {
+function toastNotificationsEnabled() {
+  return readStoredSetting(TOAST_SETTING_KEY, "on") !== "off";
+}
+
+function showToast(text = "", type = "success", category = "default") {
   if (!elements.toastRegion) return;
-  window.clearTimeout(toastTimer);
   if (!text) {
+    window.clearTimeout(toastTimer);
     elements.toastRegion.replaceChildren();
     return;
   }
+  // 关闭一般提示后，仅保留会改变用户对当前数据时效判断的两类消息：
+  // 正在使用缓存、实时数据已刷新。登录过程和普通操作反馈不再打扰页面。
+  if (!toastNotificationsEnabled() && category !== TOAST_CATEGORY_ESSENTIAL) return;
+  window.clearTimeout(toastTimer);
   const toast = document.createElement("div");
   toast.className = `toast toast-${type || "info"}`;
   toast.setAttribute("role", type === "error" ? "alert" : "status");
@@ -5034,12 +5044,12 @@ function showToast(text = "", type = "success") {
   }, duration);
 }
 
-function setNotice(text = "", type = "") {
+function setNotice(text = "", type = "", category = "default") {
   if (elements.notice) {
     elements.notice.textContent = "";
     elements.notice.className = "notice";
   }
-  showToast(text, type || "info");
+  showToast(text, type || "info", category);
 }
 
 function numberOrDash(value) {
@@ -5928,6 +5938,7 @@ function renderSettingsWithLocalOverlay() {
   const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
   const currentText = firstWeekDate ? `${calendarDateText(firstWeekDate)} · ${SUNDAY_FIRST_DAY_NAMES[firstWeekDate.getDay()]}` : "尚未设置";
   const configuredLoginMethod = IS_ANDROID_APP ? androidLoginMethod() : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
+  const toastEnabled = toastNotificationsEnabled();
   const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
   const localCount = (state.localSchedule.items || []).filter((item) => item.termCode === state.termCode || !state.termCode).length;
   const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
@@ -5946,7 +5957,8 @@ function renderSettingsWithLocalOverlay() {
     ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
     : "插件不会保存账号、密码或验证码。";
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
+  const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /></label></section>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -8853,7 +8865,7 @@ async function refresh(forceTerms = false) {
   const hasCache = hydratePersonalCache();
   const hasLocalSchedule = await hydrateLocalSchedule();
   state.fatalError = "";
-  setNotice(hasCache ? "正在尝试刷新教务接口，页面先显示上次缓存…" : hasLocalSchedule && state.localSchedule.items.length ? "正在读取教务接口，页面先显示本地安排…" : "正在读取教务接口…");
+  setNotice(hasCache ? "正在尝试刷新教务接口，页面先显示上次缓存…" : hasLocalSchedule && state.localSchedule.items.length ? "正在读取教务接口，页面先显示本地安排…" : "正在读取教务接口…", "", hasCache ? TOAST_CATEGORY_ESSENTIAL : "default");
   setConnection(hasCache ? "正在刷新 · 已显示本地缓存" : "正在读取数据", "loading");
   render();
   try {
@@ -8872,12 +8884,12 @@ async function refresh(forceTerms = false) {
     const refreshed = state.personalCache.lastLiveEndpointCount > 0;
     if (refreshed) {
       setConnection("已连接 · 使用当前登录会话", "ready");
-      if (state.errors.length) setNotice(`数据已自动更新，但有 ${state.errors.length} 项接口暂时失败，可点击刷新重试。`, "");
-      else setNotice("数据已更新，个人结果已缓存到本机。", "success");
+      if (state.errors.length) setNotice(`数据已自动更新，但有 ${state.errors.length} 项接口暂时失败，可点击刷新重试。`, "", TOAST_CATEGORY_ESSENTIAL);
+      else setNotice("数据已更新，个人结果已缓存到本机。", "success", TOAST_CATEGORY_ESSENTIAL);
     } else if (hasCache) {
       state.personalCache.source = "cache";
       setConnection("离线 · 使用本地缓存", "ready");
-      setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "");
+      setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "", TOAST_CATEGORY_ESSENTIAL);
     }
   } catch (error) {
     if (requestId !== refreshRequestSequence) return;
@@ -8888,7 +8900,7 @@ async function refresh(forceTerms = false) {
       state.fatalError = "";
       state.personalCache.source = "cache";
       setConnection("离线 · 使用本地缓存", "ready");
-      setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "");
+      setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "", TOAST_CATEGORY_ESSENTIAL);
     } else if (localScheduleItemsForTerm(state.termCode).length) {
       state.fatalError = "";
       state.personalCache.source = "";
@@ -9905,6 +9917,13 @@ elements.content.addEventListener("input", (event) => {
 });
 
 elements.content.addEventListener("change", (event) => {
+  if (event.target.id === "toastNotificationsEnabled") {
+    const enabled = Boolean(event.target.checked);
+    writeStoredSetting(TOAST_SETTING_KEY, enabled ? "on" : "off");
+    if (!enabled) showToast("");
+    else setNotice("一般状态提示已开启。", "success");
+    return;
+  }
   if (event.target.matches("[data-term-select]")) {
     state.termCode = event.target.value;
     elements.termSelect.value = state.termCode;
