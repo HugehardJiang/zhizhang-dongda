@@ -53,6 +53,7 @@ const storedSettings = new Map();
 const pageWrap = createEventTarget();
 let activeModal = null;
 let nativeToastNotificationsEnabled = true;
+let nativeCurrentTermSettings = "";
 const nativeCalls = [];
 const androidCurriculumEntry = createElementStub();
 androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; };
@@ -67,6 +68,11 @@ global.AndroidApi = {
   setToastNotificationsEnabled(enabled) {
     nativeToastNotificationsEnabled = Boolean(enabled);
     nativeCalls.push(`toast:${Boolean(enabled)}`);
+  },
+  getCurrentTermSettings() { return nativeCurrentTermSettings; },
+  setCurrentTermSettings(payload) {
+    nativeCurrentTermSettings = String(payload || "");
+    nativeCalls.push("current-term");
   }
 };
 global.document = {
@@ -110,6 +116,8 @@ globalThis.__mobileShellAudit = {
   renderWebVpnToolModal,
   setNotice,
   setToastNotificationsEnabled,
+  saveCurrentTermPreference,
+  currentTermCodeFor,
   syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
@@ -137,6 +145,26 @@ assert.ok(loginSettings.includes('WebVPN 地址生成器'));
 assert.ok(loginSettings.includes('id="toastNotificationsEnabled"'));
 assert.ok(loginSettings.includes('class="settings-switch-track"'));
 assert.ok(loginSettings.includes('只保留正在使用缓存或数据已刷新的提示'));
+assert.ok(loginSettings.includes('id="currentTermSelect"'));
+assert.ok(loginSettings.includes('从教务系统同步'));
+assert.ok(loginSettings.indexOf('当前学期') < loginSettings.indexOf('第一周周日'));
+
+// Android mirrors the central current-term preference into SharedPreferences,
+// so a WebView storage cleanup does not make every page choose a different term.
+audit.state.terms = [
+  { code: '2025-2026-2', name: '2025-2026学年春季学期' },
+  { code: '2026-2027-1', name: '2026-2027学年秋季学期' }
+];
+Object.assign(audit.state.currentTerm, {
+  mode: 'manual', overrideCode: '2026-2027-1', detectedCode: '2025-2026-2',
+  detectedSource: '教务系统', syncedAt: '2026-08-20T00:00:00.000Z'
+});
+audit.saveCurrentTermPreference();
+assert.strictEqual(audit.currentTermCodeFor(audit.state.terms), '2026-2027-1');
+assert.deepStrictEqual(JSON.parse(nativeCurrentTermSettings), {
+  mode: 'manual', overrideCode: '2026-2027-1', detectedCode: '2025-2026-2',
+  detectedSource: '教务系统', syncedAt: '2026-08-20T00:00:00.000Z'
+});
 
 // The generator reproduces NEU WebVPN's AES-128-CFB hostname encoding while
 // preserving the original path, query, and hash entirely on-device.
@@ -234,6 +262,9 @@ assert.ok(mainActivitySource.includes('学校认证后连续返回非教务中�
 assert.ok(mainActivitySource.includes('TOAST_NOTIFICATIONS_ENABLED'));
 assert.ok(mainActivitySource.includes('public boolean getToastNotificationsEnabled()'));
 assert.ok(mainActivitySource.includes('public void setToastNotificationsEnabled(boolean enabled)'));
+assert.ok(mainActivitySource.includes('CURRENT_TERM_SETTINGS'));
+assert.ok(mainActivitySource.includes('public String getCurrentTermSettings()'));
+assert.ok(mainActivitySource.includes('public void setCurrentTermSettings(String payload)'));
 
 const androidManifestSource = fs.readFileSync(path.join(
   __dirname, '..', 'android', 'app', 'src', 'main', 'AndroidManifest.xml'

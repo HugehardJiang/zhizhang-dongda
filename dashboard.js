@@ -36,6 +36,7 @@ const CAMPUS_HEADER_HIDDEN_AT_TOP = "HIDDEN_AT_TOP";
 const CAMPUS_HEADER_HIDE_SCROLL_TOP = 56;
 const CAMPUS_HEADER_REVEAL_PULL_DISTANCE = 64;
 const TOAST_SETTING_KEY = "zhizhang.toastNotifications";
+const CURRENT_TERM_SETTING_KEY = "zhizhang.currentTerm.v1";
 const TOAST_CATEGORY_ESSENTIAL = "essential";
 const WEBVPN_COMPAT_KEY = "b0A58a69394ce73@";
 const WEBVPN_AES_SBOX = new Uint8Array([
@@ -76,6 +77,50 @@ function writeStoredSetting(key, value) {
     // file:// 页面或隐私模式可能禁用 localStorage；不影响当前会话使用。
   }
 }
+
+function normalizeCurrentTermPreference(raw = {}) {
+  let source = raw;
+  if (typeof source === "string") {
+    try { source = JSON.parse(source); } catch { source = {}; }
+  }
+  if (!source || typeof source !== "object" || Array.isArray(source)) source = {};
+  const mode = source.mode === "manual" ? "manual" : "auto";
+  return {
+    mode,
+    overrideCode: mode === "manual" ? String(source.overrideCode || "").trim() : "",
+    detectedCode: String(source.detectedCode || "").trim(),
+    detectedSource: String(source.detectedSource || "").trim(),
+    syncedAt: String(source.syncedAt || "").trim()
+  };
+}
+
+function initialCurrentTermPreference() {
+  if (IS_ANDROID_APP) {
+    try {
+      const nativeValue = globalThis.AndroidApi?.getCurrentTermSettings?.();
+      if (nativeValue) {
+        const normalized = normalizeCurrentTermPreference(nativeValue);
+        writeStoredSetting(CURRENT_TERM_SETTING_KEY, JSON.stringify(normalized));
+        return normalized;
+      }
+    } catch {
+      // 旧版 Android 原生桥没有该方法时继续读取 WebView 本地存储。
+    }
+  }
+  return normalizeCurrentTermPreference(readStoredSetting(CURRENT_TERM_SETTING_KEY, ""));
+}
+
+function persistCurrentTermPreference(preference) {
+  const normalized = normalizeCurrentTermPreference(preference);
+  const payload = JSON.stringify(normalized);
+  writeStoredSetting(CURRENT_TERM_SETTING_KEY, payload);
+  if (IS_ANDROID_APP) {
+    try { globalThis.AndroidApi?.setCurrentTermSettings?.(payload); } catch { /* 当前会话仍可使用 */ }
+  }
+  return normalized;
+}
+
+const storedCurrentTermPreference = initialCurrentTermPreference();
 
 function initialToastNotificationsEnabled() {
   const stored = readStoredSetting(TOAST_SETTING_KEY, "");
@@ -157,10 +202,16 @@ const state = {
   view: "overview",
   terms: [],
   termCode: "",
+  termSelectionTouched: false,
+  currentTerm: {
+    ...storedCurrentTermPreference,
+    syncing: false,
+    error: ""
+  },
   // 教务系统返回的当前学期。它只用于初始化各个学期选择器；用户手动
   // 切换后的 state.termCode 不会反过来覆盖这个检测结果。
-  detectedTermCode: "",
-  detectedTermSource: "",
+  detectedTermCode: storedCurrentTermPreference.detectedCode,
+  detectedTermSource: storedCurrentTermPreference.detectedSource,
   studentId: "",
   connected: false,
   loading: false,
@@ -222,6 +273,7 @@ const state = {
   allTerms: [],
   allTermsLoaded: false,
   allTermCode: "",
+  allTermSelectionTouched: false,
   allTermError: "",
   allTypeCode: "",
   allRows: [],
@@ -503,7 +555,9 @@ function hydratePersonalCache() {
     state.studentId = state.personalCache.studentId || state.studentId;
     if (terms.length) state.terms = terms;
     if (!state.termCode || !state.terms.some((term) => term.code === state.termCode)) {
-      state.termCode = String(snapshot.termCode || state.terms[0]?.code || "");
+      state.termSelectionTouched = false;
+      state.termCode = currentTermCodeFor(state.terms)
+        || String(snapshot.termCode || "");
     }
     applyCachedTermSnapshot(state.termCode);
     updatePersonalTermSelect();
@@ -1277,6 +1331,78 @@ function chooseCurrentTerm(terms, payloads = []) {
   return chooseCalendarTerm(terms) || terms[0];
 }
 
+function currentTermCandidates() {
+  const byCode = new Map();
+  const add = (term) => {
+    const code = String(term?.code || "").trim();
+    if (!code) return;
+    const name = String(term?.name || code).trim() || code;
+    if (!byCode.has(code) || byCode.get(code).name === code) byCode.set(code, { code, name });
+  };
+  [state.terms, state.allTerms, state.localSchedule?.termOptions].forEach((terms) => (terms || []).forEach(add));
+  (state.localSchedule?.items || []).forEach((item) => add({ code: item?.termCode, name: item?.termName }));
+  const configuredCode = state.currentTerm.mode === "manual"
+    ? state.currentTerm.overrideCode
+    : state.currentTerm.detectedCode;
+  if (configuredCode) add({ code: configuredCode, name: configuredCode });
+  return [...byCode.values()];
+}
+
+function configuredCurrentTermCode() {
+  return String(state.currentTerm.mode === "manual"
+    ? state.currentTerm.overrideCode
+    : state.currentTerm.detectedCode || "").trim();
+}
+
+function currentTermCodeFor(terms = currentTermCandidates()) {
+  const available = (terms || []).filter((term) => term?.code);
+  const configured = configuredCurrentTermCode();
+  return matchingTermCode(configured, available)
+    || chooseCalendarTerm(available)?.code
+    || available[0]?.code
+    || configured
+    || "";
+}
+
+function currentTermName(code = configuredCurrentTermCode()) {
+  const value = String(code || "").trim();
+  return currentTermCandidates().find((term) => term.code === value)?.name || value || "尚未检测";
+}
+
+function allQueryTermCode() {
+  return state.allTermCode
+    || currentTermCodeFor(state.allTerms.length ? state.allTerms : state.terms);
+}
+
+function saveCurrentTermPreference() {
+  const persisted = persistCurrentTermPreference(state.currentTerm);
+  Object.assign(state.currentTerm, persisted);
+}
+
+function recordDetectedCurrentTerm(code, source, syncedAt = new Date().toISOString()) {
+  const normalizedCode = String(code || "").trim();
+  if (!normalizedCode) return false;
+  state.currentTerm.detectedCode = normalizedCode;
+  state.currentTerm.detectedSource = String(source || "教务系统").trim() || "教务系统";
+  state.currentTerm.syncedAt = String(syncedAt || new Date().toISOString());
+  state.detectedTermCode = normalizedCode;
+  state.detectedTermSource = state.currentTerm.detectedSource;
+  saveCurrentTermPreference();
+  return true;
+}
+
+function applyCurrentTermDefaults() {
+  if (!state.termSelectionTouched) {
+    const personalCode = currentTermCodeFor(state.terms.length ? state.terms : currentTermCandidates());
+    if (personalCode) state.termCode = personalCode;
+  }
+  if (!state.allTermSelectionTouched && state.allTerms.length) {
+    const allCode = currentTermCodeFor(state.allTerms);
+    if (allCode) state.allTermCode = allCode;
+  }
+  updatePersonalTermSelect();
+}
+
 async function loadOfficialCurrentTermPayload() {
   // 这是原系统课表模块使用的当前学期接口。不同登录会话可能只允许其中
   // 一个上下文；两种调用都失败时由调用方继续使用已经读取到的学期列表。
@@ -1323,7 +1449,7 @@ function findStudentId(payload, depth = 0) {
   return "";
 }
 
-async function loadTerms() {
+async function loadTerms(options = {}) {
   state.personalCache.networkTermsAttempted = true;
   const payload = await getHome("kb/xnxq.do");
   let configPayload = null;
@@ -1357,10 +1483,14 @@ async function loadTerms() {
     || findFirstExplicitTermCode(terms, [payload, configPayload, currentUserPayload]);
   const selected = terms.find((term) => term.code === explicitCode)
     || chooseCurrentTerm(terms, [payload, configPayload, currentUserPayload]);
-  state.detectedTermCode = explicitCode || selected.code;
-  state.detectedTermSource = explicitCode ? "教务系统" : "兼容兜底";
-  state.termCode = selected.code;
-  updatePersonalTermSelect();
+  recordDetectedCurrentTerm(explicitCode || selected.code, explicitCode ? "教务系统" : "按日期兼容");
+  if (options.useSchoolAsCurrent) {
+    state.currentTerm.mode = "auto";
+    state.currentTerm.overrideCode = "";
+    saveCurrentTermPreference();
+  }
+  if (state.termCode && !terms.some((term) => term.code === state.termCode)) state.termSelectionTouched = false;
+  applyCurrentTermDefaults();
 }
 
 function termRowsFromPayload(payload) {
@@ -1383,21 +1513,21 @@ async function loadAllTerms() {
     let terms = termRowsFromPayload(listPayload);
     if (!terms.length) terms = state.terms.slice();
 
-    // 全校课表使用自己的学期列表，但默认学期仍必须来自教务系统当前学期
-    // 探测；若该模块不返回当前值，则复用主学期列表已经检测到的当前代码。
-    const currentPayload = await loadOfficialCurrentTermPayload();
-    const currentCode = officialCurrentTermCode(currentPayload, terms)
-      || matchingTermCode(state.detectedTermCode, terms)
-      || chooseCalendarTerm(terms)?.code
-      || "";
+    // 全校课表只拥有独立的“查询学期”，它的初始值仍来自统一当前学期。
+    // 自动模式下允许该模块补充教务当前学期检测；手动模式绝不覆盖用户设置。
+    if (state.currentTerm.mode !== "manual") {
+      const currentPayload = await loadOfficialCurrentTermPayload();
+      const officialCode = officialCurrentTermCode(currentPayload, terms);
+      if (officialCode) recordDetectedCurrentTerm(officialCode, "教务系统");
+    }
     state.allTerms = terms;
-    state.allTermCode = terms.some((term) => term.code === currentCode) ? currentCode : "";
+    if (state.allTermCode && !terms.some((term) => term.code === state.allTermCode)) state.allTermSelectionTouched = false;
+    if (!state.allTermSelectionTouched) state.allTermCode = currentTermCodeFor(terms);
   } catch (error) {
     state.allTermError = error.message || "课表学期列表读取失败";
     state.allTerms = state.terms.slice();
-    state.allTermCode = matchingTermCode(state.detectedTermCode, state.allTerms)
-      || chooseCalendarTerm(state.allTerms)?.code
-      || "";
+    if (state.allTermCode && !state.allTerms.some((term) => term.code === state.allTermCode)) state.allTermSelectionTouched = false;
+    if (!state.allTermSelectionTouched) state.allTermCode = currentTermCodeFor(state.allTerms);
   }
   render();
 }
@@ -3885,7 +4015,7 @@ async function loadSportProjectsForCourse(course, scope = "personal") {
     if (state.selectedCourse === course) render();
     return;
   }
-  const term = scope === "all-detail" ? (state.allTermCode || state.termCode) : state.termCode;
+  const term = scope === "all-detail" ? allQueryTermCode() : state.termCode;
   const cacheKey = `${term}|${filterName}|${filterValues.slice().sort().join(",")}|${targetHints.slice().sort().join(",")}`;
   const cached = state.sportProjectCache.get(cacheKey);
   if (cached) {
@@ -4985,7 +5115,7 @@ async function queryAllSchedule() {
   if (!type) return;
   const requestId = ++allScheduleRequestSequence;
   allScheduleDetailRequestSequence += 1;
-  const termCode = state.allTermCode || state.termCode;
+  const termCode = allQueryTermCode();
   if (!termCode) {
     state.allError = "还没有选择课表学期";
     render();
@@ -5112,7 +5242,7 @@ function renderAcademicTermPicker() {
   const options = state.terms.length
     ? state.terms.map((term) => `<option value="${escapeHtml(term.code)}" ${term.code === state.termCode ? "selected" : ""}>${escapeHtml(term.name)}</option>`).join("")
     : `<option value="">正在读取当前学期…</option>`;
-  return `<div class="academic-term-picker"><label><span>查询学期</span><select data-term-select ${state.terms.length ? "" : "disabled"}>${options}</select></label><button class="button button-ghost button-small" type="button" data-action="refresh">刷新当前学期</button></div>`;
+  return `<div class="academic-term-picker"><label><span>查询学期</span><select data-term-select ${state.terms.length ? "" : "disabled"}>${options}</select></label><button class="button button-ghost button-small" type="button" data-action="refresh">刷新所选学期</button></div>`;
 }
 
 function renderSectionUtilities(action = "") {
@@ -5623,7 +5753,7 @@ function localScheduleManagerMarkup() {
   const filter = state.localSchedule.filter || "all";
   const items = allItems.filter((item) => filter === "all" || filter === item.type || (filter === "disabled" && !item.enabled));
   const hidden = (state.localSchedule.hiddenSchoolEntries || []).filter((entry) => !entry.termCode || entry.termCode === state.termCode);
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-manager-modal" role="dialog" aria-modal="true" aria-label="管理自定义安排"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>管理自定义安排</h3><p class="muted">当前学期 · ${allItems.filter((item) => item.enabled).length} 项启用安排；学校课程仍保存在教务数据层。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-manager">关闭</button></div><div class="local-manager-toolbar"><select id="localManagerFilter"><option value="all" ${filter === "all" ? "selected" : ""}>全部本地安排</option><option value="course" ${filter === "course" ? "selected" : ""}>自定义课程</option><option value="event" ${filter === "event" ? "selected" : ""}>自定义日程</option><option value="disabled" ${filter === "disabled" ? "selected" : ""}>已停用</option></select><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button></div>${renderLocalScheduleRecords(items)}<section class="local-hidden-school-section"><div class="local-manager-section-head"><strong>本地隐藏的教务排课</strong><span>${hidden.length} 条</span></div>${hidden.length ? hidden.map((entry) => `<div class="local-hidden-school-row"><div><strong>${escapeHtml(entry.label || "教务排课")}</strong><small>只在本地组合课表中隐藏，不会修改教务系统</small></div><button class="button button-ghost button-small" type="button" data-action="restore-hidden-school" data-hidden-school-key="${escapeHtml(entry.key)}" data-hidden-school-term="${escapeHtml(entry.termCode || "")}">恢复显示</button></div>`).join("") : `<p class="muted">没有本地隐藏的教务排课。</p>`}</section><div class="local-manager-danger"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button><small>只删除你手动创建的数据，不影响教务系统课程。</small></div></section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-manager-modal" role="dialog" aria-modal="true" aria-label="管理自定义安排"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>管理自定义安排</h3><p class="muted">当前查询学期 · ${allItems.filter((item) => item.enabled).length} 项启用安排；学校课程仍保存在教务数据层。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-manager">关闭</button></div><div class="local-manager-toolbar"><select id="localManagerFilter"><option value="all" ${filter === "all" ? "selected" : ""}>全部本地安排</option><option value="course" ${filter === "course" ? "selected" : ""}>自定义课程</option><option value="event" ${filter === "event" ? "selected" : ""}>自定义日程</option><option value="disabled" ${filter === "disabled" ? "selected" : ""}>已停用</option></select><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button></div>${renderLocalScheduleRecords(items)}<section class="local-hidden-school-section"><div class="local-manager-section-head"><strong>本地隐藏的教务排课</strong><span>${hidden.length} 条</span></div>${hidden.length ? hidden.map((entry) => `<div class="local-hidden-school-row"><div><strong>${escapeHtml(entry.label || "教务排课")}</strong><small>只在本地组合课表中隐藏，不会修改教务系统</small></div><button class="button button-ghost button-small" type="button" data-action="restore-hidden-school" data-hidden-school-key="${escapeHtml(entry.key)}" data-hidden-school-term="${escapeHtml(entry.termCode || "")}">恢复显示</button></div>`).join("") : `<p class="muted">没有本地隐藏的教务排课。</p>`}</section><div class="local-manager-danger"><button class="button button-danger" type="button" data-action="clear-local-schedule">清除全部自定义安排</button><small>只删除你手动创建的数据，不影响教务系统课程。</small></div></section></div>`;
 }
 
 function localScheduleConflictMarkup() {
@@ -5972,6 +6102,20 @@ function openGeneratedWebVpnUrl() {
   else window.open(url, "_blank", "noopener");
 }
 
+function currentTermSettingsBlock() {
+  const terms = currentTermCandidates();
+  const selectedCode = configuredCurrentTermCode() || currentTermCodeFor(terms);
+  const options = terms.length
+    ? terms.map((term) => `<option value="${escapeHtml(term.code)}" ${term.code === selectedCode ? "selected" : ""}>${escapeHtml(term.name || term.code)}</option>`).join("")
+    : `<option value="">暂无可选学期</option>`;
+  const source = state.currentTerm.mode === "manual"
+    ? "手动设置"
+    : state.currentTerm.detectedSource || "等待教务系统同步";
+  const syncedText = state.currentTerm.syncedAt ? cacheDateText(state.currentTerm.syncedAt) : "尚未同步";
+  const syncing = state.currentTerm.syncing;
+  return `<section class="settings-section current-term-settings"><div class="settings-intro"><h3>当前学期</h3><p>总览、个人课表、成绩、考试和新建自定义安排等需要“当前学期”的功能统一读取这里。各查询页仍可临时切换其他学期，不会修改本设置。</p></div><label class="settings-field"><span>当前学期</span><select id="currentTermSelect" ${terms.length ? "" : "disabled"}>${options}</select><small>当前：${escapeHtml(currentTermName(selectedCode))} · 来源：${escapeHtml(source)} · ${escapeHtml(syncedText)}</small></label>${state.currentTerm.error ? `<div class="schedule-note">${escapeHtml(state.currentTerm.error)}</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-current-term" ${terms.length || selectedCode ? "" : "disabled"}>手动设为当前学期</button><button class="button button-ghost" type="button" data-action="sync-current-term" ${syncing ? "disabled" : ""}>${syncing ? "正在同步…" : "从教务系统同步"}</button></div><div class="settings-callout"><strong>${state.currentTerm.mode === "manual" ? "当前使用手动设置" : "当前跟随教务系统"}</strong><span>${state.currentTerm.mode === "manual" ? "点击“从教务系统同步”可恢复自动模式；之后学校当前学期变化时会随正常刷新自动更新。" : "正常刷新会继续检测学校当前学期；某个查询页手动选择历史学期只影响该页面。"}</span></div></section>`;
+}
+
 function renderSettingsWithLocalOverlay() {
   const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
   const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
@@ -5979,7 +6123,8 @@ function renderSettingsWithLocalOverlay() {
   const configuredLoginMethod = IS_ANDROID_APP ? androidLoginMethod() : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
   const toastEnabled = toastNotificationsEnabled();
   const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
-  const localCount = (state.localSchedule.items || []).filter((item) => item.termCode === state.termCode || !state.termCode).length;
+  const configuredCurrentCode = currentTermCodeFor(currentTermCandidates());
+  const localCount = (state.localSchedule.items || []).filter((item) => item.termCode === configuredCurrentCode || !configuredCurrentCode).length;
   const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
   const cachePrivacy = IS_ANDROID_APP
     ? "查询缓存按学号隔离，不包含密码、验证码、Cookie 或令牌；Android 内置登录凭据另行由 Keystore 加密保存。"
@@ -5997,7 +6142,7 @@ function renderSettingsWithLocalOverlay() {
     : "插件不会保存账号、密码或验证码。";
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
   const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -6736,7 +6881,7 @@ function courseTransferPayload(scope = "all") {
     title: "东北大学课表课程信息",
     source: "东北大学教务助手",
     exportedAt: new Date().toISOString(),
-    term: state.allTermCode || state.termCode || "",
+    term: allQueryTermCode(),
     queryType: selectedScheduleType()?.name || (scope === "all-detail" ? state.allDetail?.typeName : "全校课表") || "",
     selectionScope: scope,
     courses: records.map((record) => courseTransferEntry(record.course))
@@ -8221,7 +8366,7 @@ async function copyCourseExport() {
 function downloadCourseExport() {
   const text = state.courseTransfer.exportText || "";
   if (!text) return;
-  const term = String(state.allTermCode || state.termCode || "课程").replace(/[^\w\u3400-\u9fff-]+/g, "_");
+  const term = String(allQueryTermCode() || "课程").replace(/[^\w\u3400-\u9fff-]+/g, "_");
   const blob = new Blob([text], { type: "application/json;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -8532,7 +8677,7 @@ async function queryAllScheduleDetail(rowIndex) {
     render();
     return;
   }
-  const termCode = state.allTermCode || state.termCode;
+  const termCode = allQueryTermCode();
   state.selectedCourse = null;
   state.scheduleWeek["all-detail"] = "all";
   state.allDetail = {
@@ -8903,6 +9048,57 @@ async function openCurriculumPortal() {
   return startCurriculumBootstrap();
 }
 
+function preparePersonalDataAfterDefaultTermChange(previousTermCode) {
+  if (!state.termCode || state.termCode === previousTermCode) return;
+  state.scheduleWeek.personal = "";
+  state.scheduleDisplay.personal = "days";
+  if (!applyCachedTermSnapshot(state.termCode)) {
+    state.data = emptyPersonalData();
+    state.data.allScores = Array.isArray(state.personalCache.allScores) ? state.personalCache.allScores : [];
+  }
+}
+
+async function saveManualCurrentTerm() {
+  const select = document.getElementById("currentTermSelect");
+  const code = String(select?.value || configuredCurrentTermCode() || "").trim();
+  if (!code || !currentTermCandidates().some((term) => term.code === code)) {
+    setNotice("请先选择一个可用学期。", "error");
+    return;
+  }
+  const previousTermCode = state.termCode;
+  state.currentTerm.mode = "manual";
+  state.currentTerm.overrideCode = code;
+  state.currentTerm.error = "";
+  saveCurrentTermPreference();
+  applyCurrentTermDefaults();
+  preparePersonalDataAfterDefaultTermChange(previousTermCode);
+  setNotice(`当前学期已手动设为 ${currentTermName(code)}。`, "success");
+  render();
+  if (state.termCode !== previousTermCode) await refresh();
+}
+
+async function syncCurrentTermFromSchool() {
+  if (state.currentTerm.syncing) return;
+  const previousTermCode = state.termCode;
+  state.currentTerm.syncing = true;
+  state.currentTerm.error = "";
+  render();
+  try {
+    await loadTerms({ useSchoolAsCurrent: true });
+    if (!state.currentTerm.detectedCode) throw new Error("教务系统没有返回可识别的当前学期");
+    preparePersonalDataAfterDefaultTermChange(previousTermCode);
+    state.currentTerm.syncing = false;
+    setNotice(`已从教务系统同步当前学期：${currentTermName(state.currentTerm.detectedCode)}。`, "success", TOAST_CATEGORY_ESSENTIAL);
+    render();
+    if (state.termCode !== previousTermCode) await refresh();
+  } catch (error) {
+    state.currentTerm.syncing = false;
+    state.currentTerm.error = `同步失败：${error.message || "教务系统暂时不可用"}`;
+    setNotice(state.currentTerm.error, "error");
+    render();
+  }
+}
+
 async function refresh(forceTerms = false) {
   const requestId = ++refreshRequestSequence;
   const hasCache = hydratePersonalCache();
@@ -9176,7 +9372,7 @@ function normalizeLocalScheduleItem(raw = {}, options = {}) {
   const course = raw.course && typeof raw.course === "object" ? raw.course : {};
   const event = raw.event && typeof raw.event === "object" ? raw.event : {};
   const schedule = type === "event" ? event : course;
-  const termCode = localScheduleTrim(raw.termCode || options.termCode || state.termCode, 80);
+  const termCode = localScheduleTrim(raw.termCode || options.termCode || currentTermCodeFor(currentTermCandidates()), 80);
   const sourceWeeks = course.weekNumbers ?? raw.weekNumbers ?? raw.weeks;
   const weekdayValue = course.weekdayIndex ?? raw.weekdayIndex ?? raw.weekday;
   let weekdayIndex = localScheduleInteger(weekdayValue, null);
@@ -9232,10 +9428,11 @@ function normalizeLocalScheduleItem(raw = {}, options = {}) {
 
 function localScheduleDraftFromItem(item = null, type = "course") {
   if (!item) {
+    const currentCode = currentTermCodeFor(currentTermCandidates());
     const base = {
       type,
-      termCode: state.termCode,
-      termName: localScheduleTermName(state.termCode)
+      termCode: currentCode,
+      termName: localScheduleTermName(currentCode)
     };
     if (type === "event") {
       return normalizeLocalScheduleItem({
@@ -9331,7 +9528,10 @@ async function hydrateLocalSchedule(profileKey = localScheduleProfileKey(), forc
   }
   state.localSchedule.hydrated = true;
   state.localSchedule.loading = false;
-  if (!state.termCode && state.localSchedule.termOptions.length) state.termCode = state.localSchedule.termOptions[0].code;
+  if (!state.termCode && state.localSchedule.termOptions.length) {
+    state.termSelectionTouched = false;
+    state.termCode = currentTermCodeFor(currentTermCandidates());
+  }
   try { updatePersonalTermSelect(); } catch { /* renderer may not be ready in smoke tests */ }
   return !state.localSchedule.corrupted;
 }
@@ -9923,6 +10123,7 @@ document.querySelectorAll("[data-view]").forEach((tab) => {
 
 elements.termSelect.addEventListener("change", async () => {
   state.termCode = elements.termSelect.value;
+  state.termSelectionTouched = true;
   state.scheduleWeek.personal = "";
   state.scheduleDisplay.personal = "days";
   if (!applyCachedTermSnapshot(state.termCode)) {
@@ -9978,6 +10179,7 @@ elements.content.addEventListener("change", (event) => {
   }
   if (event.target.matches("[data-term-select]")) {
     state.termCode = event.target.value;
+    state.termSelectionTouched = true;
     elements.termSelect.value = state.termCode;
     state.scheduleWeek.personal = "";
     state.scheduleDisplay.personal = "days";
@@ -10056,6 +10258,7 @@ elements.content.addEventListener("change", (event) => {
     allScheduleDetailRequestSequence += 1;
     state.allRetrying = false;
     state.allTermCode = event.target.value;
+    state.allTermSelectionTouched = true;
     state.allRows = [];
     state.allPage = 1;
     state.allDetail = null;
@@ -10228,6 +10431,8 @@ elements.content.addEventListener("click", async (event) => {
     return;
   }
   if (action === "clear-personal-cache") return clearPersonalCache();
+  if (action === "save-current-term") return saveManualCurrentTerm();
+  if (action === "sync-current-term") return syncCurrentTermFromSchool();
   if (action === "schedule-days") {
     state.scheduleDisplay.personal = "days";
     state.selectedCourse = null;

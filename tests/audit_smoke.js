@@ -54,6 +54,7 @@ globalThis.__auditTest = {
   localScheduleDefaultCourseOccurrence,
   localScheduleRowHasConflict, syncLocalScheduleEndSectionSelect, analyzeCourseTransferCollisions, renderCourseTransferCollisionResult,
   matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
+  currentTermCandidates, configuredCurrentTermCode, currentTermCodeFor, applyCurrentTermDefaults,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
   scheduleCsvHasRows, renderPersonal, renderOverview, renderOverviewPriority, renderSettings, renderCourseDetailModal,
   state,
@@ -87,6 +88,53 @@ const t = global.__auditTest;
   assert.strictEqual(t.findExplicitTermCode({ datas: detectedTerms }, detectedTerms), '');
   assert.strictEqual(t.findExplicitTermCode({ datas: [{ XNXQDM: '2025-2026-1', isCurrent: false }, { XNXQDM: '2026-2027-1', isCurrent: true }] }, detectedTerms), '2026-2027-1');
   assert.strictEqual(t.chooseCurrentTerm(detectedTerms, [{ currentTermCode: '2025-2026-2' }]).code, '2025-2026-2');
+
+  // Every default that means “current term” reads one persisted preference.
+  // A page-level query selection becomes independent after the user touches it.
+  const savedCurrentTermFixture = {
+    terms: t.state.terms,
+    allTerms: t.state.allTerms,
+    termCode: t.state.termCode,
+    allTermCode: t.state.allTermCode,
+    termSelectionTouched: t.state.termSelectionTouched,
+    allTermSelectionTouched: t.state.allTermSelectionTouched,
+    currentTerm: { ...t.state.currentTerm }
+  };
+  t.state.terms = detectedTerms;
+  t.state.allTerms = detectedTerms.slice();
+  Object.assign(t.state.currentTerm, { mode: 'auto', overrideCode: '', detectedCode: '2025-2026-2', detectedSource: '教务系统' });
+  assert.strictEqual(t.configuredCurrentTermCode(), '2025-2026-2');
+  assert.strictEqual(t.currentTermCodeFor(detectedTerms), '2025-2026-2');
+  t.state.termSelectionTouched = false;
+  t.state.allTermSelectionTouched = false;
+  t.applyCurrentTermDefaults();
+  assert.strictEqual(t.state.termCode, '2025-2026-2');
+  assert.strictEqual(t.state.allTermCode, '2025-2026-2');
+  Object.assign(t.state.currentTerm, { mode: 'manual', overrideCode: '2026-2027-1' });
+  t.applyCurrentTermDefaults();
+  assert.strictEqual(t.state.termCode, '2026-2027-1');
+  assert.strictEqual(t.state.allTermCode, '2026-2027-1');
+  t.state.termSelectionTouched = true;
+  t.state.allTermSelectionTouched = true;
+  t.state.termCode = '2025-2026-1';
+  t.state.allTermCode = '2025-2026-2';
+  t.applyCurrentTermDefaults();
+  assert.strictEqual(t.state.termCode, '2025-2026-1');
+  assert.strictEqual(t.state.allTermCode, '2025-2026-2');
+  // New local entries follow the central current term, not a historical term
+  // currently selected only for browsing.
+  assert.strictEqual(t.localScheduleDraftFromItem(null, 'course').termCode, '2026-2027-1');
+  const currentTermSettingsMarkup = t.renderSettings();
+  assert.ok(currentTermSettingsMarkup.includes('id="currentTermSelect"'));
+  assert.ok(currentTermSettingsMarkup.includes('data-action="sync-current-term"'));
+  assert.ok(currentTermSettingsMarkup.includes('各查询页仍可临时切换其他学期'));
+  t.state.terms = savedCurrentTermFixture.terms;
+  t.state.allTerms = savedCurrentTermFixture.allTerms;
+  t.state.termCode = savedCurrentTermFixture.termCode;
+  t.state.allTermCode = savedCurrentTermFixture.allTermCode;
+  t.state.termSelectionTouched = savedCurrentTermFixture.termSelectionTouched;
+  t.state.allTermSelectionTouched = savedCurrentTermFixture.allTermSelectionTouched;
+  t.state.currentTerm = savedCurrentTermFixture.currentTerm;
 
   // Configured first-week Sunday drives only the personal schedule default.
   const today = new Date();
