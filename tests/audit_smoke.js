@@ -51,6 +51,7 @@ globalThis.__auditTest = {
   normalizeLocalScheduleItem, localScheduleItemToCourseRow, mergedPersonalScheduleRows,
   compareScheduleItemsOverlap, SCHEDULE_COLLISION_STATUS, filterCoursesForDate, overviewTodayCourses, overviewNextCourse, schoolScheduleOccurrenceKey,
   findLocalScheduleConflicts, localScheduleDraftFromItem, localScheduleEditorMarkup, localScheduleSectionOptions,
+  localScheduleDefaultCourseOccurrence,
   localScheduleRowHasConflict, syncLocalScheduleEndSectionSelect, analyzeCourseTransferCollisions, renderCourseTransferCollisionResult,
   matchingTermCode, findExplicitTermCode, officialCurrentTermCode, chooseCurrentTerm,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
@@ -462,6 +463,39 @@ const t = global.__auditTest;
   const localEventRowWithNote = t.localScheduleItemToCourseRow(localEvent);
   assert.strictEqual(localEventRowWithNote.section, '');
   assert.strictEqual(t.renderScheduleGrid([localEventRowWithNote], 'personal').includes('第123节'), false);
+
+  // A newly added course represents a one-off adjustment by default: use
+  // today's weekday and only the current academic week. If the first-week
+  // date is unknown, keep the week blank instead of silently adding weeks 1-16.
+  t.state.calendar.firstWeekStart = '2026-08-16';
+  assert.deepStrictEqual(t.localScheduleDefaultCourseOccurrence(new Date(2026, 7, 20, 12)), {
+    weekNumbers: [1], weekdayIndex: 4
+  });
+  t.state.calendar.firstWeekStart = '';
+  assert.deepStrictEqual(t.localScheduleDefaultCourseOccurrence(new Date(2026, 7, 20, 12)), {
+    weekNumbers: [], weekdayIndex: 4
+  });
+  const localDefaultToday = new Date();
+  const todaySunday = new Date(localDefaultToday.getFullYear(), localDefaultToday.getMonth(), localDefaultToday.getDate() - localDefaultToday.getDay(), 12);
+  t.state.calendar.firstWeekStart = `${todaySunday.getFullYear()}-${String(todaySunday.getMonth() + 1).padStart(2, '0')}-${String(todaySunday.getDate()).padStart(2, '0')}`;
+  const newCourseDraft = t.localScheduleDraftFromItem(null, 'course');
+  assert.deepStrictEqual(newCourseDraft.course.weekNumbers, [1]);
+  assert.strictEqual(newCourseDraft.course.weekdayIndex, localDefaultToday.getDay());
+  t.state.localSchedule.editorOpen = true;
+  t.state.localSchedule.draft = newCourseDraft;
+  const currentCourseEditor = t.localScheduleEditorMarkup();
+  assert.ok(currentCourseEditor.includes('默认只添加本周这一次'));
+  assert.ok(currentCourseEditor.includes('value="1"'));
+  t.state.calendar.firstWeekStart = '';
+  const unknownWeekDraft = t.localScheduleDraftFromItem(null, 'course');
+  assert.deepStrictEqual(unknownWeekDraft.course.weekNumbers, []);
+  assert.strictEqual(unknownWeekDraft.course.weekdayIndex, localDefaultToday.getDay());
+  t.state.localSchedule.draft = unknownWeekDraft;
+  const unknownWeekEditor = t.localScheduleEditorMarkup();
+  assert.ok(unknownWeekEditor.includes('无法自动计算当前教学周'));
+  assert.ok(unknownWeekEditor.includes('id="localWeekStart" type="number" min="1" max="60" value=""'));
+  t.state.localSchedule.editorOpen = false;
+  t.state.localSchedule.draft = null;
 
   // Event fields are independent from course defaults. Empty section values
   // remain canonical nulls, including when an older payload used ""/null.

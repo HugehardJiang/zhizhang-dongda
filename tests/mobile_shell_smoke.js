@@ -52,6 +52,7 @@ const elements = new Map();
 const storedSettings = new Map();
 const pageWrap = createEventTarget();
 let activeModal = null;
+let nativeToastNotificationsEnabled = true;
 const nativeCalls = [];
 const androidCurriculumEntry = createElementStub();
 androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; };
@@ -61,7 +62,12 @@ global.AndroidApi = {
   setEcodePanelHidden(hidden) { nativeCalls.push(Boolean(hidden)); },
   getLoginMethod() { return "builtin"; },
   getLoginError() { return ""; },
-  setLoginMethod(method) { nativeCalls.push(`login:${method}`); }
+  setLoginMethod(method) { nativeCalls.push(`login:${method}`); },
+  getToastNotificationsEnabled() { return nativeToastNotificationsEnabled; },
+  setToastNotificationsEnabled(enabled) {
+    nativeToastNotificationsEnabled = Boolean(enabled);
+    nativeCalls.push(`toast:${Boolean(enabled)}`);
+  }
 };
 global.document = {
   documentElement: { classList: createClassList() },
@@ -103,6 +109,7 @@ globalThis.__mobileShellAudit = {
   webVpnEncryptHostname,
   renderWebVpnToolModal,
   setNotice,
+  setToastNotificationsEnabled,
   syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
@@ -128,6 +135,7 @@ assert.ok(loginSettings.includes('Android Keystore'));
 assert.ok(loginSettings.indexOf('更多工具') < loginSettings.indexOf('第一周周日'));
 assert.ok(loginSettings.includes('WebVPN 地址生成器'));
 assert.ok(loginSettings.includes('id="toastNotificationsEnabled"'));
+assert.ok(loginSettings.includes('class="settings-switch-track"'));
 assert.ok(loginSettings.includes('只保留正在使用缓存或数据已刷新的提示'));
 
 // The generator reproduces NEU WebVPN's AES-128-CFB hostname encoding while
@@ -176,7 +184,9 @@ assert.strictEqual(toastRegion.children[0].className, 'toast toast-error');
 
 // Disabling general Toast feedback suppresses login/operation chatter, while
 // cache-use and completed-refresh messages explicitly marked essential remain.
-localStorage.setItem('zhizhang.toastNotifications', 'off');
+audit.setToastNotificationsEnabled(false);
+assert.strictEqual(nativeToastNotificationsEnabled, false);
+assert.strictEqual(localStorage.getItem('zhizhang.toastNotifications'), 'off');
 audit.setNotice('');
 audit.setNotice('正在后台重新登录…');
 assert.strictEqual(toastRegion.children.length, 0);
@@ -186,7 +196,9 @@ assert.strictEqual(toastRegion.children[0].className, 'toast toast-success');
 audit.setNotice('');
 audit.setNotice('普通操作已完成。', 'success');
 assert.strictEqual(toastRegion.children.length, 0);
-localStorage.setItem('zhizhang.toastNotifications', 'on');
+audit.setToastNotificationsEnabled(true);
+assert.strictEqual(nativeToastNotificationsEnabled, true);
+assert.strictEqual(localStorage.getItem('zhizhang.toastNotifications'), 'on');
 
 const dashboardCss = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
 assert.ok(dashboardCss.includes('.notice { display: none; }'));
@@ -194,6 +206,9 @@ assert.ok(dashboardCss.includes('bottom: calc(64px + env(safe-area-inset-bottom)
 assert.ok(!dashboardCss.includes('.toast-region { top: calc(var(--toolbar-height) + 10px)'));
 assert.ok(dashboardCss.includes('.android-shell.has-modal .page-wrap { overflow: hidden; overscroll-behavior: none; }'));
 assert.ok(dashboardCss.includes('overscroll-behavior: contain; touch-action: pan-y;'));
+assert.ok(dashboardCss.includes('.settings-switch-track::after'));
+assert.ok(dashboardCss.includes(':checked + .settings-switch-track::after'));
+assert.ok(!dashboardCss.includes('input[role="switch"]::before'));
 audit.setNotice('');
 
 const mainActivitySource = fs.readFileSync(path.join(
@@ -216,6 +231,9 @@ assert.ok(/onPageFinished[\s\S]*scheduleBuiltInPortalProbe\(url\)/.test(mainActi
 assert.ok(/inspectBuiltInLoginPage[\s\S]*!isPortalLoginPage\(currentUrl\)[\s\S]*scheduleBuiltInPortalProbe\(currentUrl\)/.test(mainActivitySource));
 assert.ok(mainActivitySource.includes('PORTAL_FALLBACK_URL'));
 assert.ok(mainActivitySource.includes('学校认证后连续返回非教务中转页'));
+assert.ok(mainActivitySource.includes('TOAST_NOTIFICATIONS_ENABLED'));
+assert.ok(mainActivitySource.includes('public boolean getToastNotificationsEnabled()'));
+assert.ok(mainActivitySource.includes('public void setToastNotificationsEnabled(boolean enabled)'));
 
 const androidManifestSource = fs.readFileSync(path.join(
   __dirname, '..', 'android', 'app', 'src', 'main', 'AndroidManifest.xml'

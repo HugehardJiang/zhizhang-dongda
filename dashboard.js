@@ -77,6 +77,40 @@ function writeStoredSetting(key, value) {
   }
 }
 
+function initialToastNotificationsEnabled() {
+  const stored = readStoredSetting(TOAST_SETTING_KEY, "");
+  if (stored === "on" || stored === "off") {
+    const enabled = stored !== "off";
+    if (IS_ANDROID_APP) {
+      try { globalThis.AndroidApi?.setToastNotificationsEnabled?.(enabled); } catch { /* use page setting */ }
+    }
+    return enabled;
+  }
+  if (IS_ANDROID_APP) {
+    try {
+      const nativeValue = globalThis.AndroidApi?.getToastNotificationsEnabled?.();
+      if (typeof nativeValue === "boolean") return nativeValue;
+    } catch {
+      // 旧版原生桥没有该方法时保持默认开启。
+    }
+  }
+  return true;
+}
+
+let toastNotificationsPreference = initialToastNotificationsEnabled();
+
+function toastNotificationsEnabled() {
+  return toastNotificationsPreference;
+}
+
+function setToastNotificationsEnabled(enabled) {
+  toastNotificationsPreference = Boolean(enabled);
+  writeStoredSetting(TOAST_SETTING_KEY, toastNotificationsPreference ? "on" : "off");
+  if (IS_ANDROID_APP) {
+    try { globalThis.AndroidApi?.setToastNotificationsEnabled?.(toastNotificationsPreference); } catch { /* current session still works */ }
+  }
+}
+
 function androidLoginMethod() {
   if (!IS_ANDROID_APP) return "password";
   try {
@@ -5018,10 +5052,6 @@ function setConnection(text, type) {
   elements.connection.className = `connection is-${type}`;
 }
 
-function toastNotificationsEnabled() {
-  return readStoredSetting(TOAST_SETTING_KEY, "on") !== "off";
-}
-
 function showToast(text = "", type = "success", category = "default") {
   if (!elements.toastRegion) return;
   if (!text) {
@@ -5563,17 +5593,26 @@ function localScheduleEditorMarkup() {
   const course = draft.course || {};
   const event = draft.event || {};
   const weeks = new Set(course.weekNumbers || []);
-  const minWeek = course.weekNumbers?.length ? Math.min(...course.weekNumbers) : 1;
-  const maxWeek = course.weekNumbers?.length ? Math.max(...course.weekNumbers) : 16;
+  const minWeek = course.weekNumbers?.length ? Math.min(...course.weekNumbers) : "";
+  const maxWeek = course.weekNumbers?.length ? Math.max(...course.weekNumbers) : "";
   const isContiguous = course.weekNumbers?.length === maxWeek - minWeek + 1 && course.weekNumbers.every((week) => week >= minWeek && week <= maxWeek);
   const isOdd = course.weekNumbers?.length && course.weekNumbers.every((week) => week % 2 === 1) && course.weekNumbers.length === Math.ceil((maxWeek - minWeek + 1) / 2);
   const isEven = course.weekNumbers?.length && course.weekNumbers.every((week) => week % 2 === 0) && course.weekNumbers.length === Math.floor((maxWeek - minWeek + 1) / 2);
-  const repeatValue = isContiguous ? "every" : isOdd ? "odd" : isEven ? "even" : "custom";
+  const repeatValue = !course.weekNumbers?.length ? "every" : isContiguous ? "every" : isOdd ? "odd" : isEven ? "even" : "custom";
   const weekCheckboxes = Array.from({ length: 20 }, (_, index) => index + 1)
     .map((week) => `<label class="local-week-option"><input type="checkbox" data-local-week value="${week}" ${weeks.has(week) ? "checked" : ""} />${week}</label>`).join("");
   const termOptions = localScheduleTermOptionsMarkup(draft.termCode || state.termCode);
   const colorOptions = LOCAL_SCHEDULE_COLOR_KEYS.map((key) => `<label class="local-color-option local-color-${key}"><input type="radio" name="localColorKey" value="${key}" ${draft.colorKey === key ? "checked" : ""} /><span></span></label>`).join("");
-  const courseForm = `<div class="local-editor-section"><h4>上课时间</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>课程名称 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：自动控制补课" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>星期 <em>*</em></span><select id="localWeekday"><option value="">请选择星期</option>${["周日", "周一", "周二", "周三", "周四", "周五", "周六"].map((name, index) => `<option value="${index}" ${course.weekdayIndex === index ? "selected" : ""}>${name}</option>`).join("")}</select></label><label class="local-form-field"><span>开始节次 <em>*</em></span><select id="localStartSection">${localScheduleSectionOptions(course.startSection, "请选择")}</select></label><label class="local-form-field"><span>结束节次 <em>*</em></span><select id="localEndSection">${localScheduleSectionOptions(course.endSection, "请选择", course.startSection)}</select></label></div><div class="local-week-builder"><strong>重复周次 <em>*</em></strong><div class="local-week-range"><label>起始周<input id="localWeekStart" type="number" min="1" max="60" value="${escapeHtml(minWeek)}" /></label><label>结束周<input id="localWeekEnd" type="number" min="1" max="60" value="${escapeHtml(maxWeek)}" /></label><label>重复<select id="localWeekRepeat"><option value="every" ${repeatValue === "every" ? "selected" : ""}>每周</option><option value="odd" ${repeatValue === "odd" ? "selected" : ""}>单周</option><option value="even" ${repeatValue === "even" ? "selected" : ""}>双周</option><option value="custom" ${repeatValue === "custom" ? "selected" : ""}>自定义周次</option></select></label></div><details class="local-custom-weeks" ${repeatValue === "custom" ? "open" : ""}><summary>自定义周次（可选）</summary><div class="local-week-options">${weekCheckboxes}</div></details></div></div><div class="local-editor-section"><h4>课程信息</h4><div class="local-form-grid"><label class="local-form-field"><span>教师</span><input id="localTeacher" value="${escapeHtml(draft.teacher)}" placeholder="可选" /></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(course.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(course.endTime || "")}" /></label><label class="local-form-field local-form-wide"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label></div></div>`;
+  const todayInfo = academicDayInfo(new Date());
+  const currentOccurrence = course.weekNumbers?.length === 1
+    && course.weekNumbers[0] === todayInfo.week
+    && course.weekdayIndex === todayInfo.weekdayIndex;
+  const weekContext = currentOccurrence
+    ? `<p class="local-week-context is-current">已按今天设置为第 ${todayInfo.week} 周 · ${escapeHtml(SUNDAY_FIRST_DAY_NAMES[todayInfo.weekdayIndex])}，默认只添加本周这一次。</p>`
+    : !course.weekNumbers?.length
+      ? `<p class="local-week-context is-warning">已识别今天是${escapeHtml(SUNDAY_FIRST_DAY_NAMES[todayInfo.weekdayIndex])}，但尚未设置第一周周日，无法自动计算当前教学周。请在下方直接填写周次，或先到设置页配置学周。</p>`
+      : "";
+  const courseForm = `<div class="local-editor-section"><h4>上课时间</h4>${weekContext}<div class="local-form-grid"><label class="local-form-field local-form-wide"><span>课程名称 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：自动控制补课" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>星期 <em>*</em></span><select id="localWeekday"><option value="">请选择星期</option>${["周日", "周一", "周二", "周三", "周四", "周五", "周六"].map((name, index) => `<option value="${index}" ${course.weekdayIndex === index ? "selected" : ""}>${name}</option>`).join("")}</select></label><label class="local-form-field"><span>开始节次 <em>*</em></span><select id="localStartSection">${localScheduleSectionOptions(course.startSection, "请选择")}</select></label><label class="local-form-field"><span>结束节次 <em>*</em></span><select id="localEndSection">${localScheduleSectionOptions(course.endSection, "请选择", course.startSection)}</select></label></div><div class="local-week-builder"><strong>上课周次 <em>*</em></strong><div class="local-week-range"><label>起始周<input id="localWeekStart" type="number" min="1" max="60" value="${escapeHtml(minWeek)}" placeholder="例如 ${todayInfo.week || 8}" /></label><label>结束周<input id="localWeekEnd" type="number" min="1" max="60" value="${escapeHtml(maxWeek)}" placeholder="临时课与起始周相同" /></label><label>重复<select id="localWeekRepeat"><option value="every" ${repeatValue === "every" ? "selected" : ""}>每周</option><option value="odd" ${repeatValue === "odd" ? "selected" : ""}>单周</option><option value="even" ${repeatValue === "even" ? "selected" : ""}>双周</option><option value="custom" ${repeatValue === "custom" ? "selected" : ""}>自定义周次</option></select></label></div><details class="local-custom-weeks" ${repeatValue === "custom" ? "open" : ""}><summary>自定义周次（可选）</summary><div class="local-week-options">${weekCheckboxes}</div></details></div></div><div class="local-editor-section"><h4>课程信息</h4><div class="local-form-grid"><label class="local-form-field"><span>教师</span><input id="localTeacher" value="${escapeHtml(draft.teacher)}" placeholder="可选" /></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(course.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(course.endTime || "")}" /></label><label class="local-form-field local-form-wide"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label></div></div>`;
   const eventForm = `<div class="local-editor-section"><h4>日程信息</h4><div class="local-form-grid"><label class="local-form-field local-form-wide"><span>标题 <em>*</em></span><input id="localTitle" value="${escapeHtml(draft.title)}" placeholder="例如：摄影社例会" /></label><label class="local-form-field"><span>学期 <em>*</em></span><select id="localTermCode">${termOptions}</select></label><label class="local-form-field"><span>日期 <em>*</em></span><input id="localEventDate" type="date" value="${escapeHtml(event.date || "")}" /></label><label class="local-form-check local-form-wide"><input id="localEventAllDay" type="checkbox" ${event.allDay ? "checked" : ""} /><span>全天日程（不参与时间冲突判断）</span></label><label class="local-form-field"><span>开始时间</span><input id="localStartTime" type="time" value="${escapeHtml(event.startTime || "")}" /></label><label class="local-form-field"><span>结束时间</span><input id="localEndTime" type="time" value="${escapeHtml(event.endTime || "")}" /></label><label class="local-form-field"><span>开始节次（可选）</span><select id="localStartSection">${localScheduleSectionOptions(event.startSection, "未指定")}</select></label><label class="local-form-field"><span>结束节次（可选）</span><select id="localEndSection">${localScheduleSectionOptions(event.endSection, "未指定", event.startSection)}</select></label><label class="local-form-field"><span>地点</span><input id="localLocation" value="${escapeHtml(draft.location)}" placeholder="可选" /></label><label class="local-form-field"><span>备注</span><textarea id="localNote" rows="3" placeholder="可选">${escapeHtml(draft.note)}</textarea></label><p class="local-form-help local-form-wide">一次性日程会按日期显示，即使尚未设置教学周。</p></div></div>`;
   return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-editor-modal" role="dialog" aria-modal="true" aria-label="${type === "event" ? "编辑本地日程" : "编辑本地课程"}"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${draft.id && state.localSchedule.editingId ? "编辑安排" : "添加安排"}</h3><p class="muted">内容只保存在本机，不会写入教务系统或上传到服务器。</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-local-editor">关闭</button></div><div class="local-editor-tabs"><button class="button button-small ${type === "course" ? "button-primary" : "button-ghost"}" type="button" data-action="local-editor-type" data-local-type="course">课程</button><button class="button button-small ${type === "event" ? "button-primary" : "button-ghost"}" type="button" data-action="local-editor-type" data-local-type="event">日程</button></div>${type === "course" ? courseForm : eventForm}<div class="local-editor-section"><h4>颜色</h4><div class="local-color-options">${colorOptions}</div></div>${state.localSchedule.editorError ? `<p class="local-form-error" role="alert">${escapeHtml(state.localSchedule.editorError)}</p>` : ""}<div class="schedule-export-actions"><button class="button button-ghost" type="button" data-action="close-local-editor">取消</button><button class="button button-primary" type="button" data-action="save-local-schedule">保存安排</button></div></section></div>`;
 }
@@ -5957,7 +5996,7 @@ function renderSettingsWithLocalOverlay() {
     ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
     : "插件不会保存账号、密码或验证码。";
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
-  const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /></label></section>`;
+  const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示一般状态提示</strong><small>关闭后隐藏登录过程和普通操作反馈，只保留正在使用缓存或数据已刷新的提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
   return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}</div>`;
 }
 
@@ -6150,11 +6189,15 @@ function localScheduleFormCandidate() {
   }
   const checkedWeeks = [...document.querySelectorAll("[data-local-week]:checked")].map((input) => Number(input.value)).filter((week) => week > 0);
   const repeat = document.getElementById("localWeekRepeat")?.value || "every";
-  const weekStart = Math.max(1, Math.min(60, Number(localScheduleInputValue("localWeekStart")) || 1));
-  const weekEnd = Math.max(weekStart, Math.min(60, Number(localScheduleInputValue("localWeekEnd")) || weekStart));
-  const weekNumbers = repeat === "custom" && checkedWeeks.length
+  const weekStartValue = localScheduleInteger(localScheduleInputValue("localWeekStart"), null);
+  const weekEndValue = localScheduleInteger(localScheduleInputValue("localWeekEnd"), null);
+  const weekStart = weekStartValue === null ? null : Math.max(1, Math.min(60, weekStartValue));
+  const weekEnd = weekStart === null ? null : Math.max(weekStart, Math.min(60, weekEndValue === null ? weekStart : weekEndValue));
+  const weekNumbers = repeat === "custom"
     ? checkedWeeks
-    : Array.from({ length: weekEnd - weekStart + 1 }, (_, index) => weekStart + index).filter((week) => repeat === "odd" ? week % 2 === 1 : repeat === "even" ? week % 2 === 0 : true);
+    : weekStart === null || weekEnd === null
+      ? []
+      : Array.from({ length: weekEnd - weekStart + 1 }, (_, index) => weekStart + index).filter((week) => repeat === "odd" ? week % 2 === 1 : repeat === "even" ? week % 2 === 0 : true);
   return normalizeLocalScheduleItem({
     id: draft.id,
     type,
@@ -9200,12 +9243,21 @@ function localScheduleDraftFromItem(item = null, type = "course") {
         event: { date: localScheduleDate(new Date()), allDay: false, startSection: null, endSection: null }
       });
     }
+    const occurrence = localScheduleDefaultCourseOccurrence();
     return normalizeLocalScheduleItem({
       ...base,
-      course: { weekNumbers: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], weekdayIndex: 1, startSection: 1, endSection: 2 }
+      course: { weekNumbers: occurrence.weekNumbers, weekdayIndex: occurrence.weekdayIndex, startSection: 1, endSection: 2 }
     });
   }
   return normalizeLocalScheduleItem(JSON.parse(JSON.stringify(item)));
+}
+
+function localScheduleDefaultCourseOccurrence(date = new Date()) {
+  const info = academicDayInfo(date);
+  return {
+    weekNumbers: Number.isInteger(info.week) && info.week > 0 ? [info.week] : [],
+    weekdayIndex: info.weekdayIndex
+  };
 }
 
 function localSchedulePayload() {
@@ -9919,7 +9971,7 @@ elements.content.addEventListener("input", (event) => {
 elements.content.addEventListener("change", (event) => {
   if (event.target.id === "toastNotificationsEnabled") {
     const enabled = Boolean(event.target.checked);
-    writeStoredSetting(TOAST_SETTING_KEY, enabled ? "on" : "off");
+    setToastNotificationsEnabled(enabled);
     if (!enabled) showToast("");
     else setNotice("一般状态提示已开启。", "success");
     return;

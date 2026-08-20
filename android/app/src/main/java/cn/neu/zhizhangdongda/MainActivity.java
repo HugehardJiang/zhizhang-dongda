@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.48";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.49";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -373,6 +373,7 @@ public class MainActivity extends Activity {
     // 升级后必须重新以教务系统会话为准，避免“上面已登录、下面未登录”。
     private static final String HAS_ACADEMIC_SESSION = "has_academic_session";
     private static final String DEFAULT_LOGIN_METHOD = "default_login_method";
+    private static final String TOAST_NOTIFICATIONS_ENABLED = "toast_notifications_enabled";
     private static final String BUILT_IN_CREDENTIALS = "built_in_credentials";
     private static final String LAST_ACADEMIC_LOGIN_ERROR = "last_academic_login_error";
     private static final String SAVED_QR_IMAGE_URI = "saved_qr_image_uri";
@@ -3164,6 +3165,18 @@ public class MainActivity extends Activity {
             loginMethodForCurrentPortal = normalized;
             if (preferences != null) {
                 preferences.edit().putString(DEFAULT_LOGIN_METHOD, normalized).apply();
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        public boolean getToastNotificationsEnabled() {
+            return preferences == null || preferences.getBoolean(TOAST_NOTIFICATIONS_ENABLED, true);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setToastNotificationsEnabled(boolean enabled) {
+            if (preferences != null) {
+                preferences.edit().putBoolean(TOAST_NOTIFICATIONS_ENABLED, enabled).apply();
             }
         }
 
