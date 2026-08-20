@@ -1134,7 +1134,7 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 
 /* Dialog / drawer / bottom sheet */
 .modal-backdrop { z-index: 20; display: flex; align-items: stretch; justify-content: flex-end; padding: 0; background: rgba(20, 28, 38, .22); backdrop-filter: none; }
-.detail-modal { width: min(520px, 100%); max-height: 100%; padding: 24px; overflow: auto; background: var(--surface); border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: -12px 0 30px rgba(24, 34, 48, .08); }
+.detail-modal { width: min(520px, 100%); max-height: 100%; padding: 24px; overflow: auto; overscroll-behavior: contain; touch-action: pan-y; background: var(--surface); border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: -12px 0 30px rgba(24, 34, 48, .08); }
 .detail-modal-head { margin-bottom: 18px; }
 .detail-modal-head h3 { margin: 0; color: var(--text-primary); font-size: 18px; font-weight: 650; }
 .detail-modal-head .muted { margin: 4px 0 0; color: var(--text-secondary); font-size: 11px; }
@@ -1196,6 +1196,7 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .toolbar-term > span, .connection, .updated-at, .toolbar-portal-button { display: none; }
   .toolbar-term select { width: 108px; min-width: 108px; height: 32px; min-height: 32px; font-size: 11px; }
   .page-wrap { height: calc(100% - var(--toolbar-height)); flex: 0 0 calc(100% - var(--toolbar-height)); padding: 18px 14px 84px; overflow: auto; }
+  .android-shell.has-modal .page-wrap { overflow: hidden; overscroll-behavior: none; }
   .content-area { width: 100%; }
   .section-heading { align-items: center; margin-bottom: 18px; }
   .section-heading h3 { font-size: 21px; }

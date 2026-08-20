@@ -611,6 +611,25 @@ function setCampusHeaderState(nextState) {
   setNativeEcodePlaceholderHidden(nextState !== CAMPUS_HEADER_VISIBLE);
 }
 
+function resetCampusHeaderPullGesture() {
+  state.mobileShell.topPullActive = false;
+  state.mobileShell.topPullStartY = null;
+}
+
+function nativeEcodeModalOpen() {
+  return Boolean(elements.content?.querySelector?.(".modal-backdrop") || document.querySelector?.(".modal-backdrop"));
+}
+
+function syncNativeEcodeOverlayLock() {
+  const modalOpen = nativeEcodeModalOpen();
+  document.documentElement.classList.toggle("has-modal", modalOpen);
+  if (!IS_ANDROID_APP || !modalOpen) return;
+  // 模态层拥有自己的滚动容器。打开期间，外层 Mobile Shell 不得把
+  // 任何拖动解释为页面顶部下拉；同时隐藏原生校园码，避免它盖住弹窗。
+  resetCampusHeaderPullGesture();
+  setCampusHeaderState(CAMPUS_HEADER_HIDDEN);
+}
+
 function bindNativeEcodeScroll() {
   if (!IS_ANDROID_APP) return;
   const pageWrap = document.querySelector(".page-wrap");
@@ -649,6 +668,10 @@ function bindNativeEcodeScroll() {
   };
 
   const onTouchStart = (event) => {
+    if (nativeEcodeModalOpen()) {
+      resetCampusHeaderPullGesture();
+      return;
+    }
     if (![CAMPUS_HEADER_HIDDEN, CAMPUS_HEADER_HIDDEN_AT_TOP].includes(state.mobileShell.campusHeaderState)) return;
     const currentTop = Math.max(0, pageWrap.scrollTop || 0);
     if (currentTop > 1) return;
@@ -660,6 +683,10 @@ function bindNativeEcodeScroll() {
   };
 
   const onTouchMove = (event) => {
+    if (nativeEcodeModalOpen()) {
+      resetCampusHeaderPullGesture();
+      return;
+    }
     if (!shell.topPullActive || state.mobileShell.campusHeaderState !== CAMPUS_HEADER_HIDDEN_AT_TOP) return;
     const currentTop = Math.max(0, pageWrap.scrollTop || 0);
     if (currentTop > 1) {
@@ -683,10 +710,7 @@ function bindNativeEcodeScroll() {
     }
   };
 
-  const clearTouch = () => {
-    shell.topPullActive = false;
-    shell.topPullStartY = null;
-  };
+  const clearTouch = resetCampusHeaderPullGesture;
 
   pageWrap.addEventListener("scroll", update, { passive: true });
   pageWrap.addEventListener("touchstart", onTouchStart, { passive: true });
@@ -8754,6 +8778,7 @@ function renderAndroidLoginEntry() {
 }
 
 function render() {
+  try {
   if (IS_ANDROID_APP && state.view === "curriculum") state.view = "overview";
   try { updatePersonalTermSelect(); } catch { /* 初始化阶段元素可能尚未准备好 */ }
   const pageTitles = { overview: "总览", personal: "课表", exams: "考试", scores: "成绩", all: "全校课表", curriculum: "培养计划", settings: "设置" };
@@ -8793,6 +8818,11 @@ function render() {
   }
   const loginEntry = renderAndroidLoginEntry();
   if (loginEntry) elements.content.insertAdjacentHTML("beforeend", loginEntry);
+  } finally {
+    // 无论页面走正常渲染、加载占位还是登录错误分支，都同步模态锁；
+    // 这样任意新弹窗都默认隔离校园码手势，不依赖逐个绑定事件。
+    syncNativeEcodeOverlayLock();
+  }
 }
 
 function openPortal() {

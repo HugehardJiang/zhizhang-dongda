@@ -50,6 +50,7 @@ function createEventTarget() {
 
 const elements = new Map();
 const pageWrap = createEventTarget();
+let activeModal = null;
 const nativeCalls = [];
 const androidCurriculumEntry = createElementStub();
 androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; };
@@ -68,7 +69,9 @@ global.document = {
     return elements.get(id);
   },
   querySelector(selector) {
-    return selector === ".page-wrap" ? pageWrap : null;
+    if (selector === ".page-wrap") return pageWrap;
+    if (selector === ".modal-backdrop") return activeModal;
+    return null;
   },
   querySelectorAll(selector) {
     return selector === '[data-view="curriculum"]' ? [androidCurriculumEntry] : [];
@@ -95,6 +98,7 @@ globalThis.__mobileShellAudit = {
   webVpnEncryptHostname,
   renderWebVpnToolModal,
   setNotice,
+  syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
 };
@@ -167,6 +171,8 @@ const dashboardCss = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css')
 assert.ok(dashboardCss.includes('.notice { display: none; }'));
 assert.ok(dashboardCss.includes('bottom: calc(64px + env(safe-area-inset-bottom) + 10px)'));
 assert.ok(!dashboardCss.includes('.toast-region { top: calc(var(--toolbar-height) + 10px)'));
+assert.ok(dashboardCss.includes('.android-shell.has-modal .page-wrap { overflow: hidden; overscroll-behavior: none; }'));
+assert.ok(dashboardCss.includes('overscroll-behavior: contain; touch-action: pan-y;'));
 audit.setNotice('');
 
 const mainActivitySource = fs.readFileSync(path.join(
@@ -226,6 +232,22 @@ pageWrap.dispatch("scroll");
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN_AT_TOP");
 assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), true);
 
+// A modal owns its scroll gesture. Even a long downward drag while the page
+// itself sits at scrollTop 0 must never reveal the native campus-code header.
+activeModal = createElementStub();
+audit.syncModal();
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
+assert.strictEqual(document.documentElement.classList.contains("has-modal"), true);
+pageWrap.dispatch("touchstart", touch(100));
+pageWrap.dispatch("touchmove", touch(190));
+pageWrap.dispatch("touchend", touch(190));
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
+assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), true);
+activeModal = null;
+audit.syncModal();
+assert.strictEqual(document.documentElement.classList.contains("has-modal"), false);
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
+
 // A light tap / 20px drag is ignored; a 64px downward pull reveals it once.
 pageWrap.dispatch("touchstart", touch(100));
 pageWrap.dispatch("touchmove", touch(120));
@@ -236,5 +258,15 @@ pageWrap.dispatch("touchmove", touch(164));
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
 assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), false);
 assert.deepStrictEqual(nativeCalls.slice(-2), [true, false]);
+
+// Opening a modal while the campus code is visible hides it immediately and
+// closing the modal never restores it without a fresh main-page pull.
+activeModal = createElementStub();
+audit.syncModal();
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
+assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), true);
+activeModal = null;
+audit.syncModal();
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
 
 console.log("mobile shell smoke tests: PASS");
