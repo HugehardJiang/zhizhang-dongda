@@ -691,6 +691,7 @@ POST ${KB}/api/qxkbcx/getScheduleTypeList.do?vpn-12-o1-jwxt.neu.edu.cn
 | 类型代码 | `code`、`CODE`、`itemCode`、`DM` |
 | 类型名称 | `name`、`NAME`、`itemName`、`MC` |
 | 查询动作 | `queryAction`、`QUERYACTION`、`query_action`、`action` |
+| 权限标识 | `permission`、`PERMISSION` |
 
 原系统的权威映射通常为：
 
@@ -700,7 +701,7 @@ POST ${KB}/api/qxkbcx/getScheduleTypeList.do?vpn-12-o1-jwxt.neu.edu.cn
 | 教师课表 | `lslb` | `modules/qxkbcx/lslb.do` |
 | 教室课表 | `jslb` | `modules/qxkbcx/jslb.do` |
 
-不要只根据中文名称拼接后缀，因为教师和教室的原系统缩写不是同名拼音首字母。
+原系统还会返回当前账号没有权限的内部报表类型；前端应按原系统的权限结果过滤后再展示。不要只根据中文名称拼接后缀，因为教师和教室的原系统缩写不是同名拼音首字母。
 
 ### 8.2 查询班级/教师/教室列表
 
@@ -866,7 +867,7 @@ XQDM=00
 教室：CODE、WID、JASDM、JASCODE、roomCode、roomId
 ```
 
-详情响应仍然用 `extractCourseRows` 一类的递归课程数组识别，并映射成个人课表相同的课程结构。
+详情响应仍然用 `extractCourseRows` 一类的递归课程数组识别，并映射成个人课表相同的课程结构。`KBLX` 优先使用 `getScheduleTypeList.do` 返回的类型 `code`（当前部署教室=01、教师=02、班级=05）；旧版 06/07 只作为兼容候选。若网格接口已经返回课程，应直接展示，不要继续请求当前 WebVPN 会返回 403 的 `cxkblbms.do`。
 
 ### 8.5 体育课程名称弹窗：项目、教师和教学班明细
 
@@ -1573,7 +1574,8 @@ const key = [
 6. 如果具体课程已经按课程号或课程名匹配成功，不得再按类别重复计入；
 7. UI 应在课组上显示“通识选修类别计入”及门数/学分，让用户知道这不是培养方案接口漏读。
 8. 通识选修通常有三个类别；类别名称/代码应优先取成绩行的 `XGXKLBDM_DISPLAY`、`XGXKLBDM` 等字段，与课组名称、课组分类或课组原始代码做标准化匹配。匹配成功后，已通过成绩只在当前页面内作为补充课程行插入对应课组，课程名、课程号、学分和获得学期都来自成绩记录；这不是对教务系统的写入。
-9. 导出 PDF 时必须使用原始 `group.courses`，不要把这些前端补充课程行混入导出数据；导出结果不应出现“已选通识选修”、成绩、个人完成情况或其他个人信息。
+9. 进度统计必须按课组最低/总要求、必修要求、选修要求和方案总学分分别封顶；超出某一类别要求的已通过课程仍保留在课程明细中，但不得把“已获得”显示到要求以上，也不得让“剩余所需”出现负数。
+10. 导出 PDF 时必须使用原始 `group.courses`，不要把这些前端补充课程行混入导出数据；导出结果不应出现“已选通识选修”、成绩、个人完成情况或其他个人信息。
 
 示例伪代码：
 
@@ -1729,3 +1731,37 @@ rows.sort((a, b) => collator.compare(a.courseName, b.courseName));
 6. 课程名称、教师、地点只用于展示和辅助判断，不替代周次、星期、节次的时间交集判断。
 
 撞课功能只读当前全校课表明细内存数据和导入文本，不调用写接口、不修改选课或教务数据。
+
+## 15. 本地课表覆盖层
+
+本地课程和一次性日程是个人课表的独立覆盖层，不是教务接口的写入模型。学校接口返回的数据仍只进入 `state.data.courses`、`state.data.scheduleDetail` 和个人教务缓存；本地数据保存在 `state.localSchedule`，渲染前由 `mergedPersonalScheduleRows()` 组合。
+
+### 15.1 数据结构与存储
+
+持久化顶层结构固定为 `zhizhang-local-schedule/v1`：
+
+```json
+{
+  "schema": "zhizhang-local-schedule/v1",
+  "schemaVersion": 1,
+  "profileKey": "学号或 anonymous",
+  "studentId": "学号",
+  "savedAt": "2026-08-18T06:00:00.000Z",
+  "items": [],
+  "hiddenSchoolEntries": []
+}
+```
+
+`items` 中的记录使用 `source: "local"`，`type` 为 `course` 或 `event`。重复课程使用 `course.weekNumbers`、`weekdayIndex`、节次和可选的起止时间；一次性日程使用 `event.date`，可以是全天、具体时间或可选节次。`excludedWeeks` 和 `excludedDates` 只表示本地例外，不会改变学校原始记录。
+
+Chrome 写入 `chrome.storage.local`，键名由稳定哈希后的 profile key 生成；非扩展测试/文件环境才回退到 localStorage。Android 写入应用内部 `local-schedule/`，文件名为 profile key 的 SHA-256；写入先保存到同目录临时文件，再进行原子替换。个人教务缓存仍位于独立的 `personal-cache/`，两个清除操作互不影响。
+
+### 15.2 合并与冲突
+
+合并顺序是“未被本地隐藏的学校排课 + 当前学期启用的本地记录”。刷新、切换学期和读取缓存都不应删除 `state.localSchedule`。当用户选择“仅保留新安排”时，只新增 `hiddenSchoolEntries` 的稳定排课键；学校数组和学校缓存永远不被删除或修改，管理页可以恢复隐藏记录。
+
+冲突判断复用 `compareCourseScheduleOverlap()` 的星期、周次、节次和具体时间逻辑，并扩展实际日期事件：全天日程默认不参与冲突；有具体日期的事件无需先设置第一周日期即可显示和参与日期判断；若重复课程无法由当前学周映射到事件日期，则标记“可能冲突”并列出缺失的教学周，而不是声称确定冲突。不同学期不参与比较。
+
+### 15.3 展示与导出边界
+
+总览、个人课表日视图、周表、搜索、PNG 和 CSV 都读取合并层。没有节次的一次性日程进入周表下方的“其他日程”区域和 PNG 的未定位区域；CSV 的 WakeUp 格式无法表达没有教学周或节次的日期事件时，不伪造周次/节次，而是在导出提示中报告跳过数量。Android 继续隐藏培养计划入口，但本地课表覆盖层保留。

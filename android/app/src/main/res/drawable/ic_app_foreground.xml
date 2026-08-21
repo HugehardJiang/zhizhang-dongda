@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 展开的书页：对应课表、成绩与教务信息。 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M18,31 C30,27 43,30 52,37 L52,82 C43,75 31,72 18,76 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M90,31 C78,27 65,30 56,37 L56,82 C65,75 77,72 90,76 Z" />
+    <!-- 中央金色书脊象征“执掌”和快速入口。 -->
+    <path
+        android:fillColor="#FFFFC857"
+        android:pathData="M51,35 L57,35 L57,82 L54,79 L51,82 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#3D79A4"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M26,43 C34,41 41,43 47,47" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#3D79A4"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M26,52 C34,50 41,52 47,56" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#3D79A4"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M82,43 C74,41 67,43 61,47" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#3D79A4"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M82,52 C74,50 67,52 61,56" />
+</vector>

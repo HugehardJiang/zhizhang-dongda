@@ -10,8 +10,8 @@ android {
         applicationId = "cn.neu.zhizhangdongda"
         minSdk = 24
         targetSdk = 35
-        versionCode = 35
-        versionName = "0.1.35"
+        versionCode = 57
+        versionName = "0.1.57"
     }
 
     buildTypes {
@@ -51,6 +51,9 @@ val syncWebAssets = tasks.register<Copy>("syncWebAssets") {
     from(projectDir.resolve("../../dashboard.html"))
     from(projectDir.resolve("../../dashboard.css"))
     from(projectDir.resolve("../../dashboard.js"))
+    from(projectDir.resolve("../../vendor")) {
+        into("vendor")
+    }
     into(layout.buildDirectory.dir("generated/web-assets"))
 }
 

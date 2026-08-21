@@ -53,7 +53,7 @@
         </nav>
         <div class="sidebar-footer">
           <button class="nav-item" data-view="settings" type="button">
-            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.6 4.7.5-1.7h3.8l.5 1.7 1.4.8 1.7-.5 1.9 3.3-1.2 1.2v1.6l1.2 1.2-1.9 3.3-1.7-.5-1.4.8-.5 1.7h-3.8l-.5-1.7-1.4-.8-1.7.5-1.9-3.3 1.2-1.2V9.5L4.6 8.3l1.9-3.3 1.7.5 1.4-.8ZM12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
+            <svg class="nav-icon settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.6 4.7.5-1.7h3.8l.5 1.7 1.4.8 1.7-.5 1.9 3.3-1.2 1.2v1.6l1.2 1.2-1.9 3.3-1.7-.5-1.4.8-.5 1.7h-3.8l-.5-1.7-1.4-.8-1.7.5-1.9-3.3 1.2-1.2V9.5L4.6 8.3l1.9-3.3 1.7.5 1.4-.8Z"/><path class="settings-nav-center" d="M12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
             <span>设置</span>
           </button>
         </div>
@@ -79,7 +79,7 @@
         </header>
 
         <main class="page-wrap">
-          <div id="notice" class="notice" role="status" aria-live="polite"></div>
+          <div id="notice" class="notice" hidden aria-hidden="true"></div>
           <section id="content" class="content-area" aria-live="polite"></section>
         </main>
 
@@ -101,13 +101,15 @@
             <span>考试</span>
           </button>
           <button class="mobile-nav-item" data-view="settings" type="button">
-            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.6 4.7.5-1.7h3.8l.5 1.7 1.4.8 1.7-.5 1.9 3.3-1.2 1.2v1.6l1.2 1.2-1.9 3.3-1.7-.5-1.4.8-.5 1.7h-3.8l-.5-1.7-1.4-.8-1.7.5-1.9-3.3 1.2-1.2V9.5L4.6 8.3l1.9-3.3 1.7.5 1.4-.8ZM12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
+            <svg class="nav-icon settings-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.6 4.7.5-1.7h3.8l.5 1.7 1.4.8 1.7-.5 1.9 3.3-1.2 1.2v1.6l1.2 1.2-1.9 3.3-1.7-.5-1.4.8-.5 1.7h-3.8l-.5-1.7-1.4-.8-1.7.5-1.9-3.3 1.2-1.2V9.5L4.6 8.3l1.9-3.3 1.7.5 1.4-.8Z"/><path class="settings-nav-center" d="M12 14.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
             <span>更多</span>
           </button>
         </nav>
       </div>
     </div>
     <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="vendor/html2canvas.min.js"></script>
+    <script src="vendor/jspdf.umd.min.js"></script>
     <script src="dashboard.js"></script>
   </body>
 </html>
