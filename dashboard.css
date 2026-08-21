@@ -346,7 +346,8 @@ td.score-cell { color: #315cc9; font-size: 16px; font-weight: 800; }
 .android-login-entry-copy strong { display: block; margin-bottom: 4px; color: #8a6323; font-size: 13px; }
 .android-login-entry-copy p { margin: 0; font-size: 12px; line-height: 1.6; }
 .android-login-entry-copy small { display: block; margin-top: 5px; color: #9a8a6b; font-size: 10px; }
-.android-login-entry .button { flex: 0 0 auto; }
+.android-login-entry-actions, .android-login-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; }
+.android-login-entry .button, .android-login-actions .button { flex: 0 0 auto; }
 .course-records-details { margin-top: 14px; border: 1px solid #e2e9f5; border-radius: 12px; background: #fbfcff; overflow: hidden; }
 .course-records-details summary { padding: 12px 13px; color: #52698e; cursor: pointer; font-size: 12px; font-weight: 800; }
 .course-records-details[open] summary { border-bottom: 1px solid #e2e9f5; }
@@ -1203,6 +1204,7 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .android-login-entry-copy strong { color: var(--text-primary); font-size: 12px; }
 .android-login-entry-copy p { display: none; }
 .android-login-entry-copy small { color: var(--text-tertiary); font-size: 10px; }
+.android-login-entry-actions { margin-left: auto; }
 
 @media (max-width: 899px) {
   :root { --toolbar-height: 58px; }
@@ -1318,7 +1320,8 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .course-transfer-modal, .schedule-export-modal { width: 100%; }
   .course-transfer-textarea { min-height: 200px; }
   .android-login-entry { align-items: flex-start; flex-direction: column; }
-  .android-login-entry .button { width: 100%; }
+  .android-login-entry-actions, .android-login-actions { width: 100%; }
+  .android-login-entry .button, .android-login-actions .button { width: 100%; }
 }
 
 @media (min-width: 900px) and (max-width: 1180px) {

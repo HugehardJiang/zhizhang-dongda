@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.animation.ValueAnimator;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -65,8 +67,12 @@ import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.KeyStore;
+import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
+import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -97,7 +103,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.56";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.57";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -378,6 +384,7 @@ public class MainActivity extends Activity {
     private static final String CAMPUS_SETTING = "campus_setting_v1";
     private static final String BUILT_IN_CREDENTIALS = "built_in_credentials";
     private static final String LAST_ACADEMIC_LOGIN_ERROR = "last_academic_login_error";
+    private static final String LAST_LOGIN_DIAGNOSTICS = "last_login_diagnostics";
     private static final String SAVED_QR_IMAGE_URI = "saved_qr_image_uri";
     private static final String SAVED_QR_IMAGE_PATH = "saved_qr_image_path";
     private static final String LOGIN_METHOD_BUILT_IN = "builtin";
@@ -386,6 +393,8 @@ public class MainActivity extends Activity {
     private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
     private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
     private static final int BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS = 2;
+    private static final int LOGIN_DIAGNOSTIC_EVENT_MAX = 120;
+    private static final int LOGIN_DIAGNOSTICS_MAX_CHARS = 60000;
     private static final int WRITE_QR_STORAGE_REQUEST = 2201;
     private static final int WRITE_DASHBOARD_IMAGE_REQUEST = 2202;
     private static final int WRITE_DASHBOARD_CSV_REQUEST = 2203;
@@ -592,6 +601,29 @@ public class MainActivity extends Activity {
     private String pendingBuiltInUsername = "";
     private String pendingBuiltInPassword = "";
     private String lastAcademicLoginError = "";
+    private String lastLoginDiagnostics = "";
+
+    // 登录诊断只保存脱敏后的阶段、页面元数据和错误摘要，不保存密码、验证码、Cookie
+    // 值、Token 或完整查询参数。事件保存在内存中，并在失败后保存一份有限长度的报告，
+    // 方便用户在应用重启后仍能复制给开发者定位问题。
+    private final Object loginDiagnosticLock = new Object();
+    private final ArrayDeque<String> loginDiagnosticEvents = new ArrayDeque<>();
+    private long loginDiagnosticStartedAt;
+    private long loginDiagnosticFinishedAt;
+    private int loginDiagnosticAttemptNumber;
+    private String loginDiagnosticStatus = "idle";
+    private String loginDiagnosticScope = "academic";
+    private String loginDiagnosticPhase = "idle";
+    private boolean loginDiagnosticBackground;
+    private String loginDiagnosticLastUrl = "";
+    private String loginDiagnosticLastTitle = "";
+    private String loginDiagnosticLastMessage = "";
+    private int loginDiagnosticLastHttpStatus = -1;
+    private String loginDiagnosticLastHttpUrl = "";
+    private String loginDiagnosticLastWebError = "";
+    private String loginDiagnosticLastWebErrorUrl = "";
+    private boolean loginDiagnosticCredentialsAvailable;
+    private boolean loginDiagnosticTrustDeviceRequested;
 
     private static final class LoginCredentials {
         final String username;
@@ -620,6 +652,7 @@ public class MainActivity extends Activity {
         }
         loginMethodForCurrentPortal = readLoginMethodPreference();
         lastAcademicLoginError = preferences.getString(LAST_ACADEMIC_LOGIN_ERROR, "");
+        lastLoginDiagnostics = preferences.getString(LAST_LOGIN_DIAGNOSTICS, "");
         savedQrImageUri = preferences.getString(SAVED_QR_IMAGE_URI, "");
         savedQrImagePath = preferences.getString(SAVED_QR_IMAGE_PATH, "");
 
@@ -741,6 +774,9 @@ public class MainActivity extends Activity {
                     clearPendingQrUrl();
                     portalLoginService = extractLoginService(url);
                     updatePortalActionLabel(url);
+                    if (builtInLoginSubmissionPending) {
+                        recordLoginDiagnosticPage("page-started", view, url);
+                    }
                 }
                 if (view == ecodeWebView) {
                     Log.d(LOG_TAG, "page-started url=" + url);
@@ -763,6 +799,9 @@ public class MainActivity extends Activity {
                 if (view == portalWebView) {
                     portalLoginService = extractLoginService(url);
                     updatePortalActionLabel(url);
+                    if (builtInLoginSubmissionPending) {
+                        recordLoginDiagnosticPage("page-finished", view, url);
+                    }
                     installPortalQrCapture();
                     showQrActionLoadingIfNeeded(url);
                     showLoginMethodChooserIfNeeded(url);
@@ -808,6 +847,19 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceError error) {
                 super.onReceivedError(view, request, error);
+                if (view == portalWebView && builtInLoginSubmissionPending
+                        && (request == null || request.isForMainFrame())) {
+                    String description = error == null ? "未知 WebView 错误" : String.valueOf(error.getDescription());
+                    int errorCode = error == null ? -1 : error.getErrorCode();
+                    String errorUrl = request == null || request.getUrl() == null
+                            ? view.getUrl() : request.getUrl().toString();
+                    recordLoginDiagnostic(
+                            "web-error",
+                            "mainFrame=true code=" + errorCode + " description=" + sanitizeDiagnosticText(description)
+                                    + " url=" + sanitizeDiagnosticUrl(errorUrl)
+                    );
+                    updateLoginDiagnosticWebError(description, errorUrl);
+                }
                 if (view == ecodeWebView && (request == null || request.isForMainFrame())) {
                     String description = error == null ? "未知网络错误" : String.valueOf(error.getDescription());
                     Log.e(LOG_TAG, "main-frame-error url=" + (request == null ? "" : request.getUrl()) + " description=" + description);
@@ -818,6 +870,16 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceResponse response) {
                 super.onReceivedHttpError(view, request, response);
+                if (view == portalWebView && builtInLoginSubmissionPending
+                        && request != null && request.isForMainFrame()) {
+                    int status = response == null ? -1 : response.getStatusCode();
+                    String errorUrl = request.getUrl() == null ? view.getUrl() : request.getUrl().toString();
+                    recordLoginDiagnostic(
+                            "http-error",
+                            "mainFrame=true status=" + status + " url=" + sanitizeDiagnosticUrl(errorUrl)
+                    );
+                    updateLoginDiagnosticHttpError(status, errorUrl);
+                }
                 if (view == ecodeWebView && request != null && request.isForMainFrame()) {
                     int status = response == null ? -1 : response.getStatusCode();
                     Log.e(LOG_TAG, "main-frame-http-error url=" + request.getUrl() + " status=" + status);
@@ -1210,6 +1272,234 @@ public class MainActivity extends Activity {
         return error.getMessage().trim();
     }
 
+    private String diagnosticTimestamp(long timeMillis) {
+        if (timeMillis <= 0) return "未记录";
+        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS Z", Locale.ROOT)
+                .format(new Date(timeMillis));
+    }
+
+    private String sanitizeDiagnosticText(String value) {
+        if (value == null || value.trim().isEmpty()) return "";
+        String text = value.replace('\n', ' ').replace('\r', ' ').replaceAll("\\s+", " ").trim();
+        text = text.replaceAll(
+                "(?i)(password|passwd|pwd|token|ticket|authorization|cookie|session|mcode|验证码|密码|学号|username|user)\\s*[=:：]\\s*[^\\s,;；)）]+",
+                "$1=<已脱敏>"
+        );
+        return text.length() > 500 ? text.substring(0, 500) + "…" : text;
+    }
+
+    private String sanitizeDiagnosticUrl(String rawUrl) {
+        if (rawUrl == null || rawUrl.trim().isEmpty()) return "未记录";
+        try {
+            Uri parsed = Uri.parse(rawUrl);
+            String scheme = parsed.getScheme() == null ? "" : parsed.getScheme();
+            String host = parsed.getHost() == null ? "" : parsed.getHost();
+            String path = parsed.getPath() == null || parsed.getPath().isEmpty() ? "/" : parsed.getPath();
+            StringBuilder result = new StringBuilder();
+            if (!scheme.isEmpty()) result.append(scheme).append("://");
+            if (!host.isEmpty()) result.append(host);
+            result.append(path);
+            String query = parsed.getEncodedQuery();
+            if (query != null && !query.isEmpty()) {
+                result.append("?");
+                String[] parts = query.split("&");
+                for (int index = 0; index < parts.length; index += 1) {
+                    if (index > 0) result.append("&");
+                    String key = parts[index];
+                    int equals = key.indexOf('=');
+                    if (equals >= 0) key = key.substring(0, equals);
+                    result.append(key.isEmpty() ? "<参数>" : key).append("=<已脱敏>");
+                }
+            }
+            if (parsed.getEncodedFragment() != null) result.append("#<已脱敏>");
+            return result.toString();
+        } catch (RuntimeException error) {
+            return "<无法解析的地址>";
+        }
+    }
+
+    private void beginLoginDiagnostics(boolean background, boolean credentialsAvailable) {
+        long now = System.currentTimeMillis();
+        synchronized (loginDiagnosticLock) {
+            loginDiagnosticEvents.clear();
+            loginDiagnosticStartedAt = now;
+            loginDiagnosticFinishedAt = 0L;
+            loginDiagnosticAttemptNumber += 1;
+            loginDiagnosticStatus = "running";
+            loginDiagnosticScope = background && backgroundLoginForEcode ? "ecode" : "academic";
+            loginDiagnosticBackground = background;
+            loginDiagnosticPhase = "starting";
+            loginDiagnosticLastUrl = "";
+            loginDiagnosticLastTitle = "";
+            loginDiagnosticLastMessage = "";
+            loginDiagnosticLastHttpStatus = -1;
+            loginDiagnosticLastHttpUrl = "";
+            loginDiagnosticLastWebError = "";
+            loginDiagnosticLastWebErrorUrl = "";
+            loginDiagnosticCredentialsAvailable = credentialsAvailable;
+            loginDiagnosticTrustDeviceRequested = !background
+                    && builtInTrustDeviceCheck != null
+                    && builtInTrustDeviceCheck.isChecked();
+        }
+        recordLoginDiagnostic(
+                "start",
+                "trigger=" + (background ? "background" : "manual")
+                        + " scope=" + loginDiagnosticScope
+                        + " encryptedCredentials=" + (credentialsAvailable ? "present" : "missing")
+                        + " trustDevice=" + (loginDiagnosticTrustDeviceRequested ? "enabled" : "disabled/not-applicable")
+        );
+    }
+
+    private void recordLoginDiagnostic(String phase, String detail) {
+        long now = System.currentTimeMillis();
+        synchronized (loginDiagnosticLock) {
+            if (loginDiagnosticStartedAt <= 0L) {
+                loginDiagnosticStartedAt = now;
+                loginDiagnosticStatus = "running";
+            }
+            loginDiagnosticPhase = phase == null || phase.trim().isEmpty() ? "unknown" : phase.trim();
+            loginDiagnosticLastMessage = sanitizeDiagnosticText(detail);
+            long elapsed = Math.max(0L, now - loginDiagnosticStartedAt);
+            String event = "[" + diagnosticTimestamp(now) + "] +" + elapsed + "ms ["
+                    + loginDiagnosticPhase + "] " + loginDiagnosticLastMessage;
+            while (loginDiagnosticEvents.size() >= LOGIN_DIAGNOSTIC_EVENT_MAX) {
+                loginDiagnosticEvents.removeFirst();
+            }
+            loginDiagnosticEvents.addLast(event);
+        }
+    }
+
+    private void recordLoginDiagnosticPage(String phase, WebView view, String url) {
+        String safeUrl = sanitizeDiagnosticUrl(url);
+        String title = view == null ? "" : view.getTitle();
+        String safeTitle = sanitizeDiagnosticText(title);
+        synchronized (loginDiagnosticLock) {
+            loginDiagnosticLastUrl = safeUrl;
+            loginDiagnosticLastTitle = safeTitle;
+        }
+        recordLoginDiagnostic(
+                phase,
+                "url=" + safeUrl + " title=" + (safeTitle.isEmpty() ? "<无标题>" : safeTitle)
+        );
+    }
+
+    private void updateLoginDiagnosticHttpError(int status, String url) {
+        synchronized (loginDiagnosticLock) {
+            loginDiagnosticLastHttpStatus = status;
+            loginDiagnosticLastHttpUrl = sanitizeDiagnosticUrl(url);
+        }
+    }
+
+    private void updateLoginDiagnosticWebError(String message, String url) {
+        synchronized (loginDiagnosticLock) {
+            loginDiagnosticLastWebError = sanitizeDiagnosticText(message);
+            loginDiagnosticLastWebErrorUrl = sanitizeDiagnosticUrl(url);
+        }
+    }
+
+    private String appVersionForDiagnostics() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return info.versionName == null ? "未知" : info.versionName;
+        } catch (Exception ignored) {
+            return "未知";
+        }
+    }
+
+    private String webViewVersionForDiagnostics() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return "系统未提供版本信息";
+        try {
+            android.content.pm.PackageInfo info = WebView.getCurrentWebViewPackage();
+            if (info == null) return "未知";
+            return info.packageName + " " + (info.versionName == null ? "未知" : info.versionName);
+        } catch (RuntimeException ignored) {
+            return "读取失败";
+        }
+    }
+
+    private String buildLoginDiagnostics() {
+        synchronized (loginDiagnosticLock) {
+            if (loginDiagnosticStartedAt <= 0L && lastLoginDiagnostics != null && !lastLoginDiagnostics.isEmpty()) {
+                return lastLoginDiagnostics;
+            }
+            long end = loginDiagnosticFinishedAt > 0L ? loginDiagnosticFinishedAt : System.currentTimeMillis();
+            long duration = loginDiagnosticStartedAt > 0L
+                    ? Math.max(0L, end - loginDiagnosticStartedAt)
+                    : 0L;
+            StringBuilder report = new StringBuilder();
+            report.append("执掌东大 Android 登录诊断报告\n");
+            report.append("说明：以下内容已脱敏，不包含密码、验证码、Cookie 值、Token 或完整查询参数。\n\n");
+            report.append("【运行环境】\n");
+            report.append("应用版本：").append(appVersionForDiagnostics()).append("\n");
+            report.append("Android：").append(Build.VERSION.RELEASE).append(" (API ").append(Build.VERSION.SDK_INT).append(")\n");
+            report.append("设备：").append(Build.MANUFACTURER).append(" ").append(Build.MODEL).append("\n");
+            report.append("WebView：").append(webViewVersionForDiagnostics()).append("\n");
+            report.append("生成时间：").append(diagnosticTimestamp(System.currentTimeMillis())).append("\n\n");
+            report.append("【登录尝试】\n");
+            report.append("范围：").append("ecode".equals(loginDiagnosticScope) ? "E 码通" : "教务系统").append("\n");
+            report.append("触发方式：").append(loginDiagnosticBackground ? "后台自动登录" : "内置登录/手动触发").append("\n");
+            report.append("状态：").append(loginDiagnosticStatus).append("\n");
+            report.append("当前阶段：").append(loginDiagnosticPhase).append("\n");
+            report.append("尝试编号：").append(loginDiagnosticAttemptNumber).append("\n");
+            report.append("开始时间：").append(diagnosticTimestamp(loginDiagnosticStartedAt)).append("\n");
+            report.append("结束时间：").append(diagnosticTimestamp(loginDiagnosticFinishedAt)).append("\n");
+            report.append("耗时：").append(duration).append(" ms\n");
+            report.append("本机加密凭据：").append(loginDiagnosticCredentialsAvailable ? "存在" : "不存在/不可用").append("\n");
+            report.append("本次信任设备选项：").append(loginDiagnosticTrustDeviceRequested ? "开启" : "关闭或不适用").append("\n");
+            report.append("最终错误：").append(loginDiagnosticLastMessage.isEmpty() ? "未记录" : loginDiagnosticLastMessage).append("\n\n");
+            report.append("【页面与网络摘要】\n");
+            report.append("最后页面：").append(loginDiagnosticLastUrl.isEmpty() ? "未记录" : loginDiagnosticLastUrl).append("\n");
+            report.append("页面标题：").append(loginDiagnosticLastTitle.isEmpty() ? "未记录" : loginDiagnosticLastTitle).append("\n");
+            report.append("最后主文档 HTTP：").append(loginDiagnosticLastHttpStatus < 0 ? "未记录" : loginDiagnosticLastHttpStatus).append("\n");
+            report.append("HTTP 地址：").append(loginDiagnosticLastHttpUrl.isEmpty() ? "未记录" : loginDiagnosticLastHttpUrl).append("\n");
+            report.append("最后 WebView 错误：").append(loginDiagnosticLastWebError.isEmpty() ? "未记录" : loginDiagnosticLastWebError).append("\n");
+            report.append("WebView 错误地址：").append(loginDiagnosticLastWebErrorUrl.isEmpty() ? "未记录" : loginDiagnosticLastWebErrorUrl).append("\n\n");
+            report.append("【事件时间线】\n");
+            if (loginDiagnosticEvents.isEmpty()) {
+                report.append("未记录到登录事件。\n");
+            } else {
+                for (String event : loginDiagnosticEvents) report.append(event).append("\n");
+            }
+            String result = report.toString();
+            return result.length() > LOGIN_DIAGNOSTICS_MAX_CHARS
+                    ? result.substring(0, LOGIN_DIAGNOSTICS_MAX_CHARS) + "\n[报告已截断]"
+                    : result;
+        }
+    }
+
+    private void finishLoginDiagnosticsFailure(String message) {
+        synchronized (loginDiagnosticLock) {
+            if (loginDiagnosticStartedAt <= 0L) {
+                loginDiagnosticStartedAt = System.currentTimeMillis();
+            }
+            loginDiagnosticStatus = "failed";
+            loginDiagnosticPhase = "failed";
+            loginDiagnosticFinishedAt = System.currentTimeMillis();
+            loginDiagnosticLastMessage = sanitizeDiagnosticText(message);
+            String report = buildLoginDiagnostics();
+            lastLoginDiagnostics = report;
+            if (preferences != null) preferences.edit().putString(LAST_LOGIN_DIAGNOSTICS, report).apply();
+        }
+    }
+
+    private void finishLoginDiagnosticsSuccess() {
+        synchronized (loginDiagnosticLock) {
+            loginDiagnosticStatus = "success";
+            loginDiagnosticPhase = "success";
+            loginDiagnosticFinishedAt = System.currentTimeMillis();
+            lastLoginDiagnostics = "";
+            if (preferences != null) preferences.edit().remove(LAST_LOGIN_DIAGNOSTICS).apply();
+        }
+    }
+
+    private boolean copyLoginDiagnosticsToClipboard() {
+        String report = buildLoginDiagnostics();
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) return false;
+        clipboard.setPrimaryClip(ClipData.newPlainText("执掌东大登录诊断信息", report));
+        return true;
+    }
+
     private File personalCacheDirectory() {
         File directory = new File(getFilesDir(), PERSONAL_CACHE_DIRECTORY);
         if (!directory.exists()) directory.mkdirs();
@@ -1538,6 +1828,10 @@ public class MainActivity extends Activity {
             );
         }
         if (!credentials.isComplete()) {
+            if (!background || loginDiagnosticStartedAt <= 0L) {
+                beginLoginDiagnostics(background, false);
+            }
+            recordLoginDiagnostic("credentials", "账号或密码字段不完整，未提交学校登录表单");
             finishBuiltInLoginFailure("内置登录失败：请完整输入学号和密码。", background);
             return;
         }
@@ -1550,6 +1844,13 @@ public class MainActivity extends Activity {
         builtInLoginInspectionAttempts = 0;
         builtInLoginPortalProbeAttempts = 0;
         builtInLoginPortalProbeScheduled = false;
+        if (!background) backgroundLoginForEcode = false;
+        beginLoginDiagnostics(background, true);
+        recordLoginDiagnostic(
+                "credentials",
+                "已准备提交账号密码；reason="
+                        + sanitizeDiagnosticText(backgroundLoginForEcode ? "E码通会话失效" : pendingAcademicFailureReason)
+        );
         if (!background) {
             showBuiltInChallenge(false);
             setBuiltInLoginStatus("正在连接学校统一身份认证…", false);
@@ -1617,6 +1918,12 @@ public class MainActivity extends Activity {
         String target = backgroundLoginForEcode
                 ? ECODE_URL
                 : (builtInLoginPortalProbeAttempts == 1 ? PORTAL_URL : PORTAL_FALLBACK_URL);
+        recordLoginDiagnostic(
+                "portal-probe",
+                "attempt=" + builtInLoginPortalProbeAttempts
+                        + " target=" + sanitizeDiagnosticUrl(target)
+                        + " observed=" + sanitizeDiagnosticUrl(observedUrl)
+        );
         Log.d(LOG_TAG, "built-in login portal probe=" + builtInLoginPortalProbeAttempts
                 + " from=" + builtInLoginPageDescription(observedUrl));
         portalWebView.loadUrl(target);
@@ -1663,11 +1970,14 @@ public class MainActivity extends Activity {
         portalWebView.evaluateJavascript(script, value -> {
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
+                recordLoginDiagnostic("form-submit", "submitted=" + result.optBoolean("ok", false)
+                        + (result.has("error") ? " error=" + sanitizeDiagnosticText(result.optString("error", "")) : ""));
                 if (!result.optBoolean("ok", false)) {
                     finishBuiltInLoginFailure("内置登录失败：" + result.optString("error", "无法提交学校登录表单"), backgroundLoginInProgress);
                     return;
                 }
             } catch (Exception error) {
+                recordLoginDiagnostic("form-submit", "无法解析学校登录表单提交结果：" + safeErrorMessage(error));
                 finishBuiltInLoginFailure("内置登录失败：无法确认学校登录表单是否提交。", backgroundLoginInProgress);
                 return;
             }
@@ -1705,6 +2015,14 @@ public class MainActivity extends Activity {
                 String errorText = result.optString("error", "").trim();
                 boolean challenge = result.optBoolean("challenge", false);
                 boolean loginForm = result.optBoolean("loginForm", false);
+                recordLoginDiagnostic(
+                        "inspect",
+                        "url=" + sanitizeDiagnosticUrl(currentUrl)
+                                + " challenge=" + challenge
+                                + " loginForm=" + loginForm
+                                + " sendCode=" + result.optBoolean("sendAvailable", false)
+                                + (errorText.isEmpty() ? "" : " schoolError=" + sanitizeDiagnosticText(errorText))
+                );
                 if (challenge) {
                     if (backgroundLoginInProgress) {
                         finishBuiltInLoginFailure(
@@ -1738,6 +2056,7 @@ public class MainActivity extends Activity {
                     return;
                 }
             } catch (Exception ignored) {
+                recordLoginDiagnostic("inspect", "无法解析登录页检查结果，继续等待页面稳定");
                 // 页面仍在跳转时可能暂时无法读取结果，继续短暂轮询。
             }
             if (builtInLoginInspectionAttempts >= LOGIN_INSPECTION_MAX_ATTEMPTS) {
@@ -1818,6 +2137,7 @@ public class MainActivity extends Activity {
     }
 
     private void finishBuiltInLoginSuccess() {
+        finishLoginDiagnosticsSuccess();
         boolean wasBackground = backgroundLoginInProgress;
         boolean wasForEcode = wasBackground && backgroundLoginForEcode;
         if (!wasBackground && builtInTrustDeviceCheck != null && builtInTrustDeviceCheck.isChecked()) {
@@ -1864,6 +2184,11 @@ public class MainActivity extends Activity {
 
     private void finishBuiltInLoginFailure(String message, boolean background) {
         String fullMessage = message == null || message.trim().isEmpty() ? "内置登录失败：未知错误" : message.trim();
+        if (loginDiagnosticStartedAt <= 0L || !"running".equals(loginDiagnosticStatus)) {
+            beginLoginDiagnostics(background, background && loadBuiltInCredentials().isComplete());
+        }
+        recordLoginDiagnostic("failure", fullMessage);
+        finishLoginDiagnosticsFailure(fullMessage);
         boolean wasForEcode = background && backgroundLoginForEcode;
         boolean academicAlsoInvalid = !pendingAcademicFailureReason.isEmpty();
         pendingBuiltInPassword = "";
@@ -1949,6 +2274,14 @@ public class MainActivity extends Activity {
         } else {
             failure += "。加密凭据后台重登也未成功，请点击手动登录。";
         }
+        if (loginDiagnosticStartedAt <= 0L || !"failed".equals(loginDiagnosticStatus)) {
+            beginLoginDiagnostics(true, saved.isComplete());
+        }
+        recordLoginDiagnostic(
+                "background-gate",
+                "未启动新的后台提交：" + (saved.isComplete() ? "本次失败已尝试过后台登录" : "没有可用的加密凭据")
+        );
+        finishLoginDiagnosticsFailure(failure);
         setLastAcademicLoginError(failure);
         notifyDashboardLoginStatus("failed", failure);
     }
@@ -3205,6 +3538,16 @@ public class MainActivity extends Activity {
         @android.webkit.JavascriptInterface
         public String getLoginError() {
             return lastAcademicLoginError == null ? "" : lastAcademicLoginError;
+        }
+
+        @android.webkit.JavascriptInterface
+        public String getLoginDiagnostics() {
+            return buildLoginDiagnostics();
+        }
+
+        @android.webkit.JavascriptInterface
+        public boolean copyLoginDiagnostics() {
+            return copyLoginDiagnosticsToClipboard();
         }
 
         @android.webkit.JavascriptInterface

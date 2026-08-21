@@ -229,6 +229,37 @@ function androidLoginError() {
   }
 }
 
+async function copyAndroidLoginDiagnostics() {
+  if (!IS_ANDROID_APP) return;
+  try {
+    if (typeof globalThis.AndroidApi?.copyLoginDiagnostics === "function") {
+      const copied = globalThis.AndroidApi.copyLoginDiagnostics();
+      if (copied !== false) {
+        setNotice("详细登录诊断信息已复制，请粘贴给开发者。", "success");
+        return;
+      }
+    }
+    const report = String(globalThis.AndroidApi?.getLoginDiagnostics?.() || "");
+    if (!report) throw new Error("当前没有可复制的登录诊断报告");
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(report);
+    else {
+      const textarea = document.createElement("textarea");
+      textarea.value = report;
+      textarea.setAttribute("readonly", "readonly");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      if (!document.execCommand("copy")) throw new Error("系统拒绝复制");
+      textarea.remove();
+    }
+    setNotice("详细登录诊断信息已复制，请粘贴给开发者。", "success");
+  } catch (error) {
+    setNotice(`复制详细报错失败：${error.message || "请重试"}`, "error");
+  }
+}
+
 // Android WebView 的原生网络桥会通过这个回调把带 Cookie 的响应交还给页面。
 // 浏览器扩展环境没有 AndroidApi，因此仍然走下方的 fetch 分支。
 globalThis.__nativeApiResponse = (requestId, status, body) => {
@@ -9219,7 +9250,10 @@ function renderAndroidLoginEntry() {
   const retrying = loginStatus === "retrying";
   const title = retrying ? "正在后台重新登录" : loginStatus === "failed" ? "后台自动登录失败" : "当前显示本机缓存";
   const detail = loginMessage || "教务系统登录会话已失效或暂时不可用。";
-  return `<section class="android-login-entry" aria-live="polite"><div class="android-login-entry-copy"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p>${savedAt ? `<small>缓存时间：${escapeHtml(savedAt)}</small>` : ""}</div><button class="button button-primary" type="button" data-action="open-portal">手动登录 / 其他方式</button></section>`;
+  const diagnosticAction = loginStatus === "failed"
+    ? `<button class="button button-ghost" type="button" data-action="copy-login-diagnostics">复制详细报错</button>`
+    : "";
+  return `<section class="android-login-entry" aria-live="polite"><div class="android-login-entry-copy"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p>${savedAt ? `<small>缓存时间：${escapeHtml(savedAt)}</small>` : ""}</div><div class="android-login-entry-actions"><button class="button button-primary" type="button" data-action="open-portal">手动登录 / 其他方式</button>${diagnosticAction}</div></section>`;
 }
 
 function render() {
@@ -9239,7 +9273,10 @@ function render() {
       ? `<p class="muted">内置登录凭据仅使用 Android Keystore 加密保存在本机；也可以改用学校原网页账密或二维码登录。</p>`
       : `<p class="muted">插件不会保存账号或密码，只会复用浏览器当前的登录会话。登录完成后点击“刷新数据”即可。</p>`;
     const loginButtonLabel = IS_ANDROID_APP ? "手动登录 / 其他方式" : "打开教务系统";
-    elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(completeError)}</p>${loginPrivacy}<button class="button button-primary" type="button" data-action="open-portal">${loginButtonLabel}</button></div>${state.view === "personal" ? renderCampusPromptModal() : ""}`;
+    const diagnosticAction = IS_ANDROID_APP
+      ? `<button class="button button-ghost" type="button" data-action="copy-login-diagnostics">复制详细报错</button>`
+      : "";
+    elements.content.innerHTML = `<div class="error-card"><h3>需要先登录教务系统</h3><p>${escapeHtml(completeError)}</p>${loginPrivacy}<div class="android-login-actions"><button class="button button-primary" type="button" data-action="open-portal">${loginButtonLabel}</button>${diagnosticAction}</div></div>${state.view === "personal" ? renderCampusPromptModal() : ""}`;
     return;
   }
   if (state.loading && !state.data.scores.length && !state.data.exams.length && !state.data.courses.length && !localScheduleItemsForTerm(state.termCode).length && state.view === "overview") {
@@ -10679,6 +10716,7 @@ elements.content.addEventListener("click", async (event) => {
     return;
   }
   if (action === "copy-webvpn-url") return copyGeneratedWebVpnUrl();
+  if (action === "copy-login-diagnostics") return copyAndroidLoginDiagnostics();
   if (action === "open-webvpn-url") return openGeneratedWebVpnUrl();
   if (action === "open-portal") return openPortal();
   if (action === "start-curriculum-bootstrap" || action === "open-curriculum-portal") return startCurriculumBootstrap();

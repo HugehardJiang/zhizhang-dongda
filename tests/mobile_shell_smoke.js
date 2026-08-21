@@ -64,6 +64,8 @@ global.AndroidApi = {
   setEcodePanelHidden(hidden) { nativeCalls.push(Boolean(hidden)); },
   getLoginMethod() { return "builtin"; },
   getLoginError() { return ""; },
+  getLoginDiagnostics() { return "执掌东大 Android 登录诊断报告\n测试报告"; },
+  copyLoginDiagnostics() { nativeCalls.push("copy-login-diagnostics"); return true; },
   setLoginMethod(method) { nativeCalls.push(`login:${method}`); },
   getToastNotificationsEnabled() { return nativeToastNotificationsEnabled; },
   setToastNotificationsEnabled(enabled) {
@@ -117,6 +119,7 @@ globalThis.__mobileShellAudit = {
   androidLoginMethod,
   renderSettings,
   renderAndroidLoginEntry,
+  copyAndroidLoginDiagnostics,
   webVpnUrlFromInput,
   webVpnEncryptHostname,
   renderWebVpnToolModal,
@@ -220,6 +223,10 @@ audit.state.connected = false;
 const loginEntry = audit.renderAndroidLoginEntry();
 assert.ok(loginEntry.includes(completeLoginError));
 assert.ok(loginEntry.includes('手动登录 / 其他方式'));
+assert.ok(loginEntry.includes('data-action="copy-login-diagnostics"'));
+assert.ok(loginEntry.includes('复制详细报错'));
+audit.copyAndroidLoginDiagnostics();
+assert.ok(nativeCalls.includes('copy-login-diagnostics'));
 
 // Transient loading, success, and error feedback stays outside page flow in
 // one bottom snackbar. It must never repopulate the legacy top notice.
@@ -294,6 +301,11 @@ assert.ok(mainActivitySource.includes('public void setToastNotificationsEnabled(
 assert.ok(mainActivitySource.includes('CURRENT_TERM_SETTINGS'));
 assert.ok(mainActivitySource.includes('public String getCurrentTermSettings()'));
 assert.ok(mainActivitySource.includes('public void setCurrentTermSettings(String payload)'));
+assert.ok(mainActivitySource.includes('LAST_LOGIN_DIAGNOSTICS'));
+assert.ok(mainActivitySource.includes('public String getLoginDiagnostics()'));
+assert.ok(mainActivitySource.includes('public boolean copyLoginDiagnostics()'));
+assert.ok(mainActivitySource.includes('sanitizeDiagnosticUrl'));
+assert.ok(mainActivitySource.includes('LOGIN_DIAGNOSTIC_EVENT_MAX'));
 
 const androidManifestSource = fs.readFileSync(path.join(
   __dirname, '..', 'android', 'app', 'src', 'main', 'AndroidManifest.xml'
