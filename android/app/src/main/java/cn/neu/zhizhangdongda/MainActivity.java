@@ -103,7 +103,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.57";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.62";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -392,6 +392,8 @@ public class MainActivity extends Activity {
     private static final String LOGIN_METHOD_WECHAT = "wechat";
     private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
     private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
+    private static final int BUILT_IN_LOGIN_TAB_SETTLE_MS = 900;
+    private static final int BUILT_IN_LOGIN_RETRY_MAX = 1;
     private static final int BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS = 2;
     private static final int LOGIN_DIAGNOSTIC_EVENT_MAX = 120;
     private static final int LOGIN_DIAGNOSTICS_MAX_CHARS = 60000;
@@ -597,6 +599,7 @@ public class MainActivity extends Activity {
     private String pendingEcodeLoginUrl = "";
     private int builtInLoginInspectionAttempts;
     private int builtInLoginPortalProbeAttempts;
+    private int builtInLoginRetryCount;
     private boolean builtInLoginPortalProbeScheduled;
     private String pendingBuiltInUsername = "";
     private String pendingBuiltInPassword = "";
@@ -759,6 +762,10 @@ public class MainActivity extends Activity {
         settings.setAllowFileAccess(true);
         settings.setAllowContentAccess(true);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
+        CookieManager.getInstance().setAcceptCookie(true);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+        }
         // 保持跨版本稳定的 UA 标识，避免应用更新被学校的可信设备策略视为全新设备。
         settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/Android");
         webView.setBackgroundColor(Color.rgb(246, 247, 249));
@@ -1105,6 +1112,7 @@ public class MainActivity extends Activity {
                     || !isPortalPageUrl(portalWebView.getUrl())) {
                 portalWebView.loadUrl(PORTAL_URL);
             }
+            portalWebView.setAlpha(1f);
             portalWebView.setVisibility(View.VISIBLE);
             dashboardHome.setVisibility(View.GONE);
             if (loginMethodBar != null) loginMethodBar.setVisibility(View.VISIBLE);
@@ -1843,6 +1851,7 @@ public class MainActivity extends Activity {
         builtInLoginChallengeVisible = false;
         builtInLoginInspectionAttempts = 0;
         builtInLoginPortalProbeAttempts = 0;
+        builtInLoginRetryCount = 0;
         builtInLoginPortalProbeScheduled = false;
         if (!background) backgroundLoginForEcode = false;
         beginLoginDiagnostics(background, true);
@@ -1869,10 +1878,21 @@ public class MainActivity extends Activity {
             return;
         }
         if (background) {
-            // GONE 会让部分 Android WebView 停止布局，学校页面的 DOM 可见性
-            // 与跳转脚本因此可能失真。INVISIBLE 仍不显示页面，但会保持页面
-            // 尺寸、JavaScript 和认证重定向正常运行，是真正的后台登录。
-            portalWebView.setVisibility(View.INVISIBLE);
+            // 后台登录复用手动登录的真实 WebView 提交路径。WebVPN 会在页面
+            // 自己的 form.submit/XHR 钩子中处理认证地址；不能把 WebView 设为
+            // INVISIBLE，也不能由 Android 绕过页面脚本自行 post。主页面位于
+            // portalWebView 之上，因此用户仍然完全看不到认证页。
+            // WebView 被 dashboardHome 盖住时，部分 Android WebView 版本仍会
+            // 降低后台页面的渲染/网络调度优先级。把它置于最上层并保持一个
+            // 几乎不可见的透明度，让认证页保持真正的可见运行状态；它只在
+            // 认证期间存在，成功或失败后立即 GONE，不会遮挡用户页面。
+            portalWebView.setAlpha(0.01f);
+            portalWebView.setVisibility(View.VISIBLE);
+            portalWebView.setFocusableInTouchMode(true);
+            portalWebView.bringToFront();
+            portalWebView.requestFocus(View.FOCUS_DOWN);
+        } else {
+            portalWebView.setAlpha(1f);
         }
         String currentUrl = portalWebView.getUrl();
         if (background && backgroundLoginForEcode) {
@@ -1883,9 +1903,12 @@ public class MainActivity extends Activity {
                         ? pendingEcodeLoginUrl
                         : ECODE_URL);
             }
-        } else if (isPortalLoginPage(currentUrl)) {
+        } else if (!background && isPortalLoginPage(currentUrl)) {
             injectBuiltInCredentialsIntoSchoolPage();
         } else {
+            // 后台登录不能复用上一次失败后留下的登录页。统一认证页的
+            // lt/execution 与 WebVPN 代理会话是一组短时状态，必须从教务
+            // 入口重新获取，避免把旧表单再次提交。
             portalWebView.loadUrl(PORTAL_URL);
         }
     }
@@ -1951,29 +1974,90 @@ public class MainActivity extends Activity {
     private void injectBuiltInCredentialsIntoSchoolPage() {
         if (portalWebView == null || !builtInLoginSubmissionPending) return;
         builtInLoginAwaitingPage = false;
-        String username = JSONObject.quote(pendingBuiltInUsername);
-        String password = JSONObject.quote(pendingBuiltInPassword);
+        // 账号登录页是由脚本切换出来的。旧实现点击选项卡后立即填值并提交，
+        // 在后台 WebView 中可能赶在页面完成切换前执行，导致提交使用了不完整
+        // 的表单状态。先只走一次页面原本的“账号登录”点击，再等待页面稳定。
         String script = "(function(){"
-                + "var u=" + username + ",p=" + password + ";"
                 + "var tab=document.getElementById('password_login');"
-                + "if(tab&&typeof tab.click==='function')tab.click();"
-                + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
-                + "if(!un||!pd)return JSON.stringify({ok:false,error:'学校登录页未找到账号密码输入框'});"
-                + "un.disabled=false;pd.disabled=false;un.value=u;pd.value=p;"
-                + "un.dispatchEvent(new Event('input',{bubbles:true}));"
-                + "pd.dispatchEvent(new Event('input',{bubbles:true}));"
-                + "if(typeof window.login==='function'){window.login();return JSON.stringify({ok:true});}"
-                + "var button=document.getElementById('index_login_btn');"
-                + "if(button&&typeof button.click==='function'){button.click();return JSON.stringify({ok:true});}"
-                + "return JSON.stringify({ok:false,error:'学校登录页未找到登录按钮'});"
+                + "if(tab&&typeof tab.click==='function'){tab.click();return JSON.stringify({ok:true,tabClicked:true});}"
+                + "return JSON.stringify({ok:true,tabClicked:false});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
-                recordLoginDiagnostic("form-submit", "submitted=" + result.optBoolean("ok", false)
+                recordLoginDiagnostic("login-tab", "clicked=" + result.optBoolean("tabClicked", false)
                         + (result.has("error") ? " error=" + sanitizeDiagnosticText(result.optString("error", "")) : ""));
                 if (!result.optBoolean("ok", false)) {
-                    finishBuiltInLoginFailure("内置登录失败：" + result.optString("error", "无法提交学校登录表单"), backgroundLoginInProgress);
+                    finishBuiltInLoginFailure("内置登录失败：" + result.optString("error", "无法切换到账号登录页面"), backgroundLoginInProgress);
+                    return;
+                }
+            } catch (Exception error) {
+                recordLoginDiagnostic("login-tab", "无法解析账号登录页面切换结果：" + safeErrorMessage(error));
+                finishBuiltInLoginFailure("内置登录失败：无法切换到账号登录页面。", backgroundLoginInProgress);
+                return;
+            }
+            portalWebView.postDelayed(this::submitBuiltInCredentialsToSchoolPage, BUILT_IN_LOGIN_TAB_SETTLE_MS);
+        });
+    }
+
+    private void submitBuiltInCredentialsToSchoolPage() {
+        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+        String username = JSONObject.quote(pendingBuiltInUsername);
+        String password = JSONObject.quote(pendingBuiltInPassword);
+        String script = "(function(){"
+                + "var u=" + username + ",p=" + password + ";"
+                + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
+                + "var button=document.getElementById('index_login_btn');"
+                + "var form=document.getElementById('loginForm')||document.getElementById('loginform');"
+                + "if(!un||!pd)return JSON.stringify({ok:false,error:'学校登录页未找到账号密码输入框'});"
+                + "if(!form)return JSON.stringify({ok:false,error:'学校登录表单不可用'});"
+                + "var formActionBefore=form&&form.action?String(form.action):'';"
+                + "un.disabled=false;pd.disabled=false;un.removeAttribute('disabled');pd.removeAttribute('disabled');"
+                + "un.value=u;pd.value=p;"
+                + "un.dispatchEvent(new Event('input',{bubbles:true}));"
+                + "pd.dispatchEvent(new Event('input',{bubbles:true}));"
+                + "un.dispatchEvent(new Event('change',{bubbles:true}));"
+                + "pd.dispatchEvent(new Event('change',{bubbles:true}));"
+                + "var submitter='';"
+                // 直接调用学校脚本导出的 login()，与用户点击学校页面按钮
+                // 后的真实处理完全一致；只有旧页面没有导出函数时才回退到
+                // 按钮 click，兼容学校页面脚本改版。
+                + "if(typeof window.login==='function'){window.login();submitter='window.login';}"
+                + "else if(button&&typeof button.click==='function'){button.click();submitter='index_login_btn';}"
+                + "else return JSON.stringify({ok:false,error:'学校登录页未找到登录按钮'});"
+                + "var rsa=document.getElementById('rsa'),ul=document.getElementById('ul'),pl=document.getElementById('pl'),lt=document.getElementById('lt');"
+                + "var action=form&&form.action?String(form.action).split('?')[0]:'';"
+                + "return JSON.stringify({ok:true,submitter:submitter,rsaPresent:Boolean(rsa&&rsa.value),rsaLength:rsa&&rsa.value?rsa.value.length:0,ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value),formActionBefore:formActionBefore.split('?')[0],formAction:action});"
+                + "})();";
+        portalWebView.evaluateJavascript(script, value -> {
+            try {
+                JSONObject result = new JSONObject(decodeJavascriptString(value));
+                StringBuilder detail = new StringBuilder("submitted=")
+                        .append(result.optBoolean("ok", false))
+                        .append(" submitter=").append(result.optString("submitter", "none"))
+                        .append(" rsaPresent=").append(result.optBoolean("rsaPresent", false))
+                        .append(" rsaLength=").append(result.optInt("rsaLength", 0))
+                        .append(" ulLength=").append(result.optInt("ulLength", 0))
+                        .append(" plLength=").append(result.optInt("plLength", 0))
+                        .append(" ltPresent=").append(result.optBoolean("ltPresent", false));
+                if (result.has("formActionBefore")) {
+                    detail.append(" formActionBefore=")
+                            .append(sanitizeDiagnosticUrl(result.optString("formActionBefore", "")));
+                }
+                if (result.has("formAction")) {
+                    detail.append(" formAction=")
+                            .append(sanitizeDiagnosticUrl(result.optString("formAction", "")));
+                }
+                if (result.has("error")) {
+                    detail.append(" error=")
+                            .append(sanitizeDiagnosticText(result.optString("error", "")));
+                }
+                recordLoginDiagnostic("form-submit", detail.toString());
+                if (!result.optBoolean("ok", false)) {
+                    finishBuiltInLoginFailure(
+                            "内置登录失败：" + result.optString("error", "无法提交学校登录表单"),
+                            backgroundLoginInProgress
+                    );
                     return;
                 }
             } catch (Exception error) {
@@ -1981,7 +2065,7 @@ public class MainActivity extends Activity {
                 finishBuiltInLoginFailure("内置登录失败：无法确认学校登录表单是否提交。", backgroundLoginInProgress);
                 return;
             }
-            portalWebView.postDelayed(this::inspectBuiltInLoginPage, 700);
+            portalWebView.postDelayed(this::inspectBuiltInLoginPage, 850);
         });
     }
 
@@ -2004,9 +2088,13 @@ public class MainActivity extends Activity {
                 + "var m=document.getElementById('mcode'),save=document.getElementById('saveDevice'),send=document.getElementById('sendCode');"
                 + "var loginForm=document.getElementById('loginForm')||document.getElementById('loginform')||document.getElementById('un')||document.getElementById('pd');"
                 + "var challenge=visible(m)||visible(save)||visible(document.getElementById('second_valid_ok'));"
-                + "var errors=['errormsg'].map(function(id){var n=document.getElementById(id);return visible(n)?text(n):'';}).filter(Boolean);"
-                + "Array.prototype.slice.call(document.querySelectorAll('.layui-layer-content,.layui-layer-msg')).forEach(function(n){if(visible(n)){var t=text(n);if(t&&t.length<300)errors.push(t);}});"
-                + "return JSON.stringify({challenge:challenge,error:errors.join('；'),sendAvailable:visible(send),loginForm:Boolean(loginForm)});"
+                + "var errors=[],add=function(n){if(!visible(n))return;var t=text(n);if(t&&errors.indexOf(t)<0)errors.push(t);};"
+                + "['errormsg','errorMsg','errorMessage','errormsghide'].forEach(function(id){add(document.getElementById(id));});"
+                + "Array.prototype.slice.call(document.querySelectorAll('.layui-layer-content,.layui-layer-msg,[role=alert],.alert,.error,.error-msg,.login_box_title_notice')).forEach(add);"
+                + "Array.prototype.slice.call(document.querySelectorAll('body *')).forEach(function(n){if(n.children&&n.children.length)return;if(!visible(n))return;var t=text(n);if(t&&t.length<160&&/(密码错误|账号不存在|登录失败|不正确|锁定|过期|验证码错误|认证失败|不能为空|未找到|禁止)/.test(t))add(n);});"
+                + "var hiddenError=text(document.getElementById('errormsghide'));"
+                + "var rsa=document.getElementById('rsa'),ul=document.getElementById('ul'),pl=document.getElementById('pl'),lt=document.getElementById('lt');"
+                + "return JSON.stringify({challenge:challenge,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
             if (!builtInLoginSubmissionPending) return;
@@ -2021,7 +2109,12 @@ public class MainActivity extends Activity {
                                 + " challenge=" + challenge
                                 + " loginForm=" + loginForm
                                 + " sendCode=" + result.optBoolean("sendAvailable", false)
+                                + " rsaPresent=" + result.optBoolean("rsaPresent", false)
+                                + " ulLength=" + result.optInt("ulLength", 0)
+                                + " plLength=" + result.optInt("plLength", 0)
+                                + " ltPresent=" + result.optBoolean("ltPresent", false)
                                 + (errorText.isEmpty() ? "" : " schoolError=" + sanitizeDiagnosticText(errorText))
+                                + (result.optString("hiddenError", "").trim().isEmpty() ? "" : " hiddenError=" + sanitizeDiagnosticText(result.optString("hiddenError", "")))
                 );
                 if (challenge) {
                     if (backgroundLoginInProgress) {
@@ -2060,7 +2153,34 @@ public class MainActivity extends Activity {
                 // 页面仍在跳转时可能暂时无法读取结果，继续短暂轮询。
             }
             if (builtInLoginInspectionAttempts >= LOGIN_INSPECTION_MAX_ATTEMPTS) {
-                finishBuiltInLoginFailure("内置登录超时：学校页面没有返回明确结果，请检查网络后手动登录。", backgroundLoginInProgress);
+                if (backgroundLoginInProgress && builtInLoginRetryCount < BUILT_IN_LOGIN_RETRY_MAX) {
+                    builtInLoginRetryCount += 1;
+                    builtInLoginInspectionAttempts = 0;
+                    builtInLoginPortalProbeAttempts = 0;
+                    builtInLoginPortalProbeScheduled = false;
+                    builtInLoginAwaitingPage = true;
+                    recordLoginDiagnostic(
+                            "retry",
+                            "认证页提交后仍返回登录页，重新获取 WebVPN 认证页并只重试一次"
+                    );
+                    portalWebView.stopLoading();
+                    portalWebView.loadUrl(PORTAL_URL);
+                    return;
+                }
+                String hiddenError = "";
+                try {
+                    JSONObject result = new JSONObject(decodeJavascriptString(value));
+                    hiddenError = result.optString("hiddenError", "").trim();
+                } catch (Exception ignored) {
+                    // 保留下面的明确失败信息。
+                }
+                String detail = hiddenError.isEmpty()
+                        ? "学校统一身份认证提交后仍停留在登录页"
+                        : "学校统一身份认证提示：" + sanitizeDiagnosticText(hiddenError);
+                finishBuiltInLoginFailure(
+                        "内置登录未成功：" + detail + "。请检查已保存的账号密码，或点击手动登录完成一次登录。",
+                        backgroundLoginInProgress
+                );
             } else {
                 portalWebView.postDelayed(this::inspectBuiltInLoginPage, 650);
             }
@@ -2151,6 +2271,7 @@ public class MainActivity extends Activity {
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
+        builtInLoginRetryCount = 0;
         backgroundLoginForEcode = false;
         pendingEcodeLoginUrl = "";
         if (!wasBackground) {
@@ -2197,6 +2318,7 @@ public class MainActivity extends Activity {
         builtInLoginChallengeVisible = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
+        builtInLoginRetryCount = 0;
         backgroundLoginForEcode = false;
         pendingEcodeLoginUrl = "";
         ecodeReloadAfterBackgroundLogin = false;
@@ -3455,6 +3577,7 @@ public class MainActivity extends Activity {
         public void onQrUrl(String url) {
             receiveQrUrl(url);
         }
+
     }
 
     private final class AndroidBridge {

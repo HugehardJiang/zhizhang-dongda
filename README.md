@@ -53,6 +53,7 @@
 
 ## 仓库结构
 
+- `CODEMAP.md`：给人和后续 AI 的代码地图（模块边界、该改哪、硬约束）。
 - `manifest.json`、`background.js`、`dashboard.*`：Chrome Manifest V3 插件源码。
 - `android/`：Android 工程；构建时自动同步根目录的 `dashboard.html`、`dashboard.css` 和 `dashboard.js`。
 - `tests/`：不依赖教务登录态的静态审计与移动端壳层 smoke tests。

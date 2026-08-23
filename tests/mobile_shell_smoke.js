@@ -290,7 +290,14 @@ assert.ok(/handleEcodeSessionInvalid[\s\S]*backgroundLoginForEcode = true;[\s\S]
 assert.ok(/onPageFinished[\s\S]*isPortalLoginPage\(url\)[\s\S]*handleEcodeSessionInvalid/.test(mainActivitySource));
 assert.ok(/finishBuiltInLoginSuccess[\s\S]*wasForEcode[\s\S]*reloadEcodeAfterBackgroundLogin/.test(mainActivitySource));
 assert.ok(/refreshEcodePage[\s\S]*ecodeWebView\.loadUrl\(ECODE_URL\)/.test(mainActivitySource));
-assert.ok(/submitBuiltInCredentials[\s\S]*if \(background\)[\s\S]*portalWebView\.setVisibility\(View\.INVISIBLE\)/.test(mainActivitySource));
+assert.ok(mainActivitySource.includes('submitBuiltInCredentialsToSchoolPage'));
+assert.ok(mainActivitySource.includes("window.login();submitter='window.login'"));
+assert.ok(mainActivitySource.includes("button.click();submitter='index_login_btn'"));
+assert.ok(/submitBuiltInCredentials[\s\S]*portalWebView\.setAlpha\(0\.01f\)[\s\S]*portalWebView\.bringToFront/.test(mainActivitySource));
+assert.ok(mainActivitySource.includes('重新获取 WebVPN 认证页并只重试一次'));
+assert.ok(mainActivitySource.includes('formActionBefore'));
+assert.ok(!mainActivitySource.includes('postWebVpnLogin'));
+assert.ok(mainActivitySource.includes('setAcceptThirdPartyCookies'));
 assert.ok(/onPageFinished[\s\S]*scheduleBuiltInPortalProbe\(url\)/.test(mainActivitySource));
 assert.ok(/inspectBuiltInLoginPage[\s\S]*!isPortalLoginPage\(currentUrl\)[\s\S]*scheduleBuiltInPortalProbe\(currentUrl\)/.test(mainActivitySource));
 assert.ok(mainActivitySource.includes('PORTAL_FALLBACK_URL'));
