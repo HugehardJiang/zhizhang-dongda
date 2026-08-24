@@ -7,6 +7,7 @@ import android.animation.ValueAnimator;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ContentValues;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
@@ -30,6 +31,7 @@ import android.text.InputType;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.animation.AccelerateDecelerateInterpolator;
@@ -103,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.62";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.63";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -542,7 +544,7 @@ public class MainActivity extends Activity {
     private final CookieManager cookieManager = CookieManager.getInstance();
 
     private FrameLayout root;
-    private WebView portalWebView;
+    private BackgroundLoginWebView portalWebView;
     private WebView ecodeWebView;
     private WebView dashboardWebView;
     private LinearLayout loginMethodBar;
@@ -642,6 +644,28 @@ public class MainActivity extends Activity {
         }
     }
 
+    /**
+     * 后台认证需要保持 WebView 可见运行，不能用 INVISIBLE/GONE 停掉页面脚本；
+     * 但它位于前台层级时必须把触摸事件交还给下面的 dashboard。
+     */
+    private static final class BackgroundLoginWebView extends WebView {
+        private boolean backgroundInputBlocked;
+
+        BackgroundLoginWebView(Context context) {
+            super(context);
+        }
+
+        void setBackgroundInputBlocked(boolean blocked) {
+            backgroundInputBlocked = blocked;
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(MotionEvent event) {
+            if (backgroundInputBlocked) return false;
+            return super.dispatchTouchEvent(event);
+        }
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -662,7 +686,7 @@ public class MainActivity extends Activity {
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(246, 247, 249));
 
-        portalWebView = createWebView(false);
+        portalWebView = createPortalWebView();
         portalWebView.addJavascriptInterface(new LoginBridge(), "AndroidLoginBridge");
         ecodeWebView = createWebView(false);
         dashboardWebView = createWebView(true);
@@ -751,7 +775,10 @@ public class MainActivity extends Activity {
     }
 
     private WebView createWebView(boolean enableNativeBridge) {
-        WebView webView = new WebView(this);
+        return createWebView(new WebView(this), enableNativeBridge);
+    }
+
+    private WebView createWebView(WebView webView, boolean enableNativeBridge) {
         WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
@@ -905,6 +932,10 @@ public class MainActivity extends Activity {
             webView.addJavascriptInterface(new AndroidBridge(), "AndroidApi");
         }
         return webView;
+    }
+
+    private BackgroundLoginWebView createPortalWebView() {
+        return (BackgroundLoginWebView) createWebView(new BackgroundLoginWebView(this), false);
     }
 
     private LinearLayout createLoginMethodBar() {
@@ -1105,14 +1136,37 @@ public class MainActivity extends Activity {
         root.requestApplyInsets();
     }
 
+    private void enterBackgroundLoginMode() {
+        if (portalWebView == null) return;
+        portalWebView.setBackgroundInputBlocked(true);
+        portalWebView.clearFocus();
+        portalWebView.setFocusable(false);
+        portalWebView.setFocusableInTouchMode(false);
+        portalWebView.setClickable(false);
+        // 保持真实可见 WebView 的 JS/重定向调度，但让它不可见且不再接收输入。
+        portalWebView.setAlpha(0.01f);
+        portalWebView.setVisibility(View.VISIBLE);
+        portalWebView.bringToFront();
+    }
+
+    private void exitBackgroundLoginMode() {
+        if (portalWebView == null) return;
+        portalWebView.setBackgroundInputBlocked(false);
+        portalWebView.clearFocus();
+        portalWebView.setFocusable(true);
+        portalWebView.setFocusableInTouchMode(true);
+        portalWebView.setClickable(true);
+        portalWebView.setAlpha(1f);
+    }
+
     private void showPortal() {
         runOnUiThread(() -> {
             dashboardVisible = false;
+            exitBackgroundLoginMode();
             if (portalWebView.getUrl() == null || portalWebView.getUrl().isEmpty()
                     || !isPortalPageUrl(portalWebView.getUrl())) {
                 portalWebView.loadUrl(PORTAL_URL);
             }
-            portalWebView.setAlpha(1f);
             portalWebView.setVisibility(View.VISIBLE);
             dashboardHome.setVisibility(View.GONE);
             if (loginMethodBar != null) loginMethodBar.setVisibility(View.VISIBLE);
@@ -1164,6 +1218,7 @@ public class MainActivity extends Activity {
     }
 
     private void cancelAutomaticBackgroundLogin() {
+        exitBackgroundLoginMode();
         if (backgroundLoginInProgress) {
             backgroundLoginInProgress = false;
             builtInLoginSubmissionPending = false;
@@ -1180,6 +1235,7 @@ public class MainActivity extends Activity {
     private void showDashboard() {
         runOnUiThread(() -> {
             dashboardVisible = true;
+            exitBackgroundLoginMode();
             preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
             cookieManager.flush();
             portalWebView.setVisibility(View.GONE);
@@ -1879,20 +1935,12 @@ public class MainActivity extends Activity {
         }
         if (background) {
             // 后台登录复用手动登录的真实 WebView 提交路径。WebVPN 会在页面
-            // 自己的 form.submit/XHR 钩子中处理认证地址；不能把 WebView 设为
-            // INVISIBLE，也不能由 Android 绕过页面脚本自行 post。主页面位于
-            // portalWebView 之上，因此用户仍然完全看不到认证页。
-            // WebView 被 dashboardHome 盖住时，部分 Android WebView 版本仍会
-            // 降低后台页面的渲染/网络调度优先级。把它置于最上层并保持一个
-            // 几乎不可见的透明度，让认证页保持真正的可见运行状态；它只在
-            // 认证期间存在，成功或失败后立即 GONE，不会遮挡用户页面。
-            portalWebView.setAlpha(0.01f);
-            portalWebView.setVisibility(View.VISIBLE);
-            portalWebView.setFocusableInTouchMode(true);
-            portalWebView.bringToFront();
-            portalWebView.requestFocus(View.FOCUS_DOWN);
+            // 自己的 form.submit/XHR 钩子中处理认证地址；保持 VISIBLE 让
+            // WebView 继续执行 JavaScript 和重定向，由专用子类把触摸事件
+            // 返回给 dashboard，同时清掉焦点避免抢输入。
+            enterBackgroundLoginMode();
         } else {
-            portalWebView.setAlpha(1f);
+            exitBackgroundLoginMode();
         }
         String currentUrl = portalWebView.getUrl();
         if (background && backgroundLoginForEcode) {
@@ -2260,6 +2308,7 @@ public class MainActivity extends Activity {
         finishLoginDiagnosticsSuccess();
         boolean wasBackground = backgroundLoginInProgress;
         boolean wasForEcode = wasBackground && backgroundLoginForEcode;
+        exitBackgroundLoginMode();
         if (!wasBackground && builtInTrustDeviceCheck != null && builtInTrustDeviceCheck.isChecked()) {
             saveBuiltInCredentials(pendingBuiltInUsername, pendingBuiltInPassword);
         } else if (!wasBackground && builtInTrustDeviceCheck != null && !builtInTrustDeviceCheck.isChecked()) {
@@ -2305,6 +2354,7 @@ public class MainActivity extends Activity {
 
     private void finishBuiltInLoginFailure(String message, boolean background) {
         String fullMessage = message == null || message.trim().isEmpty() ? "内置登录失败：未知错误" : message.trim();
+        exitBackgroundLoginMode();
         if (loginDiagnosticStartedAt <= 0L || !"running".equals(loginDiagnosticStatus)) {
             beginLoginDiagnostics(background, background && loadBuiltInCredentials().isComplete());
         }

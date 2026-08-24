@@ -293,7 +293,35 @@ assert.ok(/refreshEcodePage[\s\S]*ecodeWebView\.loadUrl\(ECODE_URL\)/.test(mainA
 assert.ok(mainActivitySource.includes('submitBuiltInCredentialsToSchoolPage'));
 assert.ok(mainActivitySource.includes("window.login();submitter='window.login'"));
 assert.ok(mainActivitySource.includes("button.click();submitter='index_login_btn'"));
-assert.ok(/submitBuiltInCredentials[\s\S]*portalWebView\.setAlpha\(0\.01f\)[\s\S]*portalWebView\.bringToFront/.test(mainActivitySource));
+assert.ok(mainActivitySource.includes('portalWebView = createPortalWebView()'));
+assert.ok(/class BackgroundLoginWebView extends WebView[\s\S]*private boolean backgroundInputBlocked[\s\S]*dispatchTouchEvent\(MotionEvent event\)[\s\S]*if \(backgroundInputBlocked\) return false;[\s\S]*return super\.dispatchTouchEvent\(event\);/.test(mainActivitySource));
+assert.ok(/private void enterBackgroundLoginMode\(\)[\s\S]*setBackgroundInputBlocked\(true\)[\s\S]*clearFocus\(\)[\s\S]*setFocusable\(false\)[\s\S]*setFocusableInTouchMode\(false\)[\s\S]*setAlpha\(0\.01f\)[\s\S]*setVisibility\(View\.VISIBLE\)[\s\S]*bringToFront\(\)/.test(mainActivitySource));
+assert.ok(/private void exitBackgroundLoginMode\(\)[\s\S]*setBackgroundInputBlocked\(false\)[\s\S]*setFocusable\(true\)[\s\S]*setFocusableInTouchMode\(true\)[\s\S]*setClickable\(true\)[\s\S]*setAlpha\(1f\)/.test(mainActivitySource));
+const submitCredentialsStart = mainActivitySource.indexOf('private void submitBuiltInCredentials(boolean background)');
+const backgroundLoginStart = mainActivitySource.indexOf('        if (background) {', submitCredentialsStart);
+const currentUrlStart = mainActivitySource.indexOf('        String currentUrl = portalWebView.getUrl();', backgroundLoginStart);
+const submitCredentialsEnd = mainActivitySource.indexOf('    private String builtInLoginPageDescription', submitCredentialsStart);
+assert.ok(submitCredentialsStart >= 0);
+assert.ok(backgroundLoginStart > submitCredentialsStart);
+assert.ok(currentUrlStart > backgroundLoginStart);
+assert.ok(submitCredentialsEnd > currentUrlStart);
+const backgroundLoginUiBlock = mainActivitySource.slice(backgroundLoginStart, currentUrlStart);
+const submitCredentialsBlock = mainActivitySource.slice(submitCredentialsStart, submitCredentialsEnd);
+// Background authentication must keep the WebView VISIBLE for JS/redirects,
+// while the specialized dispatch path makes it non-interactive and lets the
+// dashboard below receive the gesture.
+assert.ok(backgroundLoginUiBlock.includes('enterBackgroundLoginMode()'));
+assert.ok(submitCredentialsBlock.includes('portalWebView.loadUrl'));
+assert.ok(mainActivitySource.includes('portalWebView.setVisibility(View.VISIBLE)'));
+assert.ok(mainActivitySource.includes('portalWebView.setAlpha(0.01f)'));
+assert.ok(mainActivitySource.includes('portalWebView.bringToFront()'));
+assert.ok(!mainActivitySource.includes('portalWebView.setVisibility(View.INVISIBLE)'));
+assert.ok(!mainActivitySource.includes('portalWebView.requestFocus'));
+assert.ok(/cancelAutomaticBackgroundLogin[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
+assert.ok(/showDashboard[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
+assert.ok(/showPortal[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
+assert.ok(/finishBuiltInLoginSuccess[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
+assert.ok(/finishBuiltInLoginFailure[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
 assert.ok(mainActivitySource.includes('重新获取 WebVPN 认证页并只重试一次'));
 assert.ok(mainActivitySource.includes('formActionBefore'));
 assert.ok(!mainActivitySource.includes('postWebVpnLogin'));
