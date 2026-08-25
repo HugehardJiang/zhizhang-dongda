@@ -16,6 +16,10 @@ android {
 
     buildTypes {
         release {
+            // 本项目此前发布的可安装包始终沿用 Android 默认 debug 证书；
+            // 明确绑定它，避免 assembleRelease 只产出未签名 APK。后续若迁移
+            // 到独立发布证书，应在同一次主版本迁移中处理签名升级路径。
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
