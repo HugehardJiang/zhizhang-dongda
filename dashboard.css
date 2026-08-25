@@ -1388,6 +1388,32 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .course-mobile-row { display: grid; grid-template-columns: auto minmax(0, 1fr); }
   .course-mobile-row.course-mobile-standalone { display: block; }
   .course-mobile-main { display: block; }
+  /* 手机上的课程记录采用“课程组 + 时间线”而不是连续白卡：先扫课程名，
+     再沿同一条竖线阅读多条上课安排，信息密度更高也更容易比较。 */
+  .course-mobile-list { border-top: 0; }
+  .course-mobile-list .course-mobile-standalone { padding: 18px 0 16px; border-bottom: 1px solid var(--border); }
+  .course-mobile-list .course-mobile-standalone:first-child { padding-top: 14px; }
+  .course-mobile-group-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .course-mobile-list .course-mobile-heading { display: grid; flex: 1 1 auto; gap: 3px; }
+  .course-mobile-list .course-mobile-heading strong { overflow: visible; color: var(--text-primary); font-size: 16px; font-weight: 700; line-height: 1.35; text-overflow: clip; white-space: normal; }
+  .course-mobile-list .course-mobile-heading small { margin: 0; color: var(--text-tertiary); font-size: 10px; font-variant-numeric: tabular-nums; }
+  .course-mobile-list .course-arrangement-count { flex: 0 0 auto; min-height: 22px; margin-top: 1px; padding: 0 8px; color: #4d718d; background: #eef5f8; border: 1px solid #d9e7ed; font-size: 10px; }
+  .course-mobile-list .course-arrangement-list { position: relative; gap: 0; margin: 13px 0 0 3px; padding: 0; }
+  .course-mobile-list .course-arrangement-list::before { position: absolute; top: 9px; bottom: 13px; left: 5px; width: 1px; background: #d8e4ea; content: ""; }
+  .course-mobile-list .course-arrangement-list > li { position: relative; }
+  .course-mobile-list .course-arrangement-item { position: relative; gap: 5px; padding: 0 0 15px 18px; color: var(--text-secondary); background: transparent; border: 0; border-radius: 0; }
+  .course-mobile-list .course-arrangement-item::before { position: absolute; top: 5px; left: 1px; width: 8px; height: 8px; box-sizing: border-box; background: #fff; border: 2px solid #6f9cb7; border-radius: 50%; content: ""; }
+  .course-mobile-list .course-arrangement-item:hover { background: transparent; border-color: transparent; }
+  .course-mobile-list .course-arrangement-item:active { opacity: .72; }
+  .course-mobile-list .course-arrangement-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; justify-content: start; gap: 3px 8px; color: var(--text-primary); line-height: 1.38; }
+  .course-mobile-list .course-arrangement-week { color: #3f7497; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .course-mobile-list .course-arrangement-slot { min-width: 0; color: var(--text-primary); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+  .course-mobile-list .course-arrangement-clock { grid-column: 2; color: var(--text-secondary); font-size: 11px; font-style: normal; font-variant-numeric: tabular-nums; }
+  .course-mobile-list .course-arrangement-meta { display: block; margin: 0; overflow: visible; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; text-overflow: clip; white-space: normal; }
+  .course-mobile-list .course-arrangement-item.is-unresolved::before { border-color: #aab9c2; }
+  .course-mobile-list .course-arrangement-item.is-unresolved .course-arrangement-week { color: #71828d; }
+  .course-mobile-list .course-arrangement-item.is-unresolved .course-arrangement-slot { color: var(--text-secondary); font-weight: 600; }
+  .course-mobile-list .course-arrangement-list > li:last-child .course-arrangement-item { padding-bottom: 0; }
   .all-mobile-row { min-height: 60px; }
   .exam-next { grid-template-columns: 68px minmax(0, 1fr); gap: 12px; padding: 15px 0; }
   .exam-next-countdown { grid-column: 2; }

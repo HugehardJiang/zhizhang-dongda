@@ -8763,6 +8763,18 @@ function renderCourseCards(rows, scope = "personal") {
   return `<div class="course-list">${rows.map((row) => `<button class="course-card course-card-button" ${courseActionAttributes(row, scope)}><h4>${escapeHtml(row.name)}</h4><div class="course-meta"><span>课程号：${escapeHtml(row.code)}</span><span>教师：${escapeHtml(row.teacher)}</span><span>时间：${escapeHtml(row.time || row.section || row.weekday || "待识别")}</span><span>地点：${escapeHtml(row.location || row.detail || "待识别")}</span><span>周次：${escapeHtml(row.weeks)}</span><span>学分：${escapeHtml(row.credit)}</span>${availability.assessment && courseAssessmentValue(row) ? `<span>考核：${escapeHtml(courseAssessmentValue(row))}</span>` : ""}${availability.requirement && courseRequirementValue(row) ? `<span>性质：${escapeHtml(courseRequirementValue(row))}</span>` : ""}</div></button>`).join("")}</div>`;
 }
 
+function courseMobileArrangementMarkup(arrangement, index, scope = "personal") {
+  const clockText = extractClockText(arrangement.time) || localScheduleClockText(arrangement);
+  const sectionText = courseSectionLabel(arrangement);
+  const weekText = arrangement.weeks || "周次待识别";
+  const weekdayText = arrangement.weekday || "星期待识别";
+  const timingText = [weekdayText, sectionText].filter(Boolean).join(" · ") || "上课时间待识别";
+  const metaText = [arrangement.teacher || "教师待识别", arrangement.location || "地点待识别"].join(" · ");
+  const unresolved = sectionText === "节次待识别" || (!arrangement.weekday && !clockText);
+  const action = courseActionAttributes(arrangement, scope) || `type="button"`;
+  return `<li><button class="course-arrangement-item${unresolved ? " is-unresolved" : ""}" ${action} title="查看第${index + 1}条排课详情"><span class="course-arrangement-summary"><span class="course-arrangement-week">${escapeHtml(weekText)}</span><span class="course-arrangement-slot">${escapeHtml(timingText)}</span>${clockText ? `<time class="course-arrangement-clock">${escapeHtml(clockText)}</time>` : ""}</span><small class="course-arrangement-meta">${escapeHtml(metaText)}</small></button></li>`;
+}
+
 function renderCourseRowsTable(rows, includeDetail = false, scope = "personal") {
   const courses = normalizedScheduleCourses(rows);
   const availability = courseFieldAvailability(courses, scope);
@@ -8788,14 +8800,9 @@ function renderCourseRowsTable(rows, includeDetail = false, scope = "personal") 
   const mobile = courses.map((course) => {
     const arrangements = courseArrangementRows(course, scope);
     const action = courseActionAttributes(course, scope) || `type="button"`;
-    const arrangementList = arrangements.map((arrangement, index) => {
-      const clockText = extractClockText(arrangement.time) || localScheduleClockText(arrangement);
-      const scheduleText = [arrangement.weeks, arrangement.weekday, courseSectionLabel(arrangement), clockText].filter(Boolean).join(" · ") || "排课信息待识别";
-      const metaText = [arrangement.teacher && `教师：${arrangement.teacher}`, arrangement.location && `地点：${arrangement.location}`].filter(Boolean).join(" · ") || "教师、地点待识别";
-      const arrangementAction = courseActionAttributes(arrangement, scope) || `type="button"`;
-      return `<li><button class="course-arrangement-item" ${arrangementAction} title="查看第${index + 1}条排课详情"><span class="course-arrangement-summary">${escapeHtml(scheduleText)}</span><small class="course-arrangement-meta">${escapeHtml(metaText)}</small></button></li>`;
-    }).join("");
-    return `<article class="course-mobile-row course-mobile-standalone"><button class="course-mobile-heading" ${action} title="点击查看课程详情"><strong>${escapeHtml(course.name)}</strong><small>${escapeHtml(course.code || course.catalogCode || "无课程号")}</small></button>${arrangements.length > 1 ? `<span class="course-arrangement-count">${arrangements.length} 条上课安排</span>` : ""}<ul class="course-arrangement-list">${arrangementList}</ul></article>`;
+    const arrangementList = arrangements.map((arrangement, index) => courseMobileArrangementMarkup(arrangement, index, scope)).join("");
+    const arrangementLabel = arrangements.length ? `${arrangements.length} 条安排` : "待排课";
+    return `<article class="course-mobile-row course-mobile-standalone"><div class="course-mobile-group-head"><button class="course-mobile-heading" ${action} title="点击查看课程详情"><strong>${escapeHtml(course.name)}</strong><small>${escapeHtml(course.code || course.catalogCode || "无课程号")}</small></button><span class="course-arrangement-count">${escapeHtml(arrangementLabel)}</span></div><ul class="course-arrangement-list">${arrangementList}</ul></article>`;
   }).join("");
   return `<div class="table-wrap course-desktop-table"><table><thead><tr><th>课程</th><th>课程号</th><th>上课安排</th>${categoryHeader}${assessmentHeader}${requirementHeader}${detailHeader}</tr></thead><tbody>${body}</tbody></table></div><div class="course-mobile-list">${mobile}</div>`;
 }
