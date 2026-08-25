@@ -895,6 +895,131 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .course-mobile-row small { color: var(--text-tertiary); }
 .course-mobile-select { display: grid; place-items: center; flex: 0 0 24px; width: 24px; }
 .course-mobile-select input { width: 16px; min-height: 16px; padding: 0; accent-color: var(--brand); }
+
+/* Course arrangements -----------------------------------------------------
+   A course can have several independent weekday/week/section/location
+   combinations. Keep those combinations together under the course instead
+   of forcing the table to display the source system's compound text in one
+   cell. The rules also support either a clickable summary button inside the
+   item or the item itself being the clickable control. */
+.course-arrangement-list {
+  display: grid;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.course-arrangement-item {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px 9px;
+  color: var(--text-secondary);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  line-height: 1.4;
+}
+.course-arrangement-item:is(button, a) {
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.course-arrangement-item:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.course-arrangement-item:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.course-arrangement-item > .course-arrangement-summary,
+.course-arrangement-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.course-arrangement-summary:hover { color: var(--brand); background: transparent; }
+.course-arrangement-summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.course-arrangement-summary strong,
+.course-arrangement-summary span { min-width: 0; overflow-wrap: anywhere; }
+.course-arrangement-summary strong { color: var(--text-primary); font-size: 11px; font-weight: 600; }
+.course-arrangement-summary span { color: var(--text-secondary); font-size: 11px; }
+.course-arrangement-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.course-arrangement-meta span { min-width: 0; overflow-wrap: anywhere; }
+.course-arrangement-count {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 20px;
+  padding: 0 7px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-100, var(--border));
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+.course-mobile-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: var(--text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font: inherit;
+  text-align: left;
+}
+.course-mobile-heading:hover { background: transparent; }
+.course-mobile-heading:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.course-mobile-heading strong { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.course-mobile-list .course-arrangement-list { margin-top: 8px; }
+.course-mobile-list .course-arrangement-item { padding: 7px 8px; }
+.course-mobile-list .course-arrangement-summary { align-items: flex-start; }
+
+/* The base mobile course row deliberately ellipsizes ordinary metadata.
+   Arrangement details are structured data, so let each part wrap instead. */
+.course-mobile-row .course-arrangement-list strong,
+.course-mobile-row .course-arrangement-list span { white-space: normal; }
+.course-mobile-row .course-arrangement-summary strong,
+.course-mobile-row .course-arrangement-summary span,
+.course-mobile-row .course-arrangement-meta,
+.course-mobile-row .course-arrangement-meta span {
+  display: block;
+  margin-top: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+.course-mobile-row .course-arrangement-summary { display: flex; }
+.course-mobile-row .course-arrangement-meta { display: flex; }
+
 .all-mobile-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 13px 0; border-bottom: 1px solid var(--border); }
 .all-mobile-row > div { min-width: 0; }
 .all-mobile-row strong, .all-mobile-row span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

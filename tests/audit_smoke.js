@@ -41,7 +41,7 @@ globalThis.__auditTest = {
   parseExamDate, normalizeCalendarDate, escapeHtml, mergeCurriculumPlans,
   allScheduleApiPath, mapScheduleType, scheduleTypeKind, normalizedScheduleAction,
   isSupportedAllScheduleType, allScheduleDetailIdentity, scheduleDetailTypeCodes,
-  isAllSchedulePermissionError, mapCourse, parseSectionRange, courseWeekNumbers,
+  isAllSchedulePermissionError, mapCourse, parseDay, parseSectionRange, courseWeekNumbers,
   splitScheduleSegments, expandMappedCourse, expandCourseRows, mergeCourseSources,
   renderScheduleGrid,
   mergePersonalCourseSources,
@@ -49,10 +49,14 @@ globalThis.__auditTest = {
   courseAtScopeIndex, courseRowsForScope, queryAllSchedule, loadAllScheduleList,
   currentAcademicWeekNumber, defaultPersonalScheduleWeek, scheduleWeekValue,
   personalScheduleRows,
+  courseArrangementRows, renderCourseRowsTable, scheduleExportRows,
   scheduleCsvEntries, buildScheduleCsv, scheduleCsvFileName,
   curriculumTreeKeys, curriculumTreeIsFullyExpanded, curriculumProgressMap, curriculumProgressOverviewMarkup, curriculumRequirementOverviewMarkup,
   curriculumExportMarkup, curriculumExportDocument, curriculumExportFileName,
   curriculumPdfDocumentModel, curriculumPdfPaginateBlocks,
+  curriculumScoreLogicalKey, curriculumScoreGroups, curriculumBestScore, curriculumCourseCompletion,
+  curriculumCategoryFallbackRecords, curriculumPdfCompletion,
+  scoreRowDeduplicationKey, dedupeGpaRows, mergeScoreRows,
   normalizeLocalScheduleItem, localScheduleItemToCourseRow, mergedPersonalScheduleRows,
   compareScheduleItemsOverlap, SCHEDULE_COLLISION_STATUS, filterCoursesForDate, overviewTodayCourses, overviewNextCourse, schoolScheduleOccurrenceKey,
   findLocalScheduleConflicts, localScheduleDraftFromItem, localScheduleEditorMarkup, localScheduleSectionOptions,
@@ -290,6 +294,106 @@ const t = global.__auditTest;
   assert.strictEqual(mergedWithList.length, 2);
   assert.ok(t.renderScheduleGrid(mergedWithList, 'personal').includes('星期五'));
 
+  // Real personal-schedule payloads can contain four independent placements
+  // for one course.  The first two are weeks 1-2 in 教307/逸405; the latter
+  // two are weeks 3-8 and 10-13 in 大成313.  Commas inside the week list and
+  // commas between teachers must not change the four-segment boundary.
+  const realAnalogCircuitDetail = '1-2周[理论]/星期五/第三节-第四节/田亚男[主讲],沈鸿媛[主讲]/教307，1-2周[理论]/星期三/第三节-第四节/田亚男[主讲],沈鸿媛[主讲]/逸405，3-8周,10-13周[理论]/星期五/第三节-第四节/田亚男[主讲],沈鸿媛[主讲]/大成313，3-8周,10-13周[理论]/星期三/第三节-第四节/田亚男[主讲],沈鸿媛[主讲]/大成313';
+  const realAnalogCircuitRaw = { courseName: '模拟电子技术基础', courseNo: 'A1307000063', classDateAndPlace: realAnalogCircuitDetail };
+  assert.strictEqual(t.splitScheduleSegments(realAnalogCircuitDetail).length, 4);
+  const realAnalogCircuitExpanded = t.expandMappedCourse(t.mapCourse(realAnalogCircuitRaw));
+  assert.strictEqual(realAnalogCircuitExpanded.length, 4);
+  assert.deepStrictEqual(realAnalogCircuitExpanded.map((course) => [course.weeks, course.weekday, course.section, course.location]), [
+    ['1-2周', '星期五', '第3-4节', '教307'],
+    ['1-2周', '星期三', '第3-4节', '逸405'],
+    ['3-8周、10-13周', '星期五', '第3-4节', '大成313'],
+    ['3-8周、10-13周', '星期三', '第3-4节', '大成313']
+  ]);
+  assert.deepStrictEqual([...t.courseWeekNumbers(realAnalogCircuitExpanded[2])], [3, 4, 5, 6, 7, 8, 10, 11, 12, 13]);
+
+  // Older payloads sometimes omit the repeated week or weekday after the
+  // first slash-delimited placement. The parser must inherit only the
+  // missing structural field, while still creating a separate arrangement.
+  const omittedWeekdayDetail = '1-2周[理论]/星期五/第三节-第四节/张三[主讲]/教307，星期三/第一节-第二节/张三[主讲]/教308';
+  assert.strictEqual(t.splitScheduleSegments(omittedWeekdayDetail).length, 2);
+  const omittedWeekdayExpanded = t.expandMappedCourse(t.mapCourse({
+    courseName: '省略字段课程', courseNo: 'OMIT-001', classDateAndPlace: omittedWeekdayDetail
+  }));
+  assert.deepStrictEqual(omittedWeekdayExpanded.map((course) => [course.weeks, course.weekday, course.section, course.location]), [
+    ['1-2周', '星期五', '第3-4节', '教307'],
+    ['1-2周', '星期三', '第1-2节', '教308']
+  ]);
+  const omittedDayDetail = '1-2周/星期五/第三节-第四节/张三[主讲]/教307，第五节-第六节/张三[主讲]/教308';
+  assert.strictEqual(t.splitScheduleSegments(omittedDayDetail).length, 2);
+  const omittedDayExpanded = t.expandMappedCourse(t.mapCourse({
+    courseName: '省略星期课程', courseNo: 'OMIT-002', classDateAndPlace: omittedDayDetail
+  }));
+  assert.deepStrictEqual(omittedDayExpanded.map((course) => [course.weekday, course.section, course.location]), [
+    ['星期五', '第3-4节', '教307'],
+    ['星期五', '第5-6节', '教308']
+  ]);
+
+  // Some real responses put the same compound schedule in a location alias
+  // instead of classDateAndPlace.  It must be promoted to a schedule source,
+  // while mapCourse().location must never expose the whole compound string.
+  for (const alias of ['JASMC', 'SKDD', 'location']) {
+    const aliasRaw = { courseName: '模拟电子技术基础', courseNo: 'A1307000063', [alias]: realAnalogCircuitDetail };
+    const mappedAlias = t.mapCourse(aliasRaw);
+    assert.notStrictEqual(mappedAlias.location, realAnalogCircuitDetail);
+    assert.strictEqual(mappedAlias.location, '教307');
+    const expandedAlias = t.expandMappedCourse(mappedAlias);
+    assert.strictEqual(expandedAlias.length, 4);
+    assert.deepStrictEqual(expandedAlias.map((course) => course.location).sort(), ['大成313', '大成313', '教307', '逸405']);
+  }
+  assert.strictEqual(t.mapCourse({ courseName: '普通地点', JASMC: '南湖校区 教210' }).location, '南湖校区 教210');
+
+  // Section text contains Chinese numerals, but it is not a weekday.  parseDay
+  // only accepts an explicit weekday token or a standalone numeric 1-7.
+  assert.strictEqual(t.parseDay('第一节-第二节'), 0);
+  assert.strictEqual(t.parseDay('第3节'), 0);
+  assert.strictEqual(t.parseDay('星期三'), 3);
+  assert.strictEqual(t.parseDay('周日'), 7);
+  assert.strictEqual(t.parseDay('3'), 3);
+
+  const realAiRaw = {
+    courseName: '人工智能导论', courseNo: 'A1308000022',
+    classDateAndPlace: '10-17周[理论]/星期五/第五节-第六节/郭世毅[主讲],王璐[主讲]/采302，10-17周[理论]/星期三/第一节-第二节/郭世毅[主讲],王璐[主讲]/大成213'
+  };
+  assert.strictEqual(t.expandMappedCourse(t.mapCourse(realAiRaw)).length, 2);
+  assert.deepStrictEqual(t.expandMappedCourse(t.mapCourse(realAiRaw)).map((course) => [course.weekday, course.section, course.location]), [
+    ['星期五', '第5-6节', '采302'], ['星期三', '第1-2节', '大成213']
+  ]);
+
+  const realPhysicsRaw = {
+    courseName: '大学物理㈡', courseNo: 'A1502000016',
+    classDateAndPlace: '1-16周[理论]/星期二/第三节-第四节/王强[主讲]/采302，1-2周[理论]/星期四/第三节-第四节/王强[主讲]/教306，3-8周,10-17周[理论]/星期四/第三节-第四节/王强[主讲]/大成211'
+  };
+  const realPhysicsExpanded = t.expandMappedCourse(t.mapCourse(realPhysicsRaw));
+  assert.strictEqual(realPhysicsExpanded.length, 3);
+  assert.deepStrictEqual(realPhysicsExpanded.map((course) => [course.weeks, course.weekday, course.location]), [
+    ['1-16周', '星期二', '采302'], ['1-2周', '星期四', '教306'], ['3-8周、10-17周', '星期四', '大成211']
+  ]);
+
+  // Some versions return the same information as an array of cellDetail
+  // objects.  Array entries are independent candidates and must not be
+  // compressed into the first item before segment parsing.
+  const arrayDetailRaw = {
+    courseName: '数组课表格式', courseNo: 'ARRAY-001', weekday: '星期四', section: '第1-2节',
+    cellDetail: [{ text: '1-2周 李硕 南湖校区 机211' }, { text: '3-4周 李硕 浑南校区 线上' }]
+  };
+  const arrayDetailExpanded = t.expandMappedCourse(t.mapCourse(arrayDetailRaw));
+  assert.strictEqual(arrayDetailExpanded.length, 2);
+  assert.deepStrictEqual(arrayDetailExpanded.map((course) => [course.weeks, course.location]), [
+    ['1-2周', '南湖校区 机211'], ['3-4周', '浑南校区 线上']
+  ]);
+
+  // If the grid endpoint only returns the current placement while the list
+  // endpoint returns the complete row, list-only placements must be retained.
+  const partialGrid = { ...realAnalogCircuitRaw, classDateAndPlace: realAnalogCircuitDetail.split('，')[2] };
+  const completeMergedPersonal = t.mergePersonalCourseSources([realAnalogCircuitRaw], [partialGrid]);
+  assert.strictEqual(completeMergedPersonal.scheduleDetail.length, 4);
+  assert.deepStrictEqual(completeMergedPersonal.scheduleDetail.map((course) => course.location).sort(), ['大成313', '大成313', '教307', '逸405']);
+
   // Personal data keeps one compact course row for the table but exposes every
   // grid arrangement separately, so a course with two meetings is not lost.
   const personalMerged = t.mergePersonalCourseSources([
@@ -309,6 +413,53 @@ const t = global.__auditTest;
     ['3', '1', '2'],
     ['5', '5', '6']
   ]);
+
+  // The course record list groups every placement under one course instead of
+  // exposing a compound source string as the location. Image export and CSV
+  // consume the same complete occurrence set.
+  const completePersonal = t.mergePersonalCourseSources([
+    realAnalogCircuitRaw,
+    realAiRaw,
+    realPhysicsRaw
+  ], []);
+  t.state.data.courses = completePersonal.courses;
+  t.state.data.scheduleDetail = completePersonal.scheduleDetail;
+  const arrangementMarkup = t.renderCourseRowsTable(completePersonal.courses, false, 'personal');
+  assert.ok(arrangementMarkup.includes('4 条上课安排'));
+  assert.ok(arrangementMarkup.includes('3 条上课安排'));
+  assert.ok(arrangementMarkup.includes('2 条上课安排'));
+  assert.ok(arrangementMarkup.includes('class="course-arrangement-list"'));
+  assert.strictEqual((arrangementMarkup.match(/data-course-detail-index=/g) || []).length, 18);
+  for (const location of ['教307', '逸405', '大成313', '采302', '大成213', '教306', '大成211']) {
+    assert.ok(arrangementMarkup.includes(location), `course sub-list should include ${location}`);
+  }
+  assert.strictEqual(t.courseArrangementRows(completePersonal.courses[0], 'personal').length, 4);
+  const imageRows = t.scheduleExportRows('personal');
+  assert.strictEqual(imageRows.length, 9);
+  assert.deepStrictEqual(imageRows.filter((course) => course.name === '模拟电子技术基础').map((course) => course.location).sort(), ['大成313', '大成313', '教307', '逸405']);
+  const completeCsvEntries = t.scheduleCsvEntries('personal');
+  assert.strictEqual(completeCsvEntries.length, 9);
+  assert.deepStrictEqual(completeCsvEntries.filter((entry) => entry.courseName === '大学物理㈡').map((entry) => [entry.weekday, entry.startSection, entry.endSection, entry.location]), [
+    ['2', '3', '4', '采302'],
+    ['4', '3', '4', '教306'],
+    ['4', '3', '4', '大成211']
+  ]);
+
+  // A partially cached grid must be completed from the parent course's raw
+  // record. Hiding one exact school occurrence is applied after expansion, so
+  // neither image export nor CSV can accidentally recreate it.
+  const analogParent = t.mapCourse(realAnalogCircuitRaw);
+  t.state.data.courses = [analogParent];
+  t.state.data.scheduleDetail = [{ ...realAnalogCircuitExpanded[2], sourceCourseIndex: 0 }];
+  assert.strictEqual(t.courseArrangementRows(analogParent, 'personal').length, 4);
+  assert.strictEqual(t.scheduleExportRows('personal').length, 4);
+  assert.strictEqual(t.scheduleCsvEntries('personal').length, 4);
+  const hiddenAnalog = t.courseArrangementRows(analogParent, 'personal')[0];
+  t.state.localSchedule.hiddenSchoolEntries = [{ key: t.schoolScheduleOccurrenceKey(hiddenAnalog) }];
+  assert.strictEqual(t.scheduleExportRows('personal').length, 3);
+  assert.strictEqual(t.scheduleCsvEntries('personal').length, 3);
+  t.state.localSchedule.hiddenSchoolEntries = [];
+
   const sunday = t.mapCourse({
     courseName: '体育(二)', SKZC: '1-9周（单）、11-16周', SKXQMC: '星期日', JC: '3-4',
     SKJS: '宋建欣', JASMC: '线上'
@@ -428,6 +579,113 @@ const t = global.__auditTest;
   assert.ok(cappedOverview.includes("2 / 2 学分"));
   assert.ok(!cappedOverview.includes("8 / 6"));
   assert.ok(!/还差[^<]*-/.test(cappedOverview));
+
+  // A failed attempt plus a retake/re-exam must be one logical course. Any
+  // passing attempt completes it, and the visible/exported result is the
+  // highest comparable passing score rather than the earlier failing score.
+  const retakeCourse = { name: "高等数学", code: "MATH-001", credit: "5", nature: "必修", required: "必修", raw: {} };
+  const retakeScores = [
+    { name: "高等数学", code: "MATH-001", credit: "5", score: "42", status: "未通过", retake: "初修", raw: {} },
+    { name: "高等数学", code: "MATH-001", credit: "5", score: "76", status: "已通过", retake: "补考", raw: {} },
+    { name: "高等数学", code: "MATH-001", credit: "5", score: "88", status: "已通过", retake: "重修", raw: {} }
+  ];
+  assert.strictEqual(t.curriculumScoreGroups(retakeScores).length, 1);
+  const retakeCompletion = t.curriculumCourseCompletion(retakeCourse, retakeScores);
+  assert.strictEqual(retakeCompletion.earned, true);
+  assert.strictEqual(retakeCompletion.score.score, "88");
+  assert.strictEqual(retakeCompletion.matchType, "课程号");
+  const savedAllScoresBeforeExportCheck = t.state.data.allScores;
+  t.state.data.allScores = retakeScores;
+  assert.ok(t.curriculumPdfCompletion(retakeCourse).includes("88"));
+  const retakeProgress = t.curriculumProgressMap([{ id: "retake-course-group", name: "重修测试课组", minCredits: "5", courses: [retakeCourse] }]).get("retake-course-group");
+  assert.strictEqual(retakeProgress.courseCount, 1);
+  assert.strictEqual(retakeProgress.earnedCourseCount, 1);
+  assert.strictEqual(retakeProgress.earnedCredits, 5);
+  t.state.data.allScores = savedAllScoresBeforeExportCheck;
+
+  const nameFallbackScores = [
+    { name: "程序设计", code: "", credit: "3", score: "55", status: "未通过", raw: {} },
+    { name: "程序设计", code: "", credit: "3", score: "61", status: "已通过", raw: {} }
+  ];
+  const nameFallbackCompletion = t.curriculumCourseCompletion({ name: "程序设计", code: "", credit: "3", raw: {} }, nameFallbackScores);
+  assert.strictEqual(nameFallbackCompletion.earned, true);
+  assert.strictEqual(nameFallbackCompletion.score.score, "61");
+  assert.strictEqual(nameFallbackCompletion.matchType, "课程名");
+
+  const mediumScore = { name: "大学英语", code: "ENG-001", credit: "2", score: "中等", status: "中等", raw: {} };
+  const mediumCompletion = t.curriculumCourseCompletion({ name: "大学英语", code: "ENG-001", credit: "2", raw: {} }, [mediumScore]);
+  assert.strictEqual(mediumCompletion.earned, true);
+  const savedAllScoresBeforeMediumExport = t.state.data.allScores;
+  t.state.data.allScores = [mediumScore];
+  assert.ok(t.curriculumPdfCompletion({ name: "大学英语", code: "ENG-001", credit: "2", raw: {} }).includes("中等"));
+  t.state.data.allScores = savedAllScoresBeforeMediumExport;
+
+  const failedOnlyScores = [
+    { name: "线性代数", code: "MATH-002", score: "48", status: "未通过", raw: {} },
+    { name: "线性代数", code: "MATH-002", score: "57", status: "未通过", raw: {} }
+  ];
+  const failedOnlyCompletion = t.curriculumCourseCompletion({ name: "线性代数", code: "MATH-002", raw: {} }, failedOnlyScores);
+  assert.strictEqual(failedOnlyCompletion.earned, false);
+  assert.strictEqual(failedOnlyCompletion.score.score, "57");
+
+  const firstAttempt = { KCH: "MATH-003", XNXQDM: "2025-2026-1", KCM: "大学物理", XF: "4", XSZCJ: "45", SFJG: "不及格", CXCKDM: "初修" };
+  const retakeAttempt = { ...firstAttempt, XSZCJ: "82", SFJG: "通过", CXCKDM: "补考" };
+  const exactDuplicate = { ...firstAttempt };
+  assert.notStrictEqual(t.scoreRowDeduplicationKey(firstAttempt), t.scoreRowDeduplicationKey(retakeAttempt));
+  assert.strictEqual(t.scoreRowDeduplicationKey(firstAttempt), t.scoreRowDeduplicationKey(exactDuplicate));
+  const mergedAttemptRows = t.mergeScoreRows([firstAttempt, retakeAttempt, exactDuplicate]);
+  assert.strictEqual(mergedAttemptRows.length, 2);
+  assert.deepStrictEqual(new Set(mergedAttemptRows.map((row) => row.score)), new Set(["45", "82"]));
+  const sameGenericIdDifferentAttempts = [
+    { ...firstAttempt, id: "course-row-1", XSZCJ: "45", SFJG: "不及格", CXCKDM: "初修" },
+    { ...firstAttempt, id: "course-row-1", XSZCJ: "82", SFJG: "通过", CXCKDM: "补考" }
+  ];
+  assert.strictEqual(t.mergeScoreRows(sameGenericIdDifferentAttempts).length, 2);
+  const gpaAttemptRows = [
+    { ...firstAttempt, JD: "0.0" },
+    { ...retakeAttempt, JD: "4.0" }
+  ];
+  assert.strictEqual(t.dedupeGpaRows(gpaAttemptRows).length, 1);
+  assert.strictEqual(t.calculateAverageGpa(t.dedupeGpaRows(gpaAttemptRows), "—", "").total, 1);
+
+  // Match strength must win before score value: an exact course-number match
+  // at 70 must not be replaced by a higher-score approximate name match.
+  const exactCodeCourse = { name: "高等数学", code: "MATH-004", credit: "5", raw: {} };
+  const exactCodeScore = { name: "高等数学", code: "MATH-004", term: "2025-2026-1", credit: "5", score: "70", status: "已通过", raw: {} };
+  const approximateNameScore = { name: "高等数学（重修）", code: "MATH-999", term: "2025-2026-2", credit: "5", score: "95", status: "已通过", raw: {} };
+  const exactCodeCompletion = t.curriculumCourseCompletion(exactCodeCourse, [exactCodeScore, approximateNameScore]);
+  assert.strictEqual(exactCodeCompletion.matchType, "课程号");
+  assert.strictEqual(exactCodeCompletion.score.score, "70");
+  const savedAllScoresBeforeMatchPriority = t.state.data.allScores;
+  t.state.data.allScores = [exactCodeScore, approximateNameScore];
+  assert.ok(t.curriculumPdfCompletion(exactCodeCourse).includes("70"));
+  t.state.data.allScores = savedAllScoresBeforeMatchPriority;
+
+  // The same course number across different terms is one logical course;
+  // completion uses the highest passing score in that group.
+  const crossTermScores = [
+    { name: "离散数学", code: "MATH-005", term: "2024-2025-2", credit: "3", score: "72", status: "已通过", raw: {} },
+    { name: "离散数学", code: "MATH-005", term: "2025-2026-1", credit: "3", score: "91", status: "已通过", raw: {} }
+  ];
+  assert.strictEqual(t.curriculumScoreGroups(crossTermScores).length, 1);
+  const crossTermCompletion = t.curriculumCourseCompletion({ name: "离散数学", code: "MATH-005", credit: "3", raw: {} }, crossTermScores);
+  assert.strictEqual(crossTermCompletion.matchType, "课程号");
+  assert.strictEqual(crossTermCompletion.score.score, "91");
+
+  // Category fallback must also collapse repeated general-elective results;
+  // otherwise the same course's retake would be counted twice in the group.
+  const generalGroup = { id: "general-score-group", name: "通识选修", parentId: "", electiveCredits: "2", courses: [], raw: {} };
+  const savedAllScoresForCurriculum = t.state.data.allScores;
+  t.state.data.allScores = [
+    { name: "通识选修课", code: "GEN-001", credit: "2", score: "50", status: "未通过", category: "通识选修", nature: "选修", raw: {} },
+    { name: "通识选修课", code: "GEN-001", credit: "2", score: "86", status: "已通过", category: "通识选修", nature: "选修", raw: {} }
+  ];
+  const fallbackRecords = t.curriculumCategoryFallbackRecords([generalGroup], []);
+  assert.strictEqual(fallbackRecords.get("general-score-group").length, 1);
+  const fallbackProgress = t.curriculumProgressMap([generalGroup]).get("general-score-group");
+  assert.strictEqual(fallbackProgress.courseCount, 1);
+  assert.strictEqual(fallbackProgress.earnedCredits, 2);
+  t.state.data.allScores = savedAllScoresForCurriculum;
 
   t.state.allDetail = {
     typeName: '教师课表', name: '张三', code: 'T001',

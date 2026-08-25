@@ -3433,6 +3433,52 @@ function mapScore(raw) {
   };
 }
 
+function scoreRowDeduplicationKey(raw = {}, index = 0) {
+  // 通用 id 可能只是课程行、分页或接口包装对象的 ID，不代表唯一成绩尝试。
+  // 只有明确的成绩明细标识才可以直接作为唯一键。
+  const explicit = displayValue(valueOf(raw, ["WID", "wid", "scoreId", "detailId"], ""), "");
+  if (explicit) return `id:${curriculumComparableText(explicit)}`;
+  const parts = [
+    valueOf(raw, ["KCH", "KCHM", "KCDM", "courseNo", "courseCode", "code"], ""),
+    valueOf(raw, ["XNXQDM", "XNXQMC", "termCode", "term"], ""),
+    valueOf(raw, ["KCM", "KCMC", "courseName", "course", "name"], ""),
+    valueOf(raw, ["XF", "XKXF", "KCBKXF", "credit", "credits"], ""),
+    valueOf(raw, ["XSZCJ", "ZCJ", "score", "totalScore", "CJSZ"], ""),
+    valueOf(raw, ["JD", "gpa", "gradePoint", "XFJD"], ""),
+    valueOf(raw, ["SFJG_DISPLAY", "SFJG", "passStatus", "pass", "status"], ""),
+    valueOf(raw, ["CXCKDM_DISPLAY", "CXCKDM", "retakeStatus", "retake"], "")
+  ].map((value) => curriculumComparableText(value));
+  return parts.some(Boolean) ? `attempt:${parts.join("|")}` : `row:${index}`;
+}
+
+// GPA 计算保持历史语义：同一 WID，或同一课程号 + 学期 + 课程名，只算一行。
+// 这和培养方案的成绩尝试归并刻意分开，避免补考/重修影响培养方案判断的同时，
+// 又把同一门课重复计入 GPA。
+function dedupeGpaRows(rows = []) {
+  const unique = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((raw, index) => {
+    const explicit = displayValue(valueOf(raw, ["WID", "wid"]), "");
+    const fallback = [
+      valueOf(raw, ["KCH", "courseNo"], ""),
+      valueOf(raw, ["XNXQDM", "termCode"], ""),
+      valueOf(raw, ["KCM", "courseName"], "")
+    ].join("|");
+    const key = explicit || fallback || `row:${index}`;
+    if (!unique.has(key)) unique.set(key, raw);
+  });
+  return [...unique.values()];
+}
+
+function mergeScoreRows(rows = []) {
+  const merged = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((raw, index) => {
+    const mapped = mapScore(raw);
+    const key = scoreRowDeduplicationKey(raw, index);
+    if (key && !merged.has(key)) merged.set(key, mapped);
+  });
+  return [...merged.values()];
+}
+
 function curriculumComparableText(value) {
   return String(value ?? "")
     .toLowerCase()
@@ -3455,9 +3501,9 @@ function curriculumScorePassedForCredit(score = {}) {
   const statusText = String(score.status ?? "").trim();
   const negativeText = [rawPass, scoreText, statusText].join(" ").toLowerCase();
   if (/不及格|不通过|不合格|未通过|挂科|缺考|缓考|未考|fail|absent/.test(negativeText)) return false;
-  if (["1", "true", "yes", "y", "是", "通过", "合格", "及格", "pass", "优", "优秀", "良", "良好", "中"].includes(rawPass)) return true;
-  if (["已通过", "通过", "合格", "及格", "优", "优秀", "良", "良好", "中"].includes(statusText)) return true;
-  if (["通过", "合格", "及格", "优", "优秀", "良", "良好", "中"].includes(scoreText) || /^(优|优秀|良|良好|中|合格|及格|通过)[（(]/.test(scoreText)) return true;
+  if (["1", "true", "yes", "y", "是", "通过", "合格", "及格", "pass", "优秀", "优", "良好", "良", "中等", "中"].includes(rawPass)) return true;
+  if (["已通过", "通过", "合格", "及格", "优秀", "优", "良好", "良", "中等", "中"].includes(statusText)) return true;
+  if (["通过", "合格", "及格", "优秀", "优", "良好", "良", "中等", "中"].includes(scoreText) || /^(优秀|优|良好|良|中等|中|合格|及格|通过)[（(]/.test(scoreText)) return true;
   const numericScore = numericValue(scoreText);
   return numericScore !== null && numericScore >= 60;
 }
@@ -3488,6 +3534,99 @@ function curriculumScoreKey(score = {}, index = 0) {
     .map((value) => curriculumComparableText(value))
     .filter(Boolean);
   return parts.length ? `row:${parts.join("|")}` : `row:${index}`;
+}
+
+// 培养方案只关心“一门逻辑课程”的完成情况，而成绩接口会把初修、补考、
+// 重修分别返回。课程号是最可靠的身份；只有成绩没有课程号时才用课程名兜底。
+// 这套身份归并只用于培养方案，不改变成绩页对原始成绩记录的展示。
+function curriculumScoreLogicalKey(score = {}) {
+  const code = curriculumComparableText(score.code);
+  if (code) return `code:${code}`;
+  const name = curriculumComparableText(score.name);
+  return name ? `name:${name}` : "";
+}
+
+function curriculumScoreComparableValue(score = {}) {
+  const text = String(score.score ?? "").trim();
+  const direct = numericValue(text);
+  if (direct !== null) return { value: direct, comparable: true };
+  const embedded = text.match(/(^|[^0-9])([0-9]+(?:\.[0-9]+)?)(?=\s*(?:分|（|\(|$))/);
+  if (embedded) return { value: Number(embedded[2]), comparable: true };
+  const normalized = text.toLowerCase().replace(/\s+/g, "");
+  const labels = [
+    ["优秀", 100], ["优", 95], ["良好", 85], ["良", 80],
+    ["中等", 75], ["中", 75], ["及格", 60], ["合格", 60], ["通过", 60], ["pass", 60]
+  ];
+  const label = labels.find(([name]) => normalized === name || normalized.startsWith(`${name}（`) || normalized.startsWith(`${name}(`));
+  if (label) return { value: label[1], comparable: true };
+  const gpa = numericValue(score.gpa);
+  return gpa === null ? { value: null, comparable: false } : { value: gpa, comparable: false };
+}
+
+function curriculumScoreRank(score = {}) {
+  const comparable = curriculumScoreComparableValue(score);
+  const gpa = numericValue(score.gpa);
+  return [
+    curriculumScorePassedForCredit(score) ? 1 : 0,
+    comparable.comparable ? 1 : 0,
+    comparable.value === null ? -1 : comparable.value,
+    gpa === null ? -1 : gpa,
+    curriculumScoreCredit(score)
+  ];
+}
+
+function curriculumCompareScores(left = {}, right = {}) {
+  const leftRank = curriculumScoreRank(left);
+  const rightRank = curriculumScoreRank(right);
+  for (let index = 0; index < leftRank.length; index += 1) {
+    if (leftRank[index] !== rightRank[index]) return leftRank[index] - rightRank[index];
+  }
+  return 0;
+}
+
+function curriculumBestScore(scores = []) {
+  const list = Array.isArray(scores) ? scores.filter(Boolean) : [];
+  if (!list.length) return null;
+  const passed = list.filter((score) => curriculumScorePassedForCredit(score));
+  const candidates = passed.length ? passed : list;
+  return candidates.reduce((best, score) => (!best || curriculumCompareScores(score, best) > 0 ? score : best), null);
+}
+
+function curriculumScoreGroups(scores = []) {
+  const codedGroups = new Map();
+  const nameOnlyGroups = new Map();
+  const groups = [];
+  const createGroup = (key, score) => {
+    const group = { key, scores: [], names: new Set() };
+    groups.push(group);
+    if (score.name) group.names.add(curriculumComparableText(score.name));
+    return group;
+  };
+
+  (Array.isArray(scores) ? scores : []).forEach((score, index) => {
+    const code = curriculumComparableText(score?.code);
+    const name = curriculumComparableText(score?.name);
+    let group = code ? codedGroups.get(code) : name ? nameOnlyGroups.get(name) : null;
+    if (!group) group = createGroup(code ? `code:${code}` : name ? `name:${name}` : `row:${curriculumScoreKey(score, index)}`, score || {});
+    group.scores.push(score);
+    if (name) group.names.add(name);
+    if (code) codedGroups.set(code, group);
+    else if (name) nameOnlyGroups.set(name, group);
+  });
+
+  // 无课程号的成绩可以并入唯一同名课程号组；如果同名但存在多个不同课程号，
+  // 继续保留名称组，避免错误地把两门同名课程合成一门。
+  for (const [name, nameGroup] of nameOnlyGroups) {
+    const matches = [...codedGroups.values()].filter((group, index, list) => (
+      group.names.has(name) && list.indexOf(group) === index
+    ));
+    if (matches.length !== 1) continue;
+    const target = matches[0];
+    target.scores.push(...nameGroup.scores);
+    const index = groups.indexOf(nameGroup);
+    if (index >= 0) groups.splice(index, 1);
+  }
+  return groups;
 }
 
 function curriculumScoreText(score = {}) {
@@ -3575,16 +3714,23 @@ function curriculumGeneralElectiveLabelsMatch(group = {}, score = {}) {
 }
 
 function curriculumCategoryFallbackRecords(groups = [], concreteCourses = []) {
-  const scores = (Array.isArray(state.data.allScores) ? state.data.allScores : [])
-    .filter((score) => curriculumScoreIsGeneralElective(score) && curriculumScorePassedForCredit(score) && curriculumScoreCredit(score) > 0);
-  if (!scores.length) return new Map();
+  const scoreGroups = curriculumScoreGroups(state.data.allScores || [])
+    .map((group, index) => {
+      const isGeneralElective = group.scores.some((score) => curriculumScoreIsGeneralElective(score));
+      const eligible = isGeneralElective
+        ? group.scores.filter((score) => curriculumScorePassedForCredit(score) && curriculumScoreCredit(score) > 0)
+        : [];
+      return { ...group, index, eligible, score: curriculumBestScore(eligible) };
+    })
+    .filter((group) => group.score);
+  if (!scoreGroups.length) return new Map();
 
   // 如果培养方案本身列出了具体的通识选修课程，优先按课程号/课程名匹配，
   // 这里只接管原系统只返回“通识选修课/通识教育模块”学分要求、没有课程行的情况。
   const concreteMatches = new Set();
-  scores.forEach((score, index) => {
-    if (concreteCourses.some((course) => curriculumCourseCompletion(course, [score]).earned)) {
-      concreteMatches.add(curriculumScoreKey(score, index));
+  scoreGroups.forEach((group) => {
+    if (concreteCourses.some((course) => curriculumCourseCompletion(course, group.scores).earned)) {
+      concreteMatches.add(group.key);
     }
   });
 
@@ -3594,9 +3740,8 @@ function curriculumCategoryFallbackRecords(groups = [], concreteCourses = []) {
     .sort((left, right) => right.priority - left.priority || String(right.group.path || "").length - String(left.group.path || "").length || left.index - right.index);
   if (!candidates.length) return new Map();
   const recordsByGroup = new Map();
-  scores
-    .map((score, index) => ({ score, index, key: curriculumScoreKey(score, index) }))
-    .filter((item) => !concreteMatches.has(item.key))
+  scoreGroups
+    .filter((group) => !concreteMatches.has(group.key))
     .forEach(({ score }) => {
       const matchingCandidates = candidates.filter((candidate) => curriculumGeneralElectiveLabelsMatch(candidate.group, score));
       const target = matchingCandidates[0] || candidates[0];
@@ -3625,17 +3770,25 @@ function curriculumCategoryFallbackRecords(groups = [], concreteCourses = []) {
 }
 
 function curriculumCourseCompletion(course = {}, scores = state.data.allScores) {
-  const matches = (Array.isArray(scores) ? scores : [])
-    .filter((score) => curriculumScorePassedForCredit(score))
-    .map((score) => ({ score, matchType: curriculumScoreMatchType(course, score) }))
-    .filter((item) => item.matchType);
+  const matches = curriculumScoreGroups(scores).map((group) => {
+    const matchedScores = group.scores.filter((score) => curriculumScoreMatchType(course, score));
+    if (!matchedScores.length) return null;
+    const bestScore = curriculumBestScore(matchedScores);
+    const matchType = matchedScores
+      .map((score) => curriculumScoreMatchType(course, score))
+      .sort((left, right) => {
+        const rank = (value) => value === "课程号" ? 3 : value === "课程名" ? 2 : 1;
+        return rank(right) - rank(left);
+      })[0] || "";
+    return { earned: matchedScores.some((score) => curriculumScorePassedForCredit(score)), score: bestScore, matchType };
+  }).filter(Boolean);
   matches.sort((left, right) => {
     const rank = (value) => value === "课程号" ? 3 : value === "课程名" ? 2 : 1;
-    return rank(right.matchType) - rank(left.matchType);
+    return rank(right.matchType) - rank(left.matchType) || curriculumCompareScores(right.score, left.score);
   });
   const match = matches[0] || null;
   return {
-    earned: Boolean(match),
+    earned: Boolean(match?.earned),
     score: match?.score || null,
     matchType: match?.matchType || ""
   };
@@ -3814,10 +3967,56 @@ function rawTextValue(raw, keys) {
 }
 
 function rawScheduleText(raw) {
-  return rawTextValue(raw, [
-    "YPSJDD", "KCSJDD", "SKSJDD", "classDateAndPlace", "classInfo", "scheduleInfo", "timePlace", "schedule",
-    "cellDetail", "titleWeekTeacherClassroomDetail", "titleDetail", "cellWeekTeacherClassroomDetail", "cellDetailText"
-  ]);
+  return scheduleDetailCandidates(raw).join("、");
+}
+
+const SCHEDULE_DETAIL_KEYS = [
+  "YPSJDD", "KCSJDD", "SKSJDD", "classDateAndPlace", "classInfo", "scheduleInfo", "timePlace", "schedule",
+  "cellDetail", "titleWeekTeacherClassroomDetail", "titleDetail", "cellWeekTeacherClassroomDetail", "cellDetailText"
+];
+
+const SCHEDULE_LOCATION_ALIASES = ["JASMC", "SKDD", "JAS", "roomName", "classroomName", "room", "place", "placeName", "location", "locationName", "address"];
+
+function isCompoundScheduleSource(value) {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  const hasWeek = /(?:第\s*)?[0-9一二两三四五六七八九十百]+(?:\s*[-~至—–－]\s*[0-9一二两三四五六七八九十百]+)?\s*周/.test(text);
+  const hasWeekday = /(?:星期|周)(?:日|天|一|二|三|四|五|六|七|[0-7])/.test(text);
+  const hasSection = /第?\s*[0-9一二三四五六七八九十]+\s*(?:[-~至]\s*第?\s*[0-9一二三四五六七八九十]+\s*)?节/.test(text);
+  // 地点字段中的普通“南湖校区 教307”不能变成排课源；原系统复合串
+  // 至少要带周次并出现斜杠结构，或同时带星期和节次。
+  return hasWeek && (text.includes("/") || (hasWeekday && hasSection));
+}
+
+function scheduleDetailValueTexts(value, depth = 0) {
+  if (depth > 5 || value === undefined || value === null) return [];
+  if (Array.isArray(value)) return value.flatMap((item) => scheduleDetailValueTexts(item, depth + 1));
+  if (typeof value === "object") {
+    const direct = valueOf(value, ["text", "value", "label", "name", "detail", "description"], "");
+    if (hasDisplayValue(direct)) return [String(direct).trim()];
+    return Object.values(value).flatMap((child) => scheduleDetailValueTexts(child, depth + 1));
+  }
+  const text = String(value).replace(/\r/g, "").trim();
+  return text ? [text] : [];
+}
+
+function scheduleDetailTexts(raw) {
+  if (!raw || typeof raw !== "object") return [];
+  const values = [];
+  SCHEDULE_DETAIL_KEYS.forEach((key) => {
+    scheduleDetailValueTexts(raw[key]).forEach((text) => {
+      if (!values.includes(text)) values.push(text);
+    });
+  });
+  // 部分个人课表接口把完整“周次/星期/节次/教师/地点”串放在 JASMC、
+  // SKDD 或 location 中。只有明确看起来像复合排课串时才提升为 source，
+  // 避免普通教室字段污染 rawScheduleText。
+  SCHEDULE_LOCATION_ALIASES.forEach((key) => {
+    scheduleDetailValueTexts(raw[key]).filter(isCompoundScheduleSource).forEach((text) => {
+      if (!values.includes(text)) values.push(text);
+    });
+  });
+  return values;
 }
 
 function courseAssessmentTextFromRaw(raw) {
@@ -4344,7 +4543,20 @@ function mapCourse(raw) {
       ? `第${sectionRange.start}节`
       : `第${sectionRange.start}-${sectionRange.end}节`
     : normalizeSection(displayValue(sectionCandidate, ""));
-  const location = displayValue(rawLocation, parsed.location || "");
+  const rawLocationText = displayValue(rawLocation, "");
+  const compoundLocationSource = isCompoundScheduleSource(rawLocationText);
+  const firstCompoundSegment = compoundLocationSource
+    ? splitScheduleSegments(rawLocationText)[0]
+    : "";
+  const firstCompoundParsed = firstCompoundSegment
+    ? parseScheduleSegment(firstCompoundSegment, { ...parsed, teacher: parsed.teacher || "", location: "" })
+    : null;
+  // JASMC/SKDD/location 在部分接口中不是教室字段，而是完整复合排课串。
+  // 不能把整串写进课程地点；先取首段作为基础值，expandMappedCourse 会
+  // 再为每个独立 scheduleDetail 覆盖成各自教室。
+  const location = compoundLocationSource
+    ? displayValue(firstCompoundParsed?.location, "")
+    : displayValue(rawLocation, parsed.location || "");
   const time = displayValue(rawTime, [weeks, weekday, section].filter(Boolean).join(" ") || parsed.time || "");
   const fullDetail = displayValue(detail, [weeks, weekday, section, location].filter(Boolean).join(" "));
   const rawName = displayValue(valueOf(raw, ["courseName", "KCM", "KCMC", "course", "name"]), "");
@@ -4381,34 +4593,80 @@ function mapCourse(raw) {
 }
 
 function scheduleDetailCandidates(raw) {
-  const keys = [
-    "YPSJDD", "KCSJDD", "SKSJDD", "classDateAndPlace", "classInfo", "scheduleInfo", "timePlace", "schedule",
-    "titleWeekTeacherClassroomDetail", "titleDetail", "cellWeekTeacherClassroomDetail", "cellDetail", "cellDetailText"
-  ];
-  return keys
-    .map((key) => rawTextValue(raw, [key]))
-    .filter((value, index, values) => hasDisplayValue(value) && values.indexOf(value) === index);
+  return scheduleDetailTexts(raw);
 }
 
 function splitScheduleSegments(value) {
-  const text = String(value ?? "").replace(/\r/g, "").trim();
+  const text = String(value ?? "")
+    .replace(/\r/g, "")
+    .replace(/[，]/g, ",")
+    .replace(/[；]/g, ";")
+    .replace(/[／]/g, "/")
+    .trim();
   if (!text) return [];
-  // 周次之间也可能使用“、/，”连接，而不同排课段通常是“地点、下一段周次”。
-  // 只有分隔符前不是“周”时才切分，从而保留“4周、12周”这一组周次。
-  return text
-    .split(/(?<!周)[、，,；;|](?=\s*(?:第\s*)?[0-9一二三四五六七八九十]+(?:\s*[-~至]\s*[0-9一二三四五六七八九十]+)?\s*周)/u)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
+  // 分隔符后的“周次开头”表示一个新排课段，但“3-8周、10-13周”
+  // 仍是同一段中的不连续周次。后一种写法的分隔符前通常紧挨“周”或
+  // “周[理论]”，因此只有前文已经出现斜杠字段，或前文不是一个完整周次
+  // 词时才切分。这样可以同时兼容中文逗号、英文逗号、分号和数组拼接结果。
+  const isWeekStart = (index) => /^(?:第\s*)?[0-9一二三四五六七八九十百]+(?:\s*[-~至—–－]\s*(?:第\s*)?[0-9一二三四五六七八九十百]+)?\s*周/.test(text.slice(index).trimStart());
+  const isWeekdayWithSectionStart = (index) => /^(?:\/?\s*)(?:星期|周)(?:日|天|一|二|三|四|五|六|七|[0-7])\s*\/\s*(?:第?\s*[0-9一二三四五六七八九十百]+\s*(?:[-~至—–－]\s*第?\s*[0-9一二三四五六七八九十百]+\s*)?节)/.test(text.slice(index).trimStart());
+  const isSectionStart = (index) => {
+    const right = text.slice(index).trimStart().replace(/^\/\s*/, "");
+    const firstField = right.split("/")[0].trim();
+    return Boolean(firstField && parseSectionRange(firstField));
+  };
+  const isWeekTokenEnd = (before) => /(?:周\s*(?:[（(]\s*[单双]\s*[）)]|\[[^\]]+\])?)$/.test(before.trim());
+  const pieces = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (![",", ";", "、", "|", "\n"].includes(text[index])) continue;
+    const weekStart = isWeekStart(index + 1);
+    const continuationStart = weekStart || isWeekdayWithSectionStart(index + 1) || isSectionStart(index + 1);
+    if (!continuationStart) continue;
+    const before = text.slice(start, index).trimEnd();
+    const hasSlashFields = before.includes("/");
+    if (text[index] === "、" && isWeekTokenEnd(before)) continue;
+    // “3-8周、10-13周”是同一段的不连续周次；只有周次开头才需要
+    // 这个保护，省略周次的“星期三/第三节”仍应作为新的排课段。
+    if (weekStart && isWeekTokenEnd(before) && !hasSlashFields) continue;
+    if (before) pieces.push(before);
+    start = index + 1;
+  }
+  pieces.push(text.slice(start).trim());
+  return pieces.filter(Boolean);
 }
 
 function scheduleSegmentCount(value) {
   return splitScheduleSegments(value).length;
 }
 
+function scheduleNumberToArabic(value) {
+  const text = String(value ?? "").trim();
+  if (/^\d+$/.test(text)) return Number(text);
+  const digits = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  if (!text || [...text].some((char) => digits[char] === undefined && char !== "十" && char !== "百")) return 0;
+  if (text === "十") return 10;
+  const hundred = text.indexOf("百");
+  if (hundred >= 0) return (digits[text.slice(0, hundred)] || 1) * 100 + (text.slice(hundred + 1) ? scheduleNumberToArabic(text.slice(hundred + 1)) : 0);
+  const ten = text.indexOf("十");
+  if (ten >= 0) return (ten ? (digits[text[0]] || 0) * 10 : 10) + (text.slice(ten + 1) ? (digits[text.slice(ten + 1)] || 0) : 0);
+  return digits[text] ?? 0;
+}
+
 function canonicalWeeksText(value) {
-  const normalized = String(value ?? "").replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0));
-  const matches = [...normalized.matchAll(/(?:第\s*)?([0-9一二三四五六七八九十]+(?:\s*[-~至]\s*[0-9一二三四五六七八九十]+)?)\s*周\s*(?:[（(]\s*(单|双)\s*[）)])?/g)];
-  return matches.map((match) => `${match[1].replace(/\s+/g, "")}周${match[2] ? `（${match[2]}）` : ""}`).join("、");
+  let normalized = String(value ?? "")
+    .replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0))
+    .replace(/[－–—−]/g, "-")
+    .replace(/(第?\s*[0-9一二两三四五六七八九十百]+\s*周)\s*(?:至|到)\s*(第?\s*[0-9一二两三四五六七八九十百]+\s*周)/g, (full, left, right) => `${left.replace(/\s+/g, "").replace(/周$/, "")}-${right.replace(/\s+/g, "").replace(/^第/, "").replace(/周$/, "")}周`);
+  const matches = [...normalized.matchAll(/(?:第\s*)?([0-9一二两三四五六七八九十百]+(?:\s*[-~至]\s*[0-9一二两三四五六七八九十百]+)?)\s*周\s*(?:[（(]\s*(单|双)\s*[）)])?/g)];
+  const output = [];
+  matches.forEach((match) => {
+    const range = match[1].replace(/\s+/g, "").split(/[-~至]/).map(scheduleNumberToArabic).filter((number) => number > 0);
+    if (!range.length) return;
+    const text = range.length > 1 ? `${range[0]}-${range[1]}周` : `${range[0]}周`;
+    output.push(`${text}${match[2] ? `（${match[2]}）` : ""}`);
+  });
+  return [...new Set(output)].join("、");
 }
 
 function canonicalSectionText(value) {
@@ -4418,8 +4676,8 @@ function canonicalSectionText(value) {
 }
 
 function parseScheduleSegment(segment, baseCourse) {
-  const text = String(segment ?? "").trim();
-  const weeks = canonicalWeeksText(text);
+  const text = String(segment ?? "").replace(/[／]/g, "/").replace(/[，]/g, ",").trim();
+  const weeks = canonicalWeeksText(text) || canonicalWeeksText(baseCourse?.weeks) || displayValue(baseCourse?.weeks, "");
   if (!weeks) return null;
 
   const parts = text.split(/\s*\/\s*/).map((part) => part.trim()).filter(Boolean);
@@ -4430,7 +4688,9 @@ function parseScheduleSegment(segment, baseCourse) {
   let teacher = "";
   let location = "";
 
-  const structuredSegment = parts.length >= 4 && (weekday || section);
+  // 后续片段可能省略周次或星期，只剩“节次/教师/地点”；只要有明确
+  // 的星期或节次锚点，也应按斜杠字段读取教师和教室。
+  const structuredSegment = parts.length >= 2 && (weekday || section);
   if (structuredSegment) {
     const sectionIndex = parts.findIndex((part) => part === sectionPart);
     const tail = sectionIndex >= 0 ? parts.slice(sectionIndex + 1) : [];
@@ -4454,10 +4714,17 @@ function parseScheduleSegment(segment, baseCourse) {
 
 function expandMappedCourse(course) {
   const candidates = scheduleDetailCandidates(course.raw);
-  const detail = candidates
+  // 不再只取“段数最多”的一个字段。个人课表常把安排分散在 YPSJDD、
+  // cellDetail 数组和旧版 titleDetail 中；候选字段必须全部参与，再按完整
+  // 片段签名去重，否则某个接口字段覆盖另一个字段时会静默丢课。
+  const segments = [];
+  candidates
     .slice()
-    .sort((left, right) => scheduleSegmentCount(right) - scheduleSegmentCount(left) || String(right).length - String(left).length)[0] || "";
-  const segments = splitScheduleSegments(detail);
+    .sort((left, right) => scheduleSegmentCount(right) - scheduleSegmentCount(left) || String(right).length - String(left).length)
+    .flatMap((candidate) => splitScheduleSegments(candidate))
+    .forEach((segment) => {
+      if (!segments.includes(segment)) segments.push(segment);
+    });
   if (!segments.length) return [course];
 
   const expanded = segments
@@ -4472,7 +4739,8 @@ function expandMappedCourse(course) {
         teacher: parsed.teacher || course.teacher,
         location: parsed.location || course.location,
         time: [parsed.weeks, parsed.weekday, parsed.section, extractClockText(course.time)].filter(Boolean).join(" "),
-        detail: segment
+        detail: segment,
+        scheduleSegment: segment
       };
     })
     .filter(Boolean);
@@ -4653,8 +4921,9 @@ async function loadAllScoreRows(termCodes) {
     if (Array.isArray(result.value) && result.value.length) populatedCodes.push(code);
     if (!Array.isArray(result.value)) return;
     result.value.forEach((row) => {
-      const key = displayValue(valueOf(row, ["WID", "wid"]), "")
-        || [valueOf(row, ["KCH", "courseNo"]), valueOf(row, ["XNXQDM", "termCode"]), valueOf(row, ["KCM", "courseName"])].join("|");
+      // 没有 WID 时也必须保留同一课程同一学期的不同成绩尝试；只对
+      // 课程、分数、状态等全部一致的重复响应去重，避免补考/重修被吞掉。
+      const key = scoreRowDeduplicationKey(row, unique.size);
       if (key && !unique.has(key)) unique.set(key, row);
     });
   });
@@ -4841,9 +5110,19 @@ function courseScheduleSignature(course) {
 function hasCourseScheduleConflict(left, right) {
   const leftSchedule = courseScheduleSignature(left);
   const rightSchedule = courseScheduleSignature(right);
-  return ["day", "section", "weeks"].some((key) => (
+  if (["day", "section", "weeks"].some((key) => (
     leftSchedule[key] && rightSchedule[key] && leftSchedule[key] !== rightSchedule[key]
-  ));
+  ))) return true;
+  const comparableField = (value) => comparableCourseIdentity(value).replace(/校区/g, "");
+  const fieldsConflict = (key) => {
+    const leftValue = comparableField(left?.[key]);
+    const rightValue = comparableField(right?.[key]);
+    if (!leftValue || !rightValue || leftValue === rightValue) return false;
+    // 一个来源常带“南湖校区 教307”，另一个来源只带“教307”；
+    // 只要一方完整包含另一方，仍视为同一排课的补充字段。
+    return !leftValue.includes(rightValue) && !rightValue.includes(leftValue);
+  };
+  return fieldsConflict("location") || fieldsConflict("teacher");
 }
 
 // 课程名相同不代表是同一条排课记录。一个课程可能在不同星期、节次或周次重复出现，
@@ -4946,8 +5225,10 @@ function mergePersonalCourseSources(listRows, gridRows) {
   // 时间地点串再拆成一组重复的网格卡片。
   const detailCourses = [
     ...scheduledGridCourses,
+    // 只过滤已经被网格完整覆盖的同一排课；不能因为课程身份相同就
+    // 丢掉列表里另一星期、另一节次、另一周次或另一教室的安排。
     ...scheduledListCourses.filter((detail) => (
-      !scheduledGridCourses.some((gridCourse) => courseIdentityMatches(gridCourse, detail))
+      !scheduledGridCourses.some((gridCourse) => sameCourse(gridCourse, detail))
     ))
   ];
   const courses = [];
@@ -5055,19 +5336,14 @@ async function loadTermData(requestId = refreshRequestSequence) {
   const allScoresLive = allScoreResult.status === "fulfilled"
     && (allScoreRows.length > 0 || !state.personalCache.allScores.length);
   if (allScoresLive) {
-    const mergedAllScores = new Map();
-    [...allScoreRows, ...scoreRows].forEach((raw) => {
-      const mapped = mapScore(raw);
-      const key = mapped.detailId
-        || [mapped.code, mapped.term, mapped.name, mapped.credit].map((value) => curriculumComparableText(value)).join("|");
-      if (key && !mergedAllScores.has(key)) mergedAllScores.set(key, mapped);
-    });
-    state.data.allScores = [...mergedAllScores.values()];
+    // allScoreRows 与当前学期 scoreRows 可能同时包含同一课程的不同成绩尝试。
+    // 必须沿用成绩尝试级 key，不能退回到课程号+学期+课程名的粗粒度去重。
+    state.data.allScores = mergeScoreRows([...allScoreRows, ...scoreRows]);
   } else if (Array.isArray(state.personalCache.allScores)) {
     state.data.allScores = state.personalCache.allScores;
   }
   if (allScoresLive || gpaLive) {
-    state.data.gpaMeta = calculateAverageGpa(allScoreRows, reportedGpa, state.studentId);
+    state.data.gpaMeta = calculateAverageGpa(dedupeGpaRows(allScoreRows), reportedGpa, state.studentId);
     state.data.gpaMeta.scope = "全部已查询学期累计";
     state.data.gpaMeta.termCount = allScoreBundle.queriedCodes?.length || allScoreTermCodes.length;
     state.data.gpaMeta.successfulTermCount = allScoreBundle.successfulCodes?.length || 0;
@@ -5783,9 +6059,7 @@ function parseDay(value) {
     return { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 日: 7, 天: 7, 七: 7 }[dayValue] || 0;
   }
   const digit = text.trim().match(/^[1-7]$/);
-  if (digit) return Number(digit[0]);
-  const index = ["一", "二", "三", "四", "五", "六", "日"].findIndex((item) => text.includes(item));
-  return index >= 0 ? index + 1 : 0;
+  return digit ? Number(digit[0]) : 0;
 }
 
 function chineseSectionNumber(value) {
@@ -6466,8 +6740,7 @@ function scheduleExportFilteredRows(rows, selectedWeek) {
 
 function scheduleCsvSchoolRows() {
   const courses = Array.isArray(state.data.courses) ? state.data.courses : [];
-  const detailRows = Array.isArray(state.data.scheduleDetail) ? state.data.scheduleDetail : [];
-  const source = detailRows.length ? [...detailRows, ...courses.filter((course) => !detailRows.some((detail) => courseIdentityMatches(detail, course)))] : courses;
+  const source = schoolPersonalScheduleRows(courses);
   const hiddenKeys = new Set((state.localSchedule.hiddenSchoolEntries || []).filter((entry) => !entry.termCode || entry.termCode === state.termCode).map((entry) => entry.key));
   return source.filter((course) => course?.source !== "local" && !hiddenKeys.has(schoolScheduleOccurrenceKey(course)));
 }
@@ -6476,7 +6749,7 @@ function localScheduleCsvEntries(scope = "personal") {
   if (scope !== "personal") {
     const source = scope === "all-detail" ? (state.allDetail?.courses || state.allDetail?.rawRows || []) : (state.allRows || []).filter(isCourseDetailRow);
     const seen = new Set();
-    return source.flatMap((row) => expandMappedCourse(row?.raw ? row : mapCourse(row))).map((course) => {
+    return expandedScheduleOccurrenceRows(source).map((course) => {
       const range = courseSectionRange(course);
       return { courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: course.location || "", weekText: scheduleCsvWeekText(course) };
     }).filter((entry) => entry.courseName).filter((entry) => {
@@ -6486,7 +6759,7 @@ function localScheduleCsvEntries(scope = "personal") {
       return true;
     });
   }
-  const mapped = scheduleCsvSchoolRows().flatMap((row) => expandMappedCourse(row?.raw ? row : mapCourse(row)));
+  const mapped = expandedScheduleOccurrenceRows(scheduleCsvSchoolRows());
   const localItems = localScheduleItemsForTerm(state.termCode);
   const entries = [];
   let skipped = 0;
@@ -8495,22 +8768,33 @@ function renderCourseRowsTable(rows, includeDetail = false, scope = "personal") 
   const requirementHeader = availability.requirement ? "<th>课程性质</th>" : "";
   const categoryHeader = availability.category ? "<th>课程类别</th>" : "";
   const body = courses.map((course) => {
-    const clockText = extractClockText(course.time);
-    const sectionText = [courseSectionLabel(course), clockText].filter(Boolean).join(" / ") || "—";
+    const arrangements = courseArrangementRows(course, scope);
+    const arrangementList = arrangements.map((arrangement, index) => {
+      const clockText = extractClockText(arrangement.time) || localScheduleClockText(arrangement);
+      const scheduleText = [arrangement.weeks, arrangement.weekday, courseSectionLabel(arrangement), clockText].filter(Boolean).join(" · ") || "排课信息待识别";
+      const metaText = [arrangement.teacher && `教师：${arrangement.teacher}`, arrangement.location && `地点：${arrangement.location}`].filter(Boolean).join(" · ") || "教师、地点待识别";
+      const action = courseActionAttributes(arrangement, scope) || `type="button"`;
+      return `<li><button class="course-arrangement-item" ${action} title="查看第${index + 1}条排课详情"><span class="course-arrangement-summary">${escapeHtml(scheduleText)}</span><small class="course-arrangement-meta">${escapeHtml(metaText)}</small></button></li>`;
+    }).join("");
+    const courseAction = courseActionAttributes(course, scope) || `type="button"`;
     const categoryCell = availability.category ? `<td>${escapeHtml(courseCategoryValue(course) || "—")}</td>` : "";
     const assessmentCell = availability.assessment ? `<td>${escapeHtml(courseAssessmentValue(course) || "—")}</td>` : "";
     const requirementCell = availability.requirement ? `<td>${escapeHtml(courseRequirementValue(course) || "—")}</td>` : "";
-    return `<tr class="clickable-row" ${courseDataAttributes(course, scope)} title="点击查看课程详情"><td class="primary-cell">${escapeHtml(course.name)}</td><td>${escapeHtml(course.code)}</td><td>${escapeHtml(course.weeks || "—")}</td><td>${escapeHtml(course.weekday || "—")}</td><td>${escapeHtml(sectionText)}</td><td>${escapeHtml(course.teacher || "—")}</td><td>${escapeHtml(course.location || "—")}</td>${categoryCell}${assessmentCell}${requirementCell}${includeDetail ? `<td>${escapeHtml(course.detail || course.time || "—")}</td>` : ""}</tr>`;
+    return `<tr><td class="primary-cell"><button class="course-mobile-heading" ${courseAction} title="查看课程详情">${escapeHtml(course.name)}</button></td><td>${escapeHtml(course.code || course.catalogCode || "—")}</td><td class="course-arrangements-cell">${arrangements.length > 1 ? `<span class="course-arrangement-count">${arrangements.length} 条上课安排</span>` : ""}<ul class="course-arrangement-list">${arrangementList}</ul></td>${categoryCell}${assessmentCell}${requirementCell}${includeDetail ? `<td>${escapeHtml(course.detail || course.time || "—")}</td>` : ""}</tr>`;
   }).join("");
   const mobile = courses.map((course) => {
-    const clockText = extractClockText(course.time);
-    const sectionText = [courseSectionLabel(course), clockText].filter(Boolean).join(" / ");
-    const scheduleText = [course.weeks, course.weekday, sectionText].filter(Boolean).join(" · ") || "排课信息待识别";
-    const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
+    const arrangements = courseArrangementRows(course, scope);
     const action = courseActionAttributes(course, scope) || `type="button"`;
-    return `<button class="course-mobile-row course-mobile-standalone" ${action} title="点击查看课程详情"><strong>${escapeHtml(course.name)}</strong><span>${escapeHtml(scheduleText)}</span><small>${escapeHtml(placeText)}</small></button>`;
+    const arrangementList = arrangements.map((arrangement, index) => {
+      const clockText = extractClockText(arrangement.time) || localScheduleClockText(arrangement);
+      const scheduleText = [arrangement.weeks, arrangement.weekday, courseSectionLabel(arrangement), clockText].filter(Boolean).join(" · ") || "排课信息待识别";
+      const metaText = [arrangement.teacher && `教师：${arrangement.teacher}`, arrangement.location && `地点：${arrangement.location}`].filter(Boolean).join(" · ") || "教师、地点待识别";
+      const arrangementAction = courseActionAttributes(arrangement, scope) || `type="button"`;
+      return `<li><button class="course-arrangement-item" ${arrangementAction} title="查看第${index + 1}条排课详情"><span class="course-arrangement-summary">${escapeHtml(scheduleText)}</span><small class="course-arrangement-meta">${escapeHtml(metaText)}</small></button></li>`;
+    }).join("");
+    return `<article class="course-mobile-row course-mobile-standalone"><button class="course-mobile-heading" ${action} title="点击查看课程详情"><strong>${escapeHtml(course.name)}</strong><small>${escapeHtml(course.code || course.catalogCode || "无课程号")}</small></button>${arrangements.length > 1 ? `<span class="course-arrangement-count">${arrangements.length} 条上课安排</span>` : ""}<ul class="course-arrangement-list">${arrangementList}</ul></article>`;
   }).join("");
-  return `<div class="table-wrap course-desktop-table"><table><thead><tr><th>课程</th><th>课程号</th><th>周次</th><th>星期</th><th>节次 / 时间</th><th>授课教师</th><th>上课地点</th>${categoryHeader}${assessmentHeader}${requirementHeader}${detailHeader}</tr></thead><tbody>${body}</tbody></table></div><div class="course-mobile-list">${mobile}</div>`;
+  return `<div class="table-wrap course-desktop-table"><table><thead><tr><th>课程</th><th>课程号</th><th>上课安排</th>${categoryHeader}${assessmentHeader}${requirementHeader}${detailHeader}</tr></thead><tbody>${body}</tbody></table></div><div class="course-mobile-list">${mobile}</div>`;
 }
 
 function renderCourseTransferToolbar(scope, rows = []) {
@@ -9153,12 +9437,14 @@ function renderAllUtilities(allTermOptions, allTermError = "") {
 
 function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgressMap()) {
   const records = (state.curriculum.courses || []).map((course) => ({ course, completion: curriculumCourseCompletion(course) }));
-  const claimedScoreKeys = new Set(records.map((record, index) => record.completion.score ? curriculumScoreKey(record.completion.score, index) : "").filter(Boolean));
+  const claimedScoreKeys = new Set(records.map((record, index) => record.completion.score
+    ? curriculumScoreLogicalKey(record.completion.score) || curriculumScoreKey(record.completion.score, index)
+    : "").filter(Boolean));
   const categoryRecords = [...progressMap.values()]
     .flatMap((progress) => progress.records || [])
     .filter((record) => record.categoryFallback && record.completion?.earned)
     .filter((record, index) => {
-      const key = curriculumScoreKey(record.completion.score, index);
+      const key = curriculumScoreLogicalKey(record.completion.score) || curriculumScoreKey(record.completion.score, index);
       if (!key || claimedScoreKeys.has(key)) return false;
       claimedScoreKeys.add(key);
       return true;
@@ -9906,16 +10192,9 @@ function localScheduleItemToCourseRow(item) {
 
 function schoolPersonalScheduleRows(rows = state.data.courses) {
   const sourceRows = (Array.isArray(rows) ? rows : []).filter((row) => row?.source !== "local");
-  const detailRows = (Array.isArray(state.data.scheduleDetail) ? state.data.scheduleDetail : []).filter((row) => row?.source !== "local");
-  if (!detailRows.length) return sourceRows.filter(hasSchedulePlacement);
-  const allowedIndexes = new Set(sourceRows
-    .map((course) => state.data.courses.indexOf(course))
-    .filter((index) => index >= 0));
-  return detailRows.filter((course) => {
-    if (courseDayIndex(course) < 0) return false;
-    if (Number.isInteger(course?.sourceCourseIndex)) return allowedIndexes.has(course.sourceCourseIndex);
-    return sourceRows.some((source) => courseIdentityMatches(source, course));
-  });
+  return dedupeScheduleOccurrenceRows(sourceRows
+    .flatMap((course) => courseArrangementRows(course, "personal"))
+    .filter(hasSchedulePlacement));
 }
 
 function schoolScheduleOccurrenceKey(course) {
@@ -9947,6 +10226,84 @@ function mergedPersonalScheduleRows(rows = state.data.courses) {
 
 function normalizedScheduleCourses(rows) {
   return (rows || []).map((row) => row?.source === "local" || row?.raw ? row : mapCourse(row));
+}
+
+function dedupeScheduleOccurrenceRows(rows) {
+  const seen = new Set();
+  return (rows || []).filter((course) => {
+    const range = courseSectionRange(course);
+    const key = [
+      course.source || "school",
+      course.localId || course.code || course.catalogCode,
+      course.name,
+      courseDayIndex(course),
+      range ? `${range.start}-${range.end}` : course.section,
+      [...courseWeekNumbers(course)].sort((left, right) => left - right).join(","),
+      course.localDate,
+      extractClockText(course.time) || [course.startTime, course.endTime].filter(Boolean).join("-"),
+      course.teacher,
+      course.location
+    ].map((value) => String(value ?? "").trim()).join("|");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function expandedScheduleOccurrenceRows(rows) {
+  const expanded = normalizedScheduleCourses(rows).flatMap((course) => {
+    // scheduleDetail 中的记录已经是一条独立排课。再次解析它携带的原始
+    // 复合字符串会把同一门课的全部安排复制到每一条明细上。
+    if (course?.source === "local" || course?.scheduleSegment || Number.isInteger(course?.sourceCourseIndex)) return [course];
+    return expandMappedCourse(course);
+  });
+  return dedupeScheduleOccurrenceRows(expanded);
+}
+
+function courseArrangementRows(course, scope = "personal") {
+  const mapped = course?.source === "local" || course?.raw ? course : mapCourse(course);
+  if (mapped?.source === "local") return [mapped];
+  const sourceIndex = scope === "personal" ? courseIndexForScope(mapped, scope) : -1;
+  const details = scope === "personal"
+    ? (state.data.scheduleDetail || []).filter((detail) => {
+      if (Number.isInteger(detail?.sourceCourseIndex) && sourceIndex >= 0) return detail.sourceCourseIndex === sourceIndex;
+      if (Number.isInteger(detail?.sourceCourseIndex)) return false;
+      const mappedCode = comparableCourseIdentity(mapped.code || mapped.catalogCode);
+      const detailCode = comparableCourseIdentity(detail.code || detail.catalogCode);
+      if (mappedCode && detailCode && mappedCode !== detailCode) return false;
+      return courseIdentityMatches(mapped, detail);
+    })
+    : [];
+  const fallback = expandMappedCourse(mapped).map((detail) => (
+    sourceIndex >= 0 && !Number.isInteger(detail?.sourceCourseIndex)
+      ? { ...detail, sourceCourseIndex: sourceIndex }
+      : detail
+  ));
+  const merged = [];
+  [...details, ...fallback].forEach((candidate) => {
+    const detailIndex = state.data.scheduleDetail.indexOf(candidate);
+    const existingIndex = merged.findIndex((item) => sameCourse(item, candidate));
+    if (existingIndex >= 0) {
+      const combined = { ...merged[existingIndex] };
+      mergeCourseFields(combined, candidate);
+      if (!Number.isInteger(combined.sourceDetailIndex) && detailIndex >= 0) combined.sourceDetailIndex = detailIndex;
+      merged[existingIndex] = combined;
+    } else {
+      merged.push({ ...candidate, ...(detailIndex >= 0 ? { sourceDetailIndex: detailIndex } : {}) });
+    }
+  });
+  return dedupeScheduleOccurrenceRows(merged).sort((left, right) => {
+    const leftDay = courseDayIndex(left);
+    const rightDay = courseDayIndex(right);
+    const leftRange = courseSectionRange(left);
+    const rightRange = courseSectionRange(right);
+    const leftWeek = Math.min(...courseWeekNumbers(left), Number.MAX_SAFE_INTEGER);
+    const rightWeek = Math.min(...courseWeekNumbers(right), Number.MAX_SAFE_INTEGER);
+    return (leftDay < 0 ? 8 : leftDay) - (rightDay < 0 ? 8 : rightDay)
+      || (leftRange?.start || 99) - (rightRange?.start || 99)
+      || leftWeek - rightWeek
+      || String(left.location || "").localeCompare(String(right.location || ""), "zh-CN");
+  });
 }
 
 function personalScheduleRows(rows = state.data.courses) {
@@ -10328,7 +10685,9 @@ function courseActionAttributes(course, scope = "personal") {
     return `type="button" data-action="show-local-schedule" data-course-source="local" data-local-schedule-id="${escapeHtml(course.localId)}"`;
   }
   const index = courseIndexForScope(course, scope);
-  const detailIndex = scope === "personal" ? state.data.scheduleDetail.indexOf(course) : -1;
+  const detailIndex = scope === "personal"
+    ? Number.isInteger(course?.sourceDetailIndex) ? course.sourceDetailIndex : state.data.scheduleDetail.indexOf(course)
+    : -1;
   if (index < 0 && detailIndex < 0) return "";
   const sourceIndex = index >= 0 ? index : course.sourceCourseIndex;
   return `type="button" data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
@@ -10337,7 +10696,9 @@ function courseActionAttributes(course, scope = "personal") {
 function courseDataAttributes(course, scope = "personal") {
   if (course?.source === "local" && course.localId) return `data-course-source="local" data-local-schedule-id="${escapeHtml(course.localId)}"`;
   const index = courseIndexForScope(course, scope);
-  const detailIndex = scope === "personal" ? state.data.scheduleDetail.indexOf(course) : -1;
+  const detailIndex = scope === "personal"
+    ? Number.isInteger(course?.sourceDetailIndex) ? course.sourceDetailIndex : state.data.scheduleDetail.indexOf(course)
+    : -1;
   if (index < 0 && detailIndex < 0) return "";
   const sourceIndex = index >= 0 ? index : course.sourceCourseIndex;
   return `data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
@@ -10347,16 +10708,7 @@ function courseDataAttributes(course, scope = "personal") {
 // full-school pages; personal exports must use the merged school + local rows.
 function scheduleExportRows(scope = "personal") {
   const source = scope === "all-detail" ? (state.allDetail?.courses || []) : mergedPersonalScheduleRows(state.data.courses || []);
-  const normalized = normalizedScheduleCourses(source);
-  const expanded = scope === "all-detail" ? normalized.flatMap((course) => expandMappedCourse(course)) : normalized;
-  const seen = new Set();
-  return expanded.filter((course) => {
-    const range = courseSectionRange(course);
-    const key = [course.source || "school", course.localId || course.code, course.name, courseDayIndex(course), range ? `${range.start}-${range.end}` : course.section, [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","), course.localDate, course.teacher, course.location].map((value) => String(value ?? "").trim()).join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return expandedScheduleOccurrenceRows(source);
 }
 
 function scheduleExportFilteredRows(rows, selectedWeek) {
