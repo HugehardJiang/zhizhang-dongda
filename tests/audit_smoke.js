@@ -35,7 +35,7 @@ global.fetch = async () => { throw new Error('network disabled in audit smoke te
 
 const dashboardPath = path.join(__dirname, '..', 'dashboard.js');
 let code = fs.readFileSync(dashboardPath, 'utf8');
-code = code.replace(/\nrefresh\(\);\s*$/, '\n');
+code = code.replace(/\n\/\/ 桌面扩展保持原有的自动刷新[\s\S]*$/, '\n');
 code += `
 globalThis.__auditTest = {
   parseExamDate, normalizeCalendarDate, escapeHtml, mergeCurriculumPlans,

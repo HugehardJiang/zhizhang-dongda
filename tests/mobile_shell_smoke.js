@@ -81,6 +81,42 @@ global.AndroidApi = {
   setCampusSetting(value) {
     nativeCampusSetting = String(value || "");
     nativeCalls.push(`campus:${nativeCampusSetting}`);
+  },
+  loadPersonalCache() {
+    return JSON.stringify({
+      schema: "zhizhang-personal-cache/v2",
+      schemaVersion: 1,
+      savedAt: "2026-08-25T08:00:00.000Z",
+      studentId: "20250001",
+      termCode: "2025-2026-2",
+      terms: [{ code: "2025-2026-2", name: "2025-2026学年春季学期" }],
+      allScores: [{ detailId: "offline-score", name: "离线缓存课程", score: "88", status: "已通过" }],
+      termSnapshots: {
+        "2025-2026-2": {
+          scores: [{ detailId: "offline-score", name: "离线缓存课程", score: "88", status: "已通过" }],
+          exams: [],
+          courses: [],
+          scheduleDetail: [],
+          scheduleSource: "缓存",
+          gpa: "3.8",
+          gpaMeta: {}
+        }
+      }
+    });
+  },
+  loadLocalSchedule() {
+    return JSON.stringify({
+      schema: "zhizhang-local-schedule/v1",
+      schemaVersion: 1,
+      profileKey: "20250001",
+      items: [{
+        id: "offline-local-item",
+        title: "离线本地安排",
+        termCode: "2025-2026-2",
+        course: { weekNumbers: [1], weekdayIndex: 1, startSection: 1, endSection: 2 }
+      }],
+      hiddenSchoolEntries: []
+    });
   }
 };
 global.document = {
@@ -128,6 +164,7 @@ globalThis.__mobileShellAudit = {
   saveCurrentTermPreference,
   currentTermCodeFor,
   persistCampusCode,
+  bootstrapLocalDashboard,
   syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
   card: androidEcodeElements.card
@@ -326,8 +363,8 @@ assert.ok(mainActivitySource.includes('重新获取 WebVPN 认证页并只重试
 assert.ok(mainActivitySource.includes('formActionBefore'));
 assert.ok(!mainActivitySource.includes('postWebVpnLogin'));
 assert.ok(mainActivitySource.includes('setAcceptThirdPartyCookies'));
-assert.ok(/onPageFinished[\s\S]*scheduleBuiltInPortalProbe\(url\)/.test(mainActivitySource));
-assert.ok(/inspectBuiltInLoginPage[\s\S]*!isPortalLoginPage\(currentUrl\)[\s\S]*scheduleBuiltInPortalProbe\(currentUrl\)/.test(mainActivitySource));
+assert.ok(/onPageFinished[\s\S]*scheduleBuiltInPortalProbe\(url/.test(mainActivitySource));
+assert.ok(/inspectBuiltInLoginPage[\s\S]*!isPortalLoginPage\(currentUrl\)[\s\S]*scheduleBuiltInPortalProbe\(currentUrl/.test(mainActivitySource));
 assert.ok(mainActivitySource.includes('PORTAL_FALLBACK_URL'));
 assert.ok(mainActivitySource.includes('学校认证后连续返回非教务中转页'));
 assert.ok(mainActivitySource.includes('TOAST_NOTIFICATIONS_ENABLED'));
@@ -434,4 +471,23 @@ activeModal = null;
 audit.syncModal();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
 
-console.log("mobile shell smoke tests: PASS");
+(async () => {
+  // Offline cold-start regression: local data must become usable without the
+  // native session probe or any network response.
+  audit.state.view = "overview";
+  Object.assign(audit.state.currentTerm, { mode: "auto", overrideCode: "", detectedCode: "2025-2026-2" });
+  audit.state.termSelectionTouched = false;
+  audit.state.termCode = "2025-2026-2";
+  await audit.bootstrapLocalDashboard();
+  assert.strictEqual(audit.state.loading, false);
+  assert.strictEqual(audit.state.personalCache.available, true);
+  assert.strictEqual(audit.state.localSchedule.hydrated, true);
+  assert.strictEqual(audit.state.termCode, "2025-2026-2");
+  assert.strictEqual(audit.state.data.scores[0].name, "离线缓存课程");
+  assert.strictEqual(audit.state.localSchedule.items[0].title, "离线本地安排");
+  assert.ok(elements.get("content").innerHTML.includes("离线"));
+  console.log("mobile shell smoke tests: PASS");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

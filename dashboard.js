@@ -489,6 +489,9 @@ let refreshInFlight = null;
 let refreshFlightTermCode = "";
 let refreshQueued = false;
 let refreshQueuedForceTerms = false;
+// Android 启动时先恢复本地展示数据，再由原生安排远程会话探测。这个 Promise
+// 是 single-flight 门闩：首屏、手动刷新和页面切换不会重复读取同一份本地缓存。
+let localBootstrapPromise = null;
 let allScheduleRequestSequence = 0;
 let allScheduleDetailRequestSequence = 0;
 let curriculumListRequestSequence = 0;
@@ -9681,8 +9684,9 @@ async function syncCurrentTermFromSchool() {
 
 async function runRefresh(forceTerms = false) {
   const requestId = ++refreshRequestSequence;
-  const hasCache = hydratePersonalCache();
-  const hasLocalSchedule = await hydrateLocalSchedule();
+  const localBootstrap = await bootstrapLocalDashboard();
+  const hasCache = Boolean(localBootstrap?.hasCache || state.personalCache.available);
+  const hasLocalSchedule = localScheduleItemsForTerm(state.termCode).length > 0;
   state.fatalError = "";
   setNotice(hasCache ? "正在尝试刷新教务接口，页面先显示上次缓存…" : hasLocalSchedule && state.localSchedule.items.length ? "正在读取教务接口，页面先显示本地安排…" : "正在读取教务接口…", "", hasCache ? TOAST_CATEGORY_ESSENTIAL : "default");
   setConnection(hasCache ? "正在刷新 · 已显示本地缓存" : "正在读取数据", "loading");
@@ -10143,6 +10147,42 @@ async function hydrateLocalSchedule(profileKey = localScheduleProfileKey(), forc
   }
   try { updatePersonalTermSelect(); } catch { /* renderer may not be ready in smoke tests */ }
   return !state.localSchedule.corrupted;
+}
+
+async function bootstrapLocalDashboard() {
+  if (localBootstrapPromise) return localBootstrapPromise;
+  localBootstrapPromise = (async () => {
+    // 个人缓存是同步原生桥，本地自定义安排可能走异步存储；两者都必须在
+    // dashboardReady 之前完成，断网时不能再依赖远程会话探测放行。
+    const hasCache = hydratePersonalCache();
+    await hydrateLocalSchedule();
+    if (!state.termCode) state.termCode = currentTermCodeFor(currentTermCandidates());
+    applyCurrentTermDefaults();
+    const hasLocalSchedule = localScheduleItemsForTerm(state.termCode).length > 0;
+    state.loading = false;
+    state.fatalError = "";
+    state.connected = false;
+    if (hasCache && state.personalCache.available) {
+      state.personalCache.source = "cache";
+      setConnection("已加载本地缓存，等待同步", "ready");
+    } else if (hasLocalSchedule) {
+      setConnection("仅显示本地安排，等待同步", "ready");
+    } else {
+      setConnection("等待联网读取教务数据", "loading");
+    }
+    render();
+    return { hasCache: Boolean(hasCache && state.personalCache.available), hasLocalSchedule };
+  })().catch((error) => {
+    // 本地存储损坏或旧版本桥缺失也不能把首页卡在 loading；让网络刷新或
+    // 用户手动刷新继续有机会恢复，同时保留已成功读到的部分数据。
+    state.loading = false;
+    state.fatalError = "";
+    state.connected = false;
+    setConnection("本地数据暂不可用，等待同步", "loading");
+    render();
+    return { hasCache: false, hasLocalSchedule: false, error };
+  });
+  return localBootstrapPromise;
 }
 
 async function switchLocalScheduleProfile(studentId) {
@@ -11379,11 +11419,15 @@ globalThis.__handleAndroidBack = () => {
 // 桌面扩展保持原有的自动刷新；Android 只在文档加载完成后向原生发送
 // 一次启动握手，由原生并行安排 WebVPN 轻量会话探测和唯一刷新链路。
 if (IS_ANDROID_APP) {
-  // 原生会话探测与 WebView 的 onPageFinished 存在天然竞争：在数据尚未抵达
-  // 前先渲染稳定的加载态，任何握手延迟都不会让首页留下白屏。
+  // 原生会话探测与 WebView 的 onPageFinished 存在天然竞争：先渲染稳定的
+  // 加载态，再完成本地缓存水合；远程探测只负责随后同步，不得阻塞首屏。
   state.loading = true;
   render();
-  globalThis.AndroidApi?.dashboardReady?.();
+  bootstrapLocalDashboard().finally(() => {
+    // 本地数据已经可交互后才通知原生安排远程探测；断网时这一步仍然会
+    // 完成，UNKNOWN 结果不会让 Dashboard 回到 loading 或登录错误页。
+    globalThis.AndroidApi?.dashboardReady?.();
+  });
 } else {
   refresh();
 }

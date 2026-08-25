@@ -3831,6 +3831,9 @@ public class MainActivity extends Activity {
             lastBackgroundAt = 0L;
             if (stayedInBackgroundLongEnough && now - lastForegroundProbeAt >= FOREGROUND_PROBE_INTERVAL_MS) {
                 lastForegroundProbeAt = now;
+                // 前台恢复代表用户可能刚从无网环境回来；先登记一次待同步
+                // 意图，只有 HEALTHY 探测才真正刷新，UNKNOWN 不会触发重登。
+                requestDashboardRefreshAfterSessionProbe(false);
                 requestAcademicSessionProbe("foreground-resume");
             }
         } else if (portalActionButton != null) {
