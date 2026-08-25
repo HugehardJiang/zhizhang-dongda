@@ -472,7 +472,6 @@ globalThis.__androidLoginStatus = (status, message) => {
   if (state.androidLogin.status === "success") {
     state.fatalError = "";
     setNotice(state.androidLogin.message || "后台登录成功，正在刷新数据…", "success");
-    globalThis.__refreshDashboard?.(true);
   } else if (state.androidLogin.status === "retrying") {
     setNotice(state.androidLogin.message || "正在后台重新登录…", "");
   } else if (state.androidLogin.status === "failed") {
@@ -486,6 +485,10 @@ let toastTimer = 0;
 // 所有会修改共享 UI state 的异步任务都使用代次号，避免用户快速切换学期、
 // 重复查询或切换培养方案时，较早返回的旧请求覆盖较新的选择。
 let refreshRequestSequence = 0;
+let refreshInFlight = null;
+let refreshFlightTermCode = "";
+let refreshQueued = false;
+let refreshQueuedForceTerms = false;
 let allScheduleRequestSequence = 0;
 let allScheduleDetailRequestSequence = 0;
 let curriculumListRequestSequence = 0;
@@ -9667,7 +9670,7 @@ async function syncCurrentTermFromSchool() {
   }
 }
 
-async function refresh(forceTerms = false) {
+async function runRefresh(forceTerms = false) {
   const requestId = ++refreshRequestSequence;
   const hasCache = hydratePersonalCache();
   const hasLocalSchedule = await hydrateLocalSchedule();
@@ -9720,6 +9723,35 @@ async function refresh(forceTerms = false) {
     }
   }
   if (requestId === refreshRequestSequence) render();
+}
+
+// Android 启动、原生登录成功、页面切换和用户点击刷新都可能在同一时段
+// 到达。只允许一条刷新链路运行；只有用户已经明确切换查询学期时，才把
+// 新学期排到当前请求之后，普通重复触发直接复用当前 Promise。
+function refresh(forceTerms = false) {
+  if (refreshInFlight) {
+    const termChangedDuringFlight = state.termSelectionTouched
+      && state.termCode
+      && refreshFlightTermCode
+      && state.termCode !== refreshFlightTermCode;
+    if (termChangedDuringFlight || forceTerms) {
+      refreshQueued = true;
+      refreshQueuedForceTerms = refreshQueuedForceTerms || forceTerms;
+    }
+    return refreshInFlight;
+  }
+  refreshFlightTermCode = state.termCode || "";
+  const current = Promise.resolve(runRefresh(forceTerms));
+  refreshInFlight = current.finally(() => {
+    const shouldRunQueued = refreshQueued;
+    const queuedForceTerms = refreshQueuedForceTerms;
+    refreshInFlight = null;
+    refreshFlightTermCode = "";
+    refreshQueued = false;
+    refreshQueuedForceTerms = false;
+    if (shouldRunQueued) window.setTimeout(() => refresh(queuedForceTerms), 0);
+  });
+  return refreshInFlight;
 }
 
 /* -------------------------------------------------------------------------
@@ -11335,4 +11367,10 @@ globalThis.__handleAndroidBack = () => {
   }
   return false;
 };
-refresh();
+// 桌面扩展保持原有的自动刷新；Android 只在文档加载完成后向原生发送
+// 一次启动握手，由原生并行安排 WebVPN 轻量会话探测和唯一刷新链路。
+if (IS_ANDROID_APP) {
+  globalThis.AndroidApi?.dashboardReady?.();
+} else {
+  refresh();
+}

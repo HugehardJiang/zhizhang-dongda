@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.64";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.65";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -393,8 +393,11 @@ public class MainActivity extends Activity {
     private static final String LOGIN_METHOD_PASSWORD = "password";
     private static final String LOGIN_METHOD_WECHAT = "wechat";
     private static final String LOGIN_KEYSTORE_ALIAS = "zhizhang_builtin_login_v1";
-    private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 18;
-    private static final int BUILT_IN_LOGIN_TAB_SETTLE_MS = 900;
+    private static final int LOGIN_INSPECTION_MAX_ATTEMPTS = 12;
+    private static final int BUILT_IN_LOGIN_TAB_SETTLE_MS = 180;
+    private static final int BUILT_IN_LOGIN_SUBMIT_SETTLE_MS = 260;
+    private static final int BUILT_IN_LOGIN_INSPECTION_INTERVAL_MS = 300;
+    private static final int BUILT_IN_LOGIN_PORTAL_PROBE_DELAY_MS = 260;
     private static final int BUILT_IN_LOGIN_RETRY_MAX = 1;
     private static final int BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS = 2;
     private static final int LOGIN_DIAGNOSTIC_EVENT_MAX = 120;
@@ -411,6 +414,12 @@ public class MainActivity extends Activity {
     private static final int PERSONAL_CACHE_MAX_BYTES = 900 * 1024;
     private static final int LOCAL_SCHEDULE_MAX_BYTES = 900 * 1024;
     private static final int ECODE_COLLAPSED_HEIGHT_DP = 112;
+    // 会话探测严格使用学校 WebVPN 地址；不允许回退到 jwxt 直连。
+    private static final int ACADEMIC_PROBE_TIMEOUT_MS = 2500;
+    private static final int ACADEMIC_PROBE_TOTAL_BUDGET_MS = 5000;
+    private static final long ACADEMIC_PROBE_COOLDOWN_MS = 8000L;
+    private static final long FOREGROUND_PROBE_INTERVAL_MS = 10000L;
+    private static final int NETWORK_FAILURES_BEFORE_PROBE = 2;
 
     /**
      * 原登录页的二维码脚本会把完整的 qyQrLogin 地址传给 QRCode.makeCode。
@@ -608,6 +617,30 @@ public class MainActivity extends Activity {
     private String lastAcademicLoginError = "";
     private String lastLoginDiagnostics = "";
 
+    // 所有异步会话/登录回调都必须带上这两个代次；WebView 旧页面完成回调
+    // 不能改变新一轮登录或新 Cookie 的状态。
+    private long sessionEpoch = 1L;
+    private long loginOperationSequence;
+    private long activeLoginOperationId;
+    private boolean dashboardHandshakeReceived;
+    private boolean dashboardRefreshPending;
+    private boolean dashboardRefreshForceTerms;
+    private long lastForegroundProbeAt;
+    private long lastBackgroundAt;
+    private long lastAcademicProbeAt;
+    private long lastAcademicSessionHealthyAt;
+    private long academicProbeSequence;
+    private long activeAcademicProbeId;
+    private long activeAcademicProbeEpoch;
+    private long activeAcademicProbeLoginOperationId;
+    private boolean academicProbeInFlight;
+    private int academicNetworkFailureStreak;
+    private long lastNetworkRecoveryAt;
+    private boolean postLoginVerificationPending;
+    private boolean postLoginVerificationForEcode;
+    private boolean postLoginHadAcademicFailure;
+    private long postLoginOperationId;
+
     // 登录诊断只保存脱敏后的阶段、页面元数据和错误摘要，不保存密码、验证码、Cookie
     // 值、Token 或完整查询参数。事件保存在内存中，并在失败后保存一份有限长度的报告，
     // 方便用户在应用重启后仍能复制给开发者定位问题。
@@ -727,6 +760,12 @@ public class MainActivity extends Activity {
                 return;
             }
             showDashboard();
+            // 已加载过 Dashboard 时，启动握手不会再次触发；外部原网页登录
+            // 返回后先确认新 Cookie，再由唯一刷新链路更新数据。
+            root.post(() -> {
+                requestDashboardRefreshAfterSessionProbe(true);
+                requestAcademicSessionProbe("manual-portal-return", 0L, true);
+            });
         });
         FrameLayout.LayoutParams actionParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -763,11 +802,10 @@ public class MainActivity extends Activity {
         } else if (!lastAcademicLoginError.isEmpty()
                 || (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)
                 && loadBuiltInCredentials().isComplete())) {
-            // 上一次已确认教务会话失效：先显示查询页/缓存，再直接使用
-            // 用户明确保存的加密凭据后台登录，不再绕行 E 码通页面。
+            // 先显示查询页/缓存，再由 Dashboard 启动握手完成 WebVPN 轻量
+            // 探测。加密凭据存在只表示“可恢复”，不是跳过探测直接提交密码的
+            // 理由；这样 Cookie 仍有效时不会多走一遍统一认证。
             showDashboard();
-            root.postDelayed(() -> attemptBuiltInBackgroundLoginOrReport(
-                    "应用启动时发现教务会话已失效"), 180);
         } else {
             // 首次默认显示内置登录，同时始终保留学校原网页账密和二维码入口。
             showPortal();
@@ -817,6 +855,7 @@ public class MainActivity extends Activity {
                 }
                 if (view == dashboardWebView) {
                     dashboardPageReady = false;
+                    dashboardHandshakeReceived = false;
                 }
                 if (view == ecodeWebView) {
                     ecodeAutoScrolled = false;
@@ -842,15 +881,18 @@ public class MainActivity extends Activity {
                     if (builtInLoginSubmissionPending
                             && (isAcademicPortalReadyUrl(url)
                             || (backgroundLoginForEcode && isEcodeTargetReadyUrl(url)))) {
-                        finishBuiltInLoginSuccess();
+                        finishBuiltInLoginSuccess(activeLoginOperationId);
                     } else if (builtInLoginSubmissionPending && isPortalLoginPage(url)) {
-                        if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
-                        else view.postDelayed(MainActivity.this::inspectBuiltInLoginPage, 350);
+                        if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage(activeLoginOperationId);
+                        else {
+                            long operationId = activeLoginOperationId;
+                            view.postDelayed(() -> inspectBuiltInLoginPage(operationId), 120);
+                        }
                     } else if (builtInLoginSubmissionPending) {
                         // 统一认证成功后偶尔会停在 WebVPN/CAS 中转页，而不是
                         // 直接进入 /jwapp/。主动重新打开教务入口验证 Cookie，
                         // 避免后台登录只在未知页轮询直至超时。
-                        scheduleBuiltInPortalProbe(url);
+                        scheduleBuiltInPortalProbe(url, activeLoginOperationId);
                     }
                 } else if (view == ecodeWebView) {
                     Log.d(LOG_TAG, "page-finished url=" + url + " current=" + view.getUrl() + " title=" + view.getTitle());
@@ -864,9 +906,8 @@ public class MainActivity extends Activity {
                     dashboardPageReady = true;
                     view.evaluateJavascript("document.documentElement.classList.add('android-shell');", null);
                     view.evaluateJavascript("window.__prepareNativeEcode && window.__prepareNativeEcode();", null);
-                    // 查询页只等待教务系统会话；E 码通页面并行加载，不能成为
-                    // 成绩、考试和课表请求的前置条件。
-                    view.postDelayed(MainActivity.this::refreshDashboardData, 180);
+                    // Android 页面由 JS 启动握手触发一次探测和刷新；这里不再
+                    // 额外刷新，避免与 dashboard.js 的启动链路重复发起请求。
                 }
             }
 
@@ -1218,6 +1259,8 @@ public class MainActivity extends Activity {
     }
 
     private void cancelAutomaticBackgroundLogin() {
+        sessionEpoch += 1L;
+        activeLoginOperationId = ++loginOperationSequence;
         exitBackgroundLoginMode();
         if (backgroundLoginInProgress) {
             backgroundLoginInProgress = false;
@@ -1236,7 +1279,8 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             dashboardVisible = true;
             exitBackgroundLoginMode();
-            preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
+            // 这个值只是上次成功会话的提示，不能因为展示缓存首页就把失效
+            // Cookie 标成有效；真实状态由轻量 WebVPN 探测或业务响应确认。
             cookieManager.flush();
             portalWebView.setVisibility(View.GONE);
             if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
@@ -1248,10 +1292,6 @@ public class MainActivity extends Activity {
                 dashboardLoaded = true;
                 ecodeWebView.loadUrl(ECODE_URL);
                 dashboardWebView.loadUrl(DASHBOARD_URL);
-            } else {
-                // 登录页可能在应用切到微信期间完成认证；回到主界面时立刻
-                // 复用新 Cookie 刷新数据，不要求用户退出应用再进一次。
-                dashboardWebView.postDelayed(MainActivity.this::refreshDashboardData, 260);
             }
             if (ecodePanel != null) {
                 ecodePanelHidden = false;
@@ -1899,6 +1939,9 @@ public class MainActivity extends Activity {
             finishBuiltInLoginFailure("内置登录失败：请完整输入学号和密码。", background);
             return;
         }
+        final long operationId = ++loginOperationSequence;
+        activeLoginOperationId = operationId;
+        sessionEpoch += 1L;
         pendingBuiltInUsername = credentials.username.trim();
         pendingBuiltInPassword = credentials.password;
         backgroundLoginInProgress = background;
@@ -1945,14 +1988,14 @@ public class MainActivity extends Activity {
         String currentUrl = portalWebView.getUrl();
         if (background && backgroundLoginForEcode) {
             if (isPortalLoginPage(pendingEcodeLoginUrl) && pendingEcodeLoginUrl.equals(currentUrl)) {
-                injectBuiltInCredentialsIntoSchoolPage();
+                injectBuiltInCredentialsIntoSchoolPage(operationId);
             } else {
                 portalWebView.loadUrl(isPortalLoginPage(pendingEcodeLoginUrl)
                         ? pendingEcodeLoginUrl
                         : ECODE_URL);
             }
         } else if (!background && isPortalLoginPage(currentUrl)) {
-            injectBuiltInCredentialsIntoSchoolPage();
+            injectBuiltInCredentialsIntoSchoolPage(operationId);
         } else {
             // 后台登录不能复用上一次失败后留下的登录页。统一认证页的
             // lt/execution 与 WebVPN 代理会话是一组短时状态，必须从教务
@@ -1973,8 +2016,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void loadBuiltInAcademicPortalProbe(String observedUrl) {
-        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+    private boolean isCurrentLoginOperation(long operationId) {
+        return operationId > 0L && builtInLoginSubmissionPending && activeLoginOperationId == operationId;
+    }
+
+    private void loadBuiltInAcademicPortalProbe(String observedUrl, long operationId) {
+        if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
         if (builtInLoginPortalProbeAttempts >= BUILT_IN_LOGIN_PORTAL_PROBE_MAX_ATTEMPTS) {
             finishBuiltInLoginFailure(
                     "内置登录未完成：学校认证后连续返回非教务中转页（"
@@ -2000,27 +2047,27 @@ public class MainActivity extends Activity {
         portalWebView.loadUrl(target);
     }
 
-    private void scheduleBuiltInPortalProbe(String observedUrl) {
-        if (portalWebView == null || !builtInLoginSubmissionPending || builtInLoginPortalProbeScheduled) return;
+    private void scheduleBuiltInPortalProbe(String observedUrl, long operationId) {
+        if (portalWebView == null || !isCurrentLoginOperation(operationId) || builtInLoginPortalProbeScheduled) return;
         builtInLoginPortalProbeScheduled = true;
         portalWebView.postDelayed(() -> {
             builtInLoginPortalProbeScheduled = false;
-            if (portalWebView == null || !builtInLoginSubmissionPending) return;
+            if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
             String currentUrl = portalWebView.getUrl();
             if (isAcademicPortalReadyUrl(currentUrl)
                     || (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl))) {
-                finishBuiltInLoginSuccess();
+                finishBuiltInLoginSuccess(operationId);
             } else if (isPortalLoginPage(currentUrl)) {
-                if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage();
-                else inspectBuiltInLoginPage();
+                if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage(operationId);
+                else inspectBuiltInLoginPage(operationId);
             } else {
-                loadBuiltInAcademicPortalProbe(currentUrl == null ? observedUrl : currentUrl);
+                loadBuiltInAcademicPortalProbe(currentUrl == null ? observedUrl : currentUrl, operationId);
             }
-        }, 700);
+        }, BUILT_IN_LOGIN_PORTAL_PROBE_DELAY_MS);
     }
 
-    private void injectBuiltInCredentialsIntoSchoolPage() {
-        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+    private void injectBuiltInCredentialsIntoSchoolPage(long operationId) {
+        if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
         builtInLoginAwaitingPage = false;
         // 账号登录页是由脚本切换出来的。旧实现点击选项卡后立即填值并提交，
         // 在后台 WebView 中可能赶在页面完成切换前执行，导致提交使用了不完整
@@ -2031,6 +2078,7 @@ public class MainActivity extends Activity {
                 + "return JSON.stringify({ok:true,tabClicked:false});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
+            if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 recordLoginDiagnostic("login-tab", "clicked=" + result.optBoolean("tabClicked", false)
@@ -2044,12 +2092,12 @@ public class MainActivity extends Activity {
                 finishBuiltInLoginFailure("内置登录失败：无法切换到账号登录页面。", backgroundLoginInProgress);
                 return;
             }
-            portalWebView.postDelayed(this::submitBuiltInCredentialsToSchoolPage, BUILT_IN_LOGIN_TAB_SETTLE_MS);
+            portalWebView.postDelayed(() -> submitBuiltInCredentialsToSchoolPage(operationId), BUILT_IN_LOGIN_TAB_SETTLE_MS);
         });
     }
 
-    private void submitBuiltInCredentialsToSchoolPage() {
-        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+    private void submitBuiltInCredentialsToSchoolPage(long operationId) {
+        if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
         String username = JSONObject.quote(pendingBuiltInUsername);
         String password = JSONObject.quote(pendingBuiltInPassword);
         String script = "(function(){"
@@ -2078,6 +2126,7 @@ public class MainActivity extends Activity {
                 + "return JSON.stringify({ok:true,submitter:submitter,rsaPresent:Boolean(rsa&&rsa.value),rsaLength:rsa&&rsa.value?rsa.value.length:0,ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value),formActionBefore:formActionBefore.split('?')[0],formAction:action});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
+            if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 StringBuilder detail = new StringBuilder("submitted=")
@@ -2113,20 +2162,20 @@ public class MainActivity extends Activity {
                 finishBuiltInLoginFailure("内置登录失败：无法确认学校登录表单是否提交。", backgroundLoginInProgress);
                 return;
             }
-            portalWebView.postDelayed(this::inspectBuiltInLoginPage, 850);
+            portalWebView.postDelayed(() -> inspectBuiltInLoginPage(operationId), BUILT_IN_LOGIN_SUBMIT_SETTLE_MS);
         });
     }
 
-    private void inspectBuiltInLoginPage() {
-        if (portalWebView == null || !builtInLoginSubmissionPending) return;
+    private void inspectBuiltInLoginPage(long operationId) {
+        if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
         String currentUrl = portalWebView.getUrl();
         if (isAcademicPortalReadyUrl(currentUrl)
                 || (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl))) {
-            finishBuiltInLoginSuccess();
+            finishBuiltInLoginSuccess(operationId);
             return;
         }
         if (!isPortalLoginPage(currentUrl)) {
-            scheduleBuiltInPortalProbe(currentUrl);
+            scheduleBuiltInPortalProbe(currentUrl, operationId);
             return;
         }
         builtInLoginInspectionAttempts += 1;
@@ -2145,7 +2194,7 @@ public class MainActivity extends Activity {
                 + "return JSON.stringify({challenge:challenge,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
-            if (!builtInLoginSubmissionPending) return;
+            if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 String errorText = result.optString("error", "").trim();
@@ -2193,7 +2242,7 @@ public class MainActivity extends Activity {
                 if (!loginForm && builtInLoginInspectionAttempts >= 3) {
                     // 某些成功回调仍保留 /tpass/login 地址，但登录表单已经被
                     // 中转内容替换。此时直接用新 Cookie 探测教务入口。
-                    loadBuiltInAcademicPortalProbe(currentUrl);
+                    loadBuiltInAcademicPortalProbe(currentUrl, operationId);
                     return;
                 }
             } catch (Exception ignored) {
@@ -2230,7 +2279,7 @@ public class MainActivity extends Activity {
                         backgroundLoginInProgress
                 );
             } else {
-                portalWebView.postDelayed(this::inspectBuiltInLoginPage, 650);
+                portalWebView.postDelayed(() -> inspectBuiltInLoginPage(operationId), BUILT_IN_LOGIN_INSPECTION_INTERVAL_MS);
             }
         });
     }
@@ -2259,6 +2308,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (portalWebView == null) return;
+        final long operationId = activeLoginOperationId;
         if (builtInLoginButton != null) builtInLoginButton.setEnabled(false);
         String script = "(function(){var code=document.getElementById('mcode'),save=document.getElementById('saveDevice'),button=document.getElementById('second_valid_ok');"
                 + "if(!code||!button)return JSON.stringify({ok:false,error:'学校二次认证输入框不可用'});"
@@ -2267,6 +2317,7 @@ public class MainActivity extends Activity {
                 + "if(save)save.checked=" + Boolean.toString(builtInTrustDeviceCheck == null || builtInTrustDeviceCheck.isChecked()) + ";"
                 + "button.click();return JSON.stringify({ok:true});})();";
         portalWebView.evaluateJavascript(script, value -> {
+            if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 if (!result.optBoolean("ok", false)) {
@@ -2281,7 +2332,7 @@ public class MainActivity extends Activity {
             }
             setBuiltInLoginStatus("正在验证短信验证码并登记可信设备…", false);
             builtInLoginInspectionAttempts = 0;
-            portalWebView.postDelayed(this::inspectBuiltInLoginPage, 700);
+            portalWebView.postDelayed(() -> inspectBuiltInLoginPage(operationId), BUILT_IN_LOGIN_SUBMIT_SETTLE_MS);
         });
     }
 
@@ -2304,10 +2355,12 @@ public class MainActivity extends Activity {
         setLastAcademicLoginError(message);
     }
 
-    private void finishBuiltInLoginSuccess() {
+    private void finishBuiltInLoginSuccess(long operationId) {
+        if (!isCurrentLoginOperation(operationId)) return;
         finishLoginDiagnosticsSuccess();
         boolean wasBackground = backgroundLoginInProgress;
         boolean wasForEcode = wasBackground && backgroundLoginForEcode;
+        boolean hadAcademicFailure = !pendingAcademicFailureReason.isEmpty();
         exitBackgroundLoginMode();
         if (!wasBackground && builtInTrustDeviceCheck != null && builtInTrustDeviceCheck.isChecked()) {
             saveBuiltInCredentials(pendingBuiltInUsername, pendingBuiltInPassword);
@@ -2323,32 +2376,34 @@ public class MainActivity extends Activity {
         builtInLoginRetryCount = 0;
         backgroundLoginForEcode = false;
         pendingEcodeLoginUrl = "";
+        activeLoginOperationId = operationId;
+        sessionEpoch += 1L;
         if (!wasBackground) {
             backgroundLoginAttemptedForCurrentFailure = false;
         }
-        if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
-        setLastAcademicLoginError("");
         if (wasBackground) {
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
             if (wasForEcode) {
                 reloadEcodeAfterBackgroundLogin();
-                if (!pendingAcademicFailureReason.isEmpty()) {
-                    pendingAcademicFailureReason = "";
-                    backgroundLoginAttemptedForCurrentFailure = false;
-                    notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
-                    refreshDashboardData();
-                }
             } else {
-                pendingAcademicFailureReason = "";
-                backgroundLoginAttemptedForCurrentFailure = false;
-                notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
-                refreshDashboardData();
                 if (!ecodeSessionReady || ecodeReloadAfterBackgroundLogin) {
                     reloadEcodeAfterBackgroundLogin();
                 }
             }
+            postLoginVerificationPending = true;
+            postLoginVerificationForEcode = wasForEcode;
+            postLoginHadAcademicFailure = hadAcademicFailure;
+            postLoginOperationId = operationId;
+            requestAcademicSessionProbe("post-login-verification", operationId);
         } else {
+            setLastAcademicLoginError("");
             showDashboard();
+            // 手动登录同样不能只凭 WebView 地址就把会话写成有效；首页会先
+            // 显示缓存，随后用同一个轻量探针确认新的 WebVPN Cookie。
+            // 若失效前的完整刷新仍在等待旧 Cookie 的响应，强制把这次验证后
+            // 的刷新排到它之后，避免 single-flight 误复用那一轮过期请求。
+            requestDashboardRefreshAfterSessionProbe(true);
+            requestAcademicSessionProbe("manual-login-verification", operationId);
         }
     }
 
@@ -2363,6 +2418,7 @@ public class MainActivity extends Activity {
         boolean wasForEcode = background && backgroundLoginForEcode;
         boolean academicAlsoInvalid = !pendingAcademicFailureReason.isEmpty();
         pendingBuiltInPassword = "";
+        sessionEpoch += 1L;
         builtInLoginSubmissionPending = false;
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
@@ -2461,6 +2517,7 @@ public class MainActivity extends Activity {
     private void markAcademicSessionHealthy() {
         runOnUiThread(() -> {
             if (backgroundLoginInProgress) return;
+            academicNetworkFailureStreak = 0;
             backgroundLoginAttemptedForCurrentFailure = false;
             pendingAcademicFailureReason = "";
             if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
@@ -3200,7 +3257,6 @@ public class MainActivity extends Activity {
             try {
                 JSONObject payload = new JSONObject(decoded);
                 if (payload.optBoolean("ok")) {
-                    boolean firstReady = !ecodeAutoScrolled;
                     ecodeAutoScrolled = true;
                     ecodeSessionReady = true;
                     ecodeBackgroundLoginAttemptedForCurrentFailure = false;
@@ -3209,7 +3265,6 @@ public class MainActivity extends Activity {
                     ecodeProbeAttempts = 0;
                     captureEcodeThumbnail(payload.optString("time", ""));
                     clearEcodeError();
-                    if (firstReady) refreshDashboardData();
                     return;
                 }
                 if (ecodeProbeAttempts >= 14) {
@@ -3222,7 +3277,6 @@ public class MainActivity extends Activity {
                     ecodeAutoScrolled = true;
                     captureEcodeThumbnail(payload.optString("time", ""));
                     clearEcodeError();
-                    refreshDashboardData();
                     scheduleEcodeProbe(2000);
                     return;
                 }
@@ -3499,12 +3553,227 @@ public class MainActivity extends Activity {
     }
 
     private void refreshDashboardData() {
-        // 教务查询只依赖教务系统会话；E 码通页面即使未登录或暂时解析失败，
-        // 也不能阻塞成绩、考试和课表。E 码通成功后仍会再次触发这里刷新。
+        refreshDashboardData(false);
+    }
+
+    private void refreshDashboardData(boolean forceTerms) {
+        // Android 的 JS 启动握手、手动回到首页和登录成功回调都可能同时
+        // 到达；dashboard.js 自己负责 single-flight/coalescing，这里只做一次
+        // 轻量的桥接转发，绝不在 E 码通 ready 时额外刷新。
         if (dashboardWebView == null || !dashboardLoaded || !dashboardPageReady) return;
         cookieManager.flush();
         dashboardWebView.post(() -> dashboardWebView.evaluateJavascript(
-                "window.__refreshDashboard && window.__refreshDashboard(true);", null));
+                "window.__refreshDashboard && window.__refreshDashboard(" + forceTerms + ");", null));
+    }
+
+    private void requestDashboardRefreshAfterSessionProbe(boolean forceTerms) {
+        dashboardRefreshPending = true;
+        dashboardRefreshForceTerms = dashboardRefreshForceTerms || forceTerms;
+    }
+
+    private void flushPendingDashboardRefresh() {
+        if (!dashboardRefreshPending || !dashboardPageReady) return;
+        boolean forceTerms = dashboardRefreshForceTerms;
+        dashboardRefreshPending = false;
+        dashboardRefreshForceTerms = false;
+        refreshDashboardData(forceTerms);
+    }
+
+    private static final class AcademicProbeResult {
+        static final int HEALTHY = 1;
+        static final int INVALID = 2;
+        static final int UNKNOWN = 3;
+        final int kind;
+        final int status;
+        final String detail;
+
+        AcademicProbeResult(int kind, int status, String detail) {
+            this.kind = kind;
+            this.status = status;
+            this.detail = detail == null ? "" : detail;
+        }
+    }
+
+    private void requestAcademicSessionProbe(String reason) {
+        requestAcademicSessionProbe(reason, 0L, false);
+    }
+
+    private void requestAcademicSessionProbe(String reason, long loginOperationId) {
+        requestAcademicSessionProbe(reason, loginOperationId, false);
+    }
+
+    private void requestAcademicSessionProbe(String reason, long loginOperationId, boolean force) {
+        // 探测只依赖 WebVPN Cookie；后台登录刚完成时 Dashboard 文档可能
+        // 仍在加载，不能因为 dashboardPageReady 尚未置位而放弃登录后验证。
+        if (dashboardWebView == null || !dashboardLoaded || !dashboardVisible) return;
+        final long now = System.currentTimeMillis();
+        final long probeId;
+        final long probeEpoch;
+        synchronized (this) {
+            if (academicProbeInFlight) {
+                if (loginOperationId <= 0L) return;
+                // 登录成功后的验证拥有更高优先级；旧探测仍会自然结束，但
+                // activeAcademicProbeId 被替换后其回调会被丢弃。
+                academicProbeInFlight = false;
+            }
+            if (!force && loginOperationId <= 0L && now - lastAcademicProbeAt < ACADEMIC_PROBE_COOLDOWN_MS) return;
+            academicProbeInFlight = true;
+            lastAcademicProbeAt = now;
+            probeId = ++academicProbeSequence;
+            activeAcademicProbeId = probeId;
+            probeEpoch = sessionEpoch;
+            activeAcademicProbeEpoch = probeEpoch;
+            activeAcademicProbeLoginOperationId = loginOperationId;
+        }
+        final String trigger = reason == null || reason.trim().isEmpty() ? "unknown" : reason.trim();
+        networkExecutor.execute(() -> performAcademicSessionProbe(probeId, probeEpoch, loginOperationId, trigger));
+    }
+
+    private void performAcademicSessionProbe(long probeId, long probeEpoch, long loginOperationId, String reason) {
+        long deadline = System.currentTimeMillis() + ACADEMIC_PROBE_TOTAL_BUDGET_MS;
+        AcademicProbeResult result = probeAcademicEndpoint(
+                PORTAL_URL + "/jwapp/sys/homeapp/api/home/currentUser.do",
+                Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
+        );
+        // currentUser.do 是最快的探测；只有它无法判断时才用同一 WebVPN
+        // 代理下的 kb/xnxq.do 兜底，两个请求总预算约 5 秒。
+        if (result.kind == AcademicProbeResult.UNKNOWN && System.currentTimeMillis() < deadline) {
+            result = probeAcademicEndpoint(
+                    PORTAL_URL + "/jwapp/sys/homeapp/api/home/kb/xnxq.do",
+                    Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
+            );
+        }
+        final AcademicProbeResult finalResult = result;
+        runOnUiThread(() -> finishAcademicSessionProbe(
+                probeId, probeEpoch, loginOperationId, reason, finalResult
+        ));
+    }
+
+    private AcademicProbeResult probeAcademicEndpoint(String urlText, int timeoutMs) {
+        HttpURLConnection connection = null;
+        try {
+            if (urlText == null || !urlText.startsWith("https://webvpn.neu.edu.cn/")) {
+                return new AcademicProbeResult(AcademicProbeResult.UNKNOWN, -1, "探测地址不在学校 WebVPN 范围内");
+            }
+            URL url = new URL(urlText);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(timeoutMs);
+            connection.setReadTimeout(timeoutMs);
+            connection.setInstanceFollowRedirects(true);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("Accept", "application/json, text/plain, */*");
+            connection.setRequestProperty("Fetch-Api", "true");
+            String cookie = cookieManager.getCookie(urlText);
+            if (cookie != null && !cookie.isEmpty()) connection.setRequestProperty("Cookie", cookie);
+            int status = connection.getResponseCode();
+            storeResponseCookies(urlText, connection.getHeaderFields());
+            InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            String body = readResponseLimited(stream, 180000);
+            if (isAcademicLoginInvalidResponse(status, body)) {
+                return new AcademicProbeResult(AcademicProbeResult.INVALID, status, "WebVPN 返回统一身份认证登录页");
+            }
+            String trimmed = body.trim();
+            if (status >= 200 && status < 400
+                    && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+                return new AcademicProbeResult(AcademicProbeResult.HEALTHY, status, "轻量会话探测成功");
+            }
+            return new AcademicProbeResult(AcademicProbeResult.UNKNOWN, status,
+                    "WebVPN 探测未返回可确认的 JSON 会话数据（HTTP " + status + "）");
+        } catch (Exception error) {
+            return new AcademicProbeResult(
+                    AcademicProbeResult.UNKNOWN,
+                    -1,
+                    error.getMessage() == null ? "WebVPN 会话探测超时或网络不可用" : error.getMessage()
+            );
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void finishAcademicSessionProbe(long probeId, long probeEpoch, long loginOperationId,
+                                            String reason, AcademicProbeResult result) {
+        synchronized (this) {
+            if (!academicProbeInFlight || activeAcademicProbeId != probeId || activeAcademicProbeEpoch != probeEpoch) return;
+            academicProbeInFlight = false;
+        }
+        // 登录开始后，登录前发出的探测结果只允许结束自己的网络请求，不能
+        // 覆盖新一轮 Cookie 或把当前登录重新打成失败。
+        if (probeEpoch != sessionEpoch && !(postLoginVerificationPending && loginOperationId == postLoginOperationId)) return;
+        if (result.kind == AcademicProbeResult.HEALTHY) {
+            academicNetworkFailureStreak = 0;
+            lastAcademicSessionHealthyAt = System.currentTimeMillis();
+            markAcademicSessionHealthy();
+            if (postLoginVerificationPending && loginOperationId == postLoginOperationId) {
+                completePostLoginRecovery(loginOperationId);
+            } else {
+                flushPendingDashboardRefresh();
+            }
+            return;
+        }
+        if (result.kind == AcademicProbeResult.INVALID) {
+            academicNetworkFailureStreak = 0;
+            if (postLoginVerificationPending && loginOperationId == postLoginOperationId) {
+                finishPostLoginVerificationFailure(
+                        "登录后轻量会话验证失败：教务系统仍返回统一身份认证页面。"
+                );
+                return;
+            }
+            handleAcademicSessionInvalid("轻量会话探测确认教务登录状态已失效");
+            return;
+        }
+
+        // 超时/服务器错误只累计“待探测”状态，第一次失败绝不直接提交密码。
+        // 连续两次且已有会话提示时，才允许进入一次受冷却保护的恢复流程。
+        academicNetworkFailureStreak += 1;
+        if (postLoginVerificationPending && loginOperationId == postLoginOperationId) {
+            finishPostLoginVerificationFailure(
+                    "登录后无法确认教务会话：WebVPN 暂时不可用，请稍后重试。"
+            );
+            return;
+        }
+        boolean hasSessionHint = preferences != null && preferences.getBoolean(HAS_ACADEMIC_SESSION, false);
+        long now = System.currentTimeMillis();
+        // 即使连续失败，也只保留缓存并等待下一次冷却后的探测；未知网络
+        // 状态不能直接调用 handleAcademicSessionInvalid，否则离线时会消耗
+        // 后台登录尝试并形成“网络恢复前反复登录”的循环。
+        if (academicNetworkFailureStreak >= NETWORK_FAILURES_BEFORE_PROBE && hasSessionHint) {
+            Log.w(LOG_TAG, "academic session probe deferred after network failure: " + reason);
+        }
+        notifyDashboardLoginStatus("probe", "WebVPN 暂时不可用，保留本地数据并等待网络恢复…");
+    }
+
+    private void finishPostLoginVerificationFailure(String message) {
+        boolean ecodeOnly = postLoginVerificationForEcode && !postLoginHadAcademicFailure;
+        postLoginVerificationPending = false;
+        postLoginVerificationForEcode = false;
+        postLoginHadAcademicFailure = false;
+        postLoginOperationId = 0L;
+        // E 码通单独恢复时，教务会话不应被一次探测异常错误地写成失效。
+        if (ecodeOnly) {
+            setEcodeError(message + " E 码通原网页会保留当前状态，请稍后重试或手动登录。");
+            return;
+        }
+        finishBuiltInLoginFailure(message, true);
+    }
+
+    private void completePostLoginRecovery(long operationId) {
+        if (!postLoginVerificationPending || postLoginOperationId != operationId) return;
+        boolean forEcode = postLoginVerificationForEcode;
+        boolean hadAcademicFailure = postLoginHadAcademicFailure;
+        postLoginVerificationPending = false;
+        postLoginVerificationForEcode = false;
+        postLoginHadAcademicFailure = false;
+        postLoginOperationId = 0L;
+        pendingAcademicFailureReason = "";
+        backgroundLoginAttemptedForCurrentFailure = false;
+        notifyDashboardLoginStatus("success", "后台登录成功，正在刷新教务数据…");
+        // E 码通单独失效时只重载 E 码通；两者同时失效或教务本身失效时，
+        // 才由这一处触发唯一一次教务刷新。
+        if (hadAcademicFailure || !forEcode) {
+            requestDashboardRefreshAfterSessionProbe(true);
+            flushPendingDashboardRefresh();
+        }
     }
 
     private String decodeJavascriptString(String value) {
@@ -3532,12 +3801,27 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (!dashboardVisible && portalActionButton != null) {
+        if (dashboardVisible) {
+            long now = System.currentTimeMillis();
+            boolean stayedInBackgroundLongEnough = lastBackgroundAt > 0L
+                    && now - lastBackgroundAt >= FOREGROUND_PROBE_INTERVAL_MS;
+            lastBackgroundAt = 0L;
+            if (stayedInBackgroundLongEnough && now - lastForegroundProbeAt >= FOREGROUND_PROBE_INTERVAL_MS) {
+                lastForegroundProbeAt = now;
+                requestAcademicSessionProbe("foreground-resume");
+            }
+        } else if (portalActionButton != null) {
             updatePortalActionLabel(portalWebView == null ? "" : portalWebView.getUrl());
             if (portalWebView != null) {
                 portalWebView.postDelayed(this::installPortalQrCapture, 160);
             }
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (dashboardVisible) lastBackgroundAt = System.currentTimeMillis();
     }
 
     @Override
@@ -3631,6 +3915,27 @@ public class MainActivity extends Activity {
     }
 
     private final class AndroidBridge {
+        @android.webkit.JavascriptInterface
+        public void dashboardReady() {
+            runOnUiThread(() -> {
+                if (!dashboardVisible || !dashboardPageReady || dashboardHandshakeReceived) return;
+                dashboardHandshakeReceived = true;
+                requestDashboardRefreshAfterSessionProbe(false);
+                long now = System.currentTimeMillis();
+                if (lastAcademicSessionHealthyAt > 0L
+                        && now - lastAcademicSessionHealthyAt < ACADEMIC_PROBE_COOLDOWN_MS) {
+                    flushPendingDashboardRefresh();
+                } else {
+                    requestAcademicSessionProbe("dashboard-start");
+                }
+            });
+        }
+
+        @android.webkit.JavascriptInterface
+        public void probeAcademicSession(String reason) {
+            requestAcademicSessionProbe(reason == null ? "page-request" : reason);
+        }
+
         @android.webkit.JavascriptInterface
         public void openPortal() {
             openPortalForReauthentication();
@@ -3859,10 +4164,26 @@ public class MainActivity extends Activity {
             }
             deliver(requestId, status, responseBody);
         } catch (Exception error) {
+            recordAcademicNetworkFailure(error.getMessage());
             deliver(requestId, -1, error.getMessage() == null ? "原生网络请求失败" : error.getMessage());
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private void recordAcademicNetworkFailure(String detail) {
+        runOnUiThread(() -> {
+            academicNetworkFailureStreak += 1;
+            // 业务请求超时只触发轻量探测，不直接启动密码提交；探测自身
+            // 还有冷却和连续失败阈值，离线时不会形成登录循环。
+            if (academicNetworkFailureStreak >= NETWORK_FAILURES_BEFORE_PROBE
+                    && !backgroundLoginInProgress
+                    && dashboardVisible
+                    && System.currentTimeMillis() - lastNetworkRecoveryAt >= ACADEMIC_PROBE_COOLDOWN_MS) {
+                lastNetworkRecoveryAt = System.currentTimeMillis();
+                requestAcademicSessionProbe("network-recovery");
+            }
+        });
     }
 
     private void storeResponseCookies(String url, Map<String, List<String>> headers) {
@@ -3887,6 +4208,20 @@ public class MainActivity extends Activity {
             String line;
             while ((line = reader.readLine()) != null) {
                 result.append(line).append('\n');
+            }
+        }
+        return result.toString();
+    }
+
+    private String readResponseLimited(InputStream stream, int maxChars) throws IOException {
+        if (stream == null) return "";
+        StringBuilder result = new StringBuilder(Math.min(maxChars, 8192));
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            char[] buffer = new char[4096];
+            int read;
+            while ((read = reader.read(buffer)) >= 0 && result.length() < maxChars) {
+                int remaining = maxChars - result.length();
+                result.append(buffer, 0, Math.min(read, remaining));
             }
         }
         return result.toString();
