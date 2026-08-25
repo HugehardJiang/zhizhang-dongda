@@ -6398,7 +6398,9 @@ function renderOverview() {
       const active = next.state === "active" && next.course === course;
       const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
       const conflict = localScheduleRowHasConflict(course, scheduleRows);
-      return `<button class="overview-timeline-row ${active ? "is-active" : ""} ${course.source === "local" ? `local-overview-row local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time">${escapeHtml(range.startText || (course.localAllDay ? "全天" : overviewCourseTime(course)))}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名安排")} ${badge}${conflict ? `<em class="overview-conflict-mark">⚠ 冲突</em>` : ""}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span></button>`;
+      const startTime = range.startText || (course.localAllDay ? "全天" : overviewCourseTime(course));
+      const endTime = range.endText || "";
+      return `<button class="overview-timeline-row ${active ? "is-active" : ""} ${course.source === "local" ? `local-overview-row local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time"><b>${escapeHtml(startTime)}</b>${endTime ? `<small>至 ${escapeHtml(endTime)}</small>` : ""}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-card"><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名安排")} ${badge}${conflict ? `<em class="overview-conflict-mark">⚠ 冲突</em>` : ""}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span><span class="overview-timeline-arrow" aria-hidden="true">›</span></span></button>`;
     }).join("")}</div>`
     : dateLabel.weekNumber === null
       ? `<div class="overview-today-unknown">设置第一周日期后，这里会按教学周显示重复课程；本地一次性日程不受影响。</div>`

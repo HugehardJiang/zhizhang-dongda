@@ -1528,20 +1528,28 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .overview-tomorrow small { overflow: hidden; color: var(--text-secondary); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .overview-tomorrow.is-muted { display: flex; gap: 12px; }
 .overview-today-section { margin-top: 29px; }
-.overview-timeline { position: relative; display: grid; margin-top: 2px; border-top: 1px solid var(--border); }
-.overview-timeline::before { position: absolute; top: 0; bottom: 0; left: 80px; width: 1px; content: ""; background: var(--border); }
-.overview-timeline-row { position: relative; z-index: 1; display: grid; grid-template-columns: 62px 16px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; min-height: 70px; padding: 9px 0; color: inherit; background: transparent; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; text-align: left; }
-.overview-timeline-row:last-child { border-bottom: 0; }
-.overview-timeline-row:hover { background: var(--surface-hover); }
-.overview-timeline-time { color: var(--text-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
-.overview-timeline-marker { display: block; width: 7px; height: 7px; margin: 0 auto; background: var(--surface); border: 1px solid var(--text-tertiary); border-radius: 50%; }
-.overview-timeline-row.is-active .overview-timeline-marker { background: var(--brand); border-color: var(--brand); }
+.overview-timeline { position: relative; display: grid; gap: 8px; margin-top: 5px; }
+.overview-timeline::before { position: absolute; top: 27px; bottom: 27px; left: 78px; width: 1px; content: ""; background: linear-gradient(var(--border), #d9e3ef 70%, var(--border)); }
+.overview-timeline-row { position: relative; z-index: 1; display: grid; grid-template-columns: 64px 20px minmax(0, 1fr); align-items: center; gap: 11px; width: 100%; min-height: 76px; padding: 0; color: inherit; background: transparent; border: 0; border-radius: 0; text-align: left; }
+.overview-timeline-row:hover { background: transparent; }
+.overview-timeline-time { display: grid; align-content: center; gap: 3px; min-height: 54px; color: var(--text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
+.overview-timeline-time b { color: var(--text-primary); font-size: 13px; font-weight: 650; }
+.overview-timeline-time small { color: var(--text-tertiary); font-size: 10px; }
+.overview-timeline-marker { position: relative; display: block; width: 10px; height: 10px; margin: 0 auto; background: var(--surface); border: 2px solid #8c9aac; border-radius: 50%; box-shadow: 0 0 0 4px var(--surface); }
+.overview-timeline-row.is-active .overview-timeline-marker { background: var(--brand); border-color: var(--brand); box-shadow: 0 0 0 4px var(--brand-soft); }
+.overview-timeline-card { display: flex; align-items: center; justify-content: space-between; min-width: 0; min-height: 66px; padding: 10px 12px 10px 14px; background: var(--surface-subtle); border: 1px solid transparent; border-left: 3px solid #a8b4c3; border-radius: var(--radius-sm); transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease; }
+.overview-timeline-row:hover .overview-timeline-card { background: var(--surface-hover); border-color: var(--border); transform: translateX(2px); }
+.overview-timeline-row.is-active .overview-timeline-card { background: var(--brand-soft); border-color: #bfd2f5; border-left-color: var(--brand); box-shadow: 0 5px 14px rgba(49, 103, 196, .10); }
+.overview-timeline-row[class*="local-schedule-color-"] .overview-timeline-card { background: var(--local-surface, #f4fbfd); border-left-color: var(--local-accent, #4e9ab5); }
+.overview-timeline-row[class*="local-schedule-color-"]:hover .overview-timeline-card { border-color: color-mix(in srgb, var(--local-accent, #4e9ab5) 26%, var(--border)); }
 .overview-timeline-copy { min-width: 0; }
 .overview-timeline-copy strong { display: block; overflow: hidden; color: var(--text-primary); font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .overview-timeline-row.is-active .overview-timeline-copy strong { color: var(--brand); }
 .overview-timeline-copy span, .overview-timeline-copy small { display: block; overflow: hidden; color: var(--text-secondary); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
 .overview-timeline-copy span { margin-top: 3px; }
 .overview-timeline-copy small { margin-top: 2px; color: var(--text-tertiary); }
+.overview-timeline-arrow { flex: 0 0 auto; margin-left: 10px; color: var(--text-tertiary); font-size: 20px; font-weight: 300; line-height: 1; transition: color 140ms ease, transform 140ms ease; }
+.overview-timeline-row:hover .overview-timeline-arrow, .overview-timeline-row.is-active .overview-timeline-arrow { color: var(--brand); transform: translateX(2px); }
 .overview-today-unknown { padding: 14px 0; color: var(--text-secondary); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); font-size: 12px; line-height: 1.55; }
 .overview-empty .button { margin-left: 8px; }
 .overview-columns { grid-template-columns: minmax(0, 1.25fr) minmax(260px, .75fr); margin-top: 31px; }
@@ -1582,8 +1590,13 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .overview-no-class .button { grid-column: 2; grid-row: 1 / span 2; margin: 0; align-self: center; }
   .overview-tomorrow { grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; }
   .overview-tomorrow small { grid-column: 2; }
-  .overview-timeline::before { left: 59px; }
-  .overview-timeline-row { grid-template-columns: 45px 18px minmax(0, 1fr); gap: 8px; min-height: 68px; }
+  .overview-timeline { gap: 7px; }
+  .overview-timeline::before { top: 24px; bottom: 24px; left: 56px; }
+  .overview-timeline-row { grid-template-columns: 42px 18px minmax(0, 1fr); gap: 8px; min-height: 70px; }
+  .overview-timeline-time b { font-size: 11px; }
+  .overview-timeline-time small { font-size: 9px; }
+  .overview-timeline-card { min-height: 62px; padding: 9px 10px 9px 11px; }
+  .overview-timeline-arrow { margin-left: 7px; font-size: 18px; }
   .overview-columns { display: block; margin-top: 24px; }
   .overview-columns > .overview-section + .overview-section { margin-top: 26px; }
   .toast-region { right: 14px; bottom: calc(64px + env(safe-area-inset-bottom) + 10px); left: 14px; width: auto; max-width: none; }
