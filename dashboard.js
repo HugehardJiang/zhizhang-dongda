@@ -11377,6 +11377,10 @@ globalThis.__handleAndroidBack = () => {
 // 桌面扩展保持原有的自动刷新；Android 只在文档加载完成后向原生发送
 // 一次启动握手，由原生并行安排 WebVPN 轻量会话探测和唯一刷新链路。
 if (IS_ANDROID_APP) {
+  // 原生会话探测与 WebView 的 onPageFinished 存在天然竞争：在数据尚未抵达
+  // 前先渲染稳定的加载态，任何握手延迟都不会让首页留下白屏。
+  state.loading = true;
+  render();
   globalThis.AndroidApi?.dashboardReady?.();
 } else {
   refresh();

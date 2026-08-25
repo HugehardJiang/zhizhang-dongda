@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.66";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.67";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -622,6 +622,9 @@ public class MainActivity extends Activity {
     private long sessionEpoch = 1L;
     private long loginOperationSequence;
     private long activeLoginOperationId;
+    // dashboard.js 的 ready 回调可能早于 WebView 的 onPageFinished；必须先
+    // 保存信号，等文档真正可执行刷新脚本时再消费，不能把这次启动握手丢掉。
+    private boolean dashboardHandshakeSignalReceived;
     private boolean dashboardHandshakeReceived;
     private boolean dashboardRefreshPending;
     private boolean dashboardRefreshForceTerms;
@@ -855,6 +858,7 @@ public class MainActivity extends Activity {
                 }
                 if (view == dashboardWebView) {
                     dashboardPageReady = false;
+                    dashboardHandshakeSignalReceived = false;
                     dashboardHandshakeReceived = false;
                 }
                 if (view == ecodeWebView) {
@@ -906,8 +910,9 @@ public class MainActivity extends Activity {
                     dashboardPageReady = true;
                     view.evaluateJavascript("document.documentElement.classList.add('android-shell');", null);
                     view.evaluateJavascript("window.__prepareNativeEcode && window.__prepareNativeEcode();", null);
-                    // Android 页面由 JS 启动握手触发一次探测和刷新；这里不再
-                    // 额外刷新，避免与 dashboard.js 的启动链路重复发起请求。
+                    // JS 的启动握手可能比 onPageFinished 更早抵达。此处仅消费
+                    // 已保存的握手，不直接新建刷新链路，仍能避免重复请求。
+                    completeDashboardHandshakeIfReady();
                 }
             }
 
@@ -3579,6 +3584,24 @@ public class MainActivity extends Activity {
         refreshDashboardData(forceTerms);
     }
 
+    /**
+     * 只在 Dashboard 文档已完成、JS 已明确发出启动信号且当前仍停留首页时，
+     * 启动一次会话探测和数据刷新。两边事件先后顺序不再影响首屏。
+     */
+    private void completeDashboardHandshakeIfReady() {
+        if (!dashboardVisible || !dashboardPageReady
+                || !dashboardHandshakeSignalReceived || dashboardHandshakeReceived) return;
+        dashboardHandshakeReceived = true;
+        requestDashboardRefreshAfterSessionProbe(false);
+        long now = System.currentTimeMillis();
+        if (lastAcademicSessionHealthyAt > 0L
+                && now - lastAcademicSessionHealthyAt < ACADEMIC_PROBE_COOLDOWN_MS) {
+            flushPendingDashboardRefresh();
+        } else {
+            requestAcademicSessionProbe("dashboard-start");
+        }
+    }
+
     private static final class AcademicProbeResult {
         static final int HEALTHY = 1;
         static final int INVALID = 2;
@@ -3918,16 +3941,9 @@ public class MainActivity extends Activity {
         @android.webkit.JavascriptInterface
         public void dashboardReady() {
             runOnUiThread(() -> {
-                if (!dashboardVisible || !dashboardPageReady || dashboardHandshakeReceived) return;
-                dashboardHandshakeReceived = true;
-                requestDashboardRefreshAfterSessionProbe(false);
-                long now = System.currentTimeMillis();
-                if (lastAcademicSessionHealthyAt > 0L
-                        && now - lastAcademicSessionHealthyAt < ACADEMIC_PROBE_COOLDOWN_MS) {
-                    flushPendingDashboardRefresh();
-                } else {
-                    requestAcademicSessionProbe("dashboard-start");
-                }
+                if (!dashboardVisible) return;
+                dashboardHandshakeSignalReceived = true;
+                completeDashboardHandshakeIfReady();
             });
         }
 
