@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.69";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.70";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {

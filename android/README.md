@@ -31,19 +31,20 @@ Android 应用名为“执掌东大”，包名为 `cn.neu.zhizhangdongda`。
 - 登录便捷性：首次进入教务系统时可选择账号密码或微信扫码，并选择是否记住默认方式；默认微信时自动进入学校二维码登录页。点击“保存二维码并打开微信”会将登录二维码保存到“图片/执掌东大”，随后只启动微信主界面，用户可在微信“扫一扫 → 相册”中选择刚保存的图片；回到应用后点击“删除刚刚的二维码图片并进入主界面”，应用会删除这张临时图片并自动刷新教务数据。Android 11 及以上已声明微信包可见性，避免已安装微信被误判为未安装。
 - Android 首页采用底部五项导航（首页、课表、成绩、考试、更多），返回键优先收起抽屉、弹层和 E 码通展开态；Android 不展示培养方案入口，培养方案功能只保留在桌面浏览器插件中，需让原系统培养方案页面在后台保持打开；
 - 桌面插件支持培养方案一键打开原系统查询页，并通过独立的数据驱动渲染器导出 A4 横向 PDF：固定 8 列、课程行语义分页、续页重复表头，不使用浏览器打印，也不带浏览器页眉页脚或个人信息。
+- 课程大纲查询属于桌面插件专属功能，读取原系统“培养 → 课程查询 → 课程大纲查询”的完整列表与详情接口；Android 端不显示该入口，也不会伪造移动端接口。
 
 ## 构建
 
 ```sh
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17
 export PATH="$JAVA_HOME/bin:$PATH"
-./gradlew :app:assembleDebug
+./gradlew :app:assembleRelease
 ```
 
 构建产物位于：
 
 ```text
-app/build/outputs/apk/debug/执掌东大-Android-0.1.69-debug.apk
+app/build/outputs/apk/release/执掌东大-Android-0.1.70-release.apk
 ```
 
 根目录的 `dashboard.html`、`dashboard.css`、`dashboard.js` 会在构建前自动同步到 Android assets，因此接口解析和界面逻辑与浏览器插件共用一套代码。

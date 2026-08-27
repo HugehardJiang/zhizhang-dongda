@@ -1265,48 +1265,77 @@ function rowsOf(payload) {
 // 包装。这里统一做“只读索引”，绝不改写 raw，也不把未知字段压扁掉。
 function courseOutlineCollection(payload) {
   const visited = new Set();
-  const preferredKeys = ["rows", "model", "datas", "data", "result", "content", "records", "items", "list"];
+  const preferredKeys = ["rows", "model", "datas", "data", "result", "content", "response", "payload", "records", "items", "list", "value"];
+  const envelopeKeys = new Set(["datas", "data", "result", "content", "response", "payload", "model", "records", "items", "list", "value"]);
+  const paginationKeys = ["totalSize", "total", "totalCount", "pageNumber", "pageSize", "page", "recordsTotal", "count"];
+  const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+  const looksLikeRecord = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    return ["KCH", "KCM", "WID", "BBWID", "XNXQDM", "courseCode", "courseName"].some((key) => hasOwn(value, key));
+  };
+  const isWrapperChild = (path) => {
+    const parent = path.length > 1 ? String(path[path.length - 2]) : "";
+    return envelopeKeys.has(parent) || parent === "datas";
+  };
   const walk = (value, path = [], depth = 0) => {
-    if (depth > 9) return null;
+    if (depth > 10) return null;
     if (value === null || value === undefined) {
-      // An explicit datas.model=null is a valid empty response, not a
-      // reason to promote the surrounding code/datas wrapper to a record.
-      return path[path.length - 1] === "model"
+      // A null model is a valid response for an empty optional section. It
+      // must not promote the outer {code, datas} envelope to a fake record.
+      return path.length > 0 && envelopeKeys.has(String(path[path.length - 1]))
         ? { rows: [], shape: "empty", path, container: null, record: null }
         : null;
     }
-    if (Array.isArray(value)) return { rows: value, shape: path[path.length - 1] === "rows" ? "rows" : "array", path, container: value };
+    if (Array.isArray(value)) {
+      return { rows: value, shape: path[path.length - 1] === "rows" ? "rows" : "array", path, container: value };
+    }
     if (typeof value !== "object") return null;
     if (visited.has(value)) return null;
     visited.add(value);
     if (Array.isArray(value.rows)) {
-      const paged = ["totalSize", "total", "totalCount", "pageNumber", "pageSize", "page"].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+      const paged = paginationKeys.some((key) => hasOwn(value, key));
       return { rows: value.rows, shape: paged ? "paged" : "rows", path: [...path, "rows"], container: value };
     }
-    // Some endpoint versions wrap a single detail record as
-    // { code: 0, datas: { model: { ...record } } }.  Once the explicit
-    // model node has been reached, the model object is the record; the
-    // outer response wrapper must not become a fake record itself.
-    if (path[path.length - 1] === "model") {
-      return { rows: [value], shape: "object", path, container: value, record: value };
-    }
+
+    let emptyCandidate = null;
     for (const key of preferredKeys) {
-      if (value[key] === undefined) continue;
+      if (!hasOwn(value, key)) continue;
       const found = walk(value[key], [...path, key], depth + 1);
-      if (found?.rows) return found;
+      if (!found) continue;
+      if (found.shape === "empty") {
+        emptyCandidate ||= found;
+        continue;
+      }
+      return found;
     }
     for (const [key, child] of Object.entries(value)) {
       if (preferredKeys.includes(key)) continue;
       const found = walk(child, [...path, key], depth + 1);
-      if (found?.rows) return found;
+      if (!found) continue;
+      if (found.shape === "empty") {
+        emptyCandidate ||= found;
+        continue;
+      }
+      return found;
     }
+
+    // Detail responses have appeared as both datas.model and
+    // datas.<endpointName>. The latter is not literally named “model”, so
+    // identify it by its wrapper position and course identity fields.
+    if (isWrapperChild(path) || path[path.length - 1] === "model" || looksLikeRecord(value)) {
+      return { rows: [value], shape: "object", path, container: value, record: value };
+    }
+    if (emptyCandidate) return emptyCandidate;
     return null;
   };
   const found = walk(payload);
   if (found) return found;
   if (payload === null || payload === undefined) return { rows: [], shape: "empty", path: [], container: null };
   if (Array.isArray(payload)) return { rows: payload, shape: "array", path: [], container: payload };
-  return { rows: [], shape: typeof payload === "object" ? "object" : "unknown", path: [], container: payload, record: payload };
+  if (typeof payload === "object" && !Object.keys(payload).some((key) => envelopeKeys.has(key))) {
+    return { rows: [payload], shape: "object", path: [], container: payload, record: payload };
+  }
+  return { rows: [], shape: "unknown", path: [], container: payload, record: null };
 }
 
 function courseOutlineFirstValue(payload, keys) {
@@ -11073,7 +11102,11 @@ function courseOutlinePayloadFromRuntimeResponse(response) {
 function courseOutlineBusinessError(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
   const code = payload.code ?? payload.status ?? payload.errCode ?? payload.errorCode;
-  if (Number(code) === 401 || Number(code) === 403) return String(payload.message || payload.msg || "教务系统登录已失效");
+  const codeText = String(code ?? "").trim().toLowerCase();
+  if (["401", "403"].includes(codeText)) return String(payload.message || payload.msg || "教务系统登录已失效");
+  if (codeText && !["0", "200", "ok", "success"].includes(codeText)) {
+    return String(payload.message || payload.msg || payload.errorMessage || `原系统返回失败状态（${codeText}）`);
+  }
   if (payload.success === false || payload.ok === false || payload.error === true) {
     return String(payload.message || payload.msg || payload.errorMessage || "原系统返回了失败状态");
   }

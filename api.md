@@ -1765,3 +1765,61 @@ Chrome 写入 `chrome.storage.local`，键名由稳定哈希后的 profile key �
 ### 15.3 展示与导出边界
 
 总览、个人课表日视图、周表、搜索、PNG 和 CSV 都读取合并层。没有节次的一次性日程进入周表下方的“其他日程”区域和 PNG 的未定位区域；CSV 的 WakeUp 格式无法表达没有教学周或节次的日期事件时，不伪造周次/节次，而是在导出提示中报告跳过数量。Android 继续隐藏培养计划入口，但本地课表覆盖层保留。
+
+## 16. 课程大纲查询
+
+课程大纲查询对应原系统路径“培养 → 课程查询 → 课程大纲查询”，属于桌面插件功能；Android 端不显示入口。课程列表使用原系统当前登录页面提供的 WebVPN 会话读取，不保存账号、密码、Cookie、Token 或完整个人查询参数。
+
+### 16.1 课程列表
+
+```text
+POST modules/dgcx/cxlb.do
+```
+
+请求体为原系统的 URL 编码查询参数，主要包括 `*order`、`querySetting`、`pageSize`、`pageNumber`。当前页面支持课程号 `KCH`、课程名 `KCM`、开课单位 `KKDWDM`、课程类别 `KCCCDM`、课程性质/级别 `KCJBDM` 等筛选，并使用服务端 `totalSize`、`pageNumber`、`pageSize` 完成分页。响应通常包装为 `datas.cxlb`，其中包含 `rows` 和分页元数据；实现同时兼容直接数组、单对象、`rows`、未知包装层和空响应。
+
+### 16.2 课程详情接口
+
+选中课程后按原系统返回的课程标识和方案标识读取以下模块。某个模块失败或为空不会遮挡其他模块；每个模块可单独重试。
+
+```text
+cxkcxxx.do           基本信息
+cxkcdgxx.do          课程大纲信息
+cxkcjcxx.do          课程简介/描述
+cxkcmbxx.do          课程目标
+kcmbybyzccx.do       课程目标与毕业要求支撑
+cxkcmbhnrdgx.do      课程目标与毕业要求对应关系
+cxkccjpdff.do        成绩评定方式
+cxkhxs.do             教学学时
+cxkhxscjzb.do        学时与成绩占比
+cxkhhjsz.do          教学环节设置
+cxkcmbdcbz.do        课程目标达成度
+cxkczlpjhgjjz.do     课程质量评价与改进
+cxzbrxgxx.do         负责人/任课教师信息
+cxkcdgfj.do          课程大纲附件
+```
+
+### 16.3 无损保留与浏览器桥接
+
+详情标准化只用于页面分组和检索，不删除原始结构。每个模块同时保留原始响应、响应状态、记录数组或单对象、`WID`/`BBWID`/`XNXQDM` 等标识、所有未知字段和 `*_DISPLAY` 字段，以及 `null`、空字符串、多行文本和原始顺序。用户可以复制或下载完整 JSON，下载内容不拼接账号信息，也不把原始对象发送到第三方。
+
+由于 WebVPN、主页面 Cookie 和跨域限制，插件不直接从扩展上下文请求这些接口，而是在当前已登录的原系统课程大纲页面/模块 iframe 的主世界中调用：
+
+```js
+BH_UTILS.doSyncAjax(WIS_EMAP_SERV.getAbsPath(path), params)
+```
+
+请求优先使用课程大纲模块 iframe，找不到时再兼容当前页面；桥接只允许课程大纲白名单路径，并设有有限超时。打开原系统按钮只负责导航到原页面，不执行写操作。
+
+### 16.4 辅助元数据接口
+
+原系统还提供课程大纲维护页的模块/字段元数据和学期辅助接口，供后续字段标签或筛选增强使用：
+
+```text
+modules/kcdgwhgl.do       课程大纲维护模块元数据
+modules/kcdgwhgl.do?json=1
+xnxq.do                   学期选择数据
+mrxnxqcx.do               默认学期查询
+```
+
+这些辅助接口不是课程详情的必需请求；课程大纲页沿用用户当前原系统上下文，不把顶部“当前学期”选择误写为课程大纲的固定查询条件。

@@ -70,6 +70,8 @@ globalThis.__auditTest = {
   currentScoreReminder, acknowledgeCurrentScoreReminder, renderNewScoreReminderModal,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
   scheduleCsvHasRows, renderPersonal, renderOverview, renderOverviewPriority, renderSettings, renderCourseDetailModal,
+  courseOutlineCollection, normalizeCourseOutlineEndpointPayload, courseOutlineQuerySettings,
+  courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -79,6 +81,53 @@ vm.runInThisContext(code, { filename: dashboardPath });
 const t = global.__auditTest;
 
 (async () => {
+  // Course-outline responses must preserve every raw field while accepting
+  // the wrappers observed in the real system: paged rows, arrays, a single
+  // record under datas.<endpoint>, null optional sections, and unknown data.
+  const outlineListPayload = {
+    code: '0',
+    datas: {
+      cxlb: {
+        totalSize: 4609, pageNumber: 2, pageSize: 10,
+        rows: [{ KCH: 'A-001', KCM: '测试课程', KKDWDM_DISPLAY: '测试学院', UNKNOWN_FIELD: '保留' }]
+      }
+    }
+  };
+  const outlineListCopy = JSON.parse(JSON.stringify(outlineListPayload));
+  const outlineList = t.normalizeCourseOutlineEndpointPayload(outlineListPayload, 'modules/dgcx/cxlb.do');
+  assert.strictEqual(outlineList.shape, 'paged');
+  assert.strictEqual(outlineList.totalSize, 4609);
+  assert.strictEqual(outlineList.pageNumber, 2);
+  assert.strictEqual(outlineList.records[0].UNKNOWN_FIELD, '保留');
+  assert.deepStrictEqual(outlineListPayload, outlineListCopy);
+
+  const outlineSinglePayload = {
+    code: '0',
+    datas: { cxkcxxx: { KCH: 'A-001', KCM: '测试课程', MULTILINE: '第一行\n第二行', NULL_FIELD: null, UNKNOWN_FIELD: '不丢失' } }
+  };
+  const outlineSingle = t.normalizeCourseOutlineEndpointPayload(outlineSinglePayload, 'cxkcxxx.do');
+  assert.strictEqual(outlineSingle.shape, 'object');
+  assert.strictEqual(outlineSingle.records.length, 1);
+  assert.strictEqual(outlineSingle.records[0].MULTILINE, '第一行\n第二行');
+  assert.strictEqual(outlineSingle.records[0].NULL_FIELD, null);
+  assert.strictEqual(outlineSingle.records[0].UNKNOWN_FIELD, '不丢失');
+  assert.deepStrictEqual(t.normalizeCourseOutlineEndpointPayload({ code: '0', datas: { cxkcdgfj: null } }, 'cxkcdgfj.do').records, []);
+  assert.deepStrictEqual(t.normalizeCourseOutlineEndpointPayload([{ WID: '1' }, { WID: '2' }], 'cxkhxs.do').records.map((row) => row.WID), ['1', '2']);
+  const unknownOutline = t.normalizeCourseOutlineEndpointPayload({ code: '0', datas: { cxkcjcxx: { arbitrary: 'value' } } }, 'cxkcjcxx.do');
+  assert.strictEqual(unknownOutline.records[0].arbitrary, 'value');
+  assert.strictEqual(t.courseOutlineBusinessError({ code: '0' }), '');
+  assert.match(t.courseOutlineBusinessError({ code: '401', msg: '登录失效' }), /登录失效/);
+  assert.match(t.courseOutlineBusinessError({ code: '9', message: '业务失败' }), /业务失败/);
+
+  const outlineQuery = t.courseOutlineQuerySettings({ code: 'A-001', name: '测试', unit: '07', level: '1', grade: '2' });
+  assert.deepStrictEqual(outlineQuery.map((item) => item.name), ['KCH', 'KCM', 'KKDWDM', 'KCCCDM', 'KCJBDM', '*order']);
+  assert.ok(outlineQuery.slice(0, 5).every((item) => item.builder === 'like'));
+  assert.strictEqual(JSON.parse(t.courseOutlineListBody({ code: 'A-001' }, 3, 20).querySetting)[0].name, 'KCH');
+  assert.notStrictEqual(t.courseOutlineKey({ KCH: 'A-001', BBWID: 'version-1', XNXQDM: '2025' }), t.courseOutlineKey({ KCH: 'A-001', BBWID: 'version-2', XNXQDM: '2025' }));
+  const outlineExport = t.courseOutlineExportDocument({ key: 'A-001|version-1|2025', row: outlineSinglePayload.datas.cxkcxxx, endpoints: { 'cxkcxxx.do': { raw: outlineSinglePayload, records: outlineSingle.records } } });
+  assert.strictEqual(outlineExport.schema, 'zhizhang-course-outline/v1');
+  assert.strictEqual(outlineExport.endpoints['cxkcxxx.do'].raw.datas.cxkcxxx.MULTILINE, '第一行\n第二行');
+
   // Input sanitization and strict calendar validation.
   assert.strictEqual(t.escapeHtml('<img src=x onerror=1>'), '&lt;img src=x onerror=1&gt;');
   assert.strictEqual(t.parseExamDate('2026-02-31'), null);

@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.79` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.63` / `63` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.86` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.70` / `70` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -32,11 +32,11 @@ dashboard.html  +  dashboard.css  +  dashboard.js     ← 几乎全部业务在�
 
 | 想改什么 | 先打开 |
 | --- | --- |
-| 成绩 / 考试 / 课表 / GPA / 全校课表 / 培养方案 UI 与映射 | `dashboard.js` |
+| 成绩 / 考试 / 课表 / GPA / 全校课表 / 培养方案 / 课程大纲 UI 与映射 | `dashboard.js` |
 | 布局、颜色、桌面侧栏、底部导航、弹窗 | `dashboard.css`、`design.md` |
 | 导航骨架、页面壳 | `dashboard.html` |
 | 学校接口字段、WebVPN 规则 | `api.md`，再对 `dashboard.js` |
-| 培养方案「打开原系统标签页再读取」 | `background.js` + `dashboard.js` 培养计划段 |
+| 培养方案「打开原系统标签页再读取」和课程大纲主世界桥接 | `background.js` + `dashboard.js` |
 | 登录、E 码通、Keystore、Android 缓存文件、返回键 | `android/app/src/main/java/cn/neu/zhizhangdongda/MainActivity.java` |
 | 权限、包名、图标 | `android/app/src/main/AndroidManifest.xml`、`android/app/src/main/res/` |
 
@@ -82,7 +82,7 @@ dashboard.html  +  dashboard.css  +  dashboard.js     ← 几乎全部业务在�
 | 查询台 UI | 根目录 `dashboard.*` | 构建时 `syncWebAssets` 拷贝同一套 |
 | 登录 | 用户自己在学校网页登录；插件不存账密 | 内置登录 / 原网页账密 / 微信二维码；成功后 Keystore AES-GCM 存账密 |
 | 网络 | 页面 `fetch` + Cookie | `AndroidApi.request` → `HttpURLConnection`，只允许 `https://webvpn.neu.edu.cn/` |
-| 培养计划 | 有；需后台挂着原系统培养方案页 | **无入口**：启动时删掉 `[data-view="curriculum"]` |
+| 培养计划 / 课程大纲 | 有；需后台挂着原系统对应页面 | **无入口**：启动时删掉 `[data-view="curriculum"]` 和 `[data-view="course-outline"]` |
 | 个人缓存 | 主要靠内存 + `localStorage` 设置 | 应用内部 `personal-cache/`，文件名 = 学号 SHA-256 |
 | 本地课表 | `chrome.storage.local` | 独立目录 `local-schedule/`，同样按学号哈希 |
 | E 码通 | 无 | 独立 WebView + 首页顶部卡片 |

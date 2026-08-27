@@ -37,6 +37,7 @@ const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
   "cxkcdgfj.do"
 ]);
 const COURSE_OUTLINE_NAVIGATION_TIMEOUT_MS = 18000;
+const COURSE_OUTLINE_REQUEST_SCRIPT_TIMEOUT_MS = 12000;
 let curriculumPendingFallback = null;
 let curriculumBootstrapInFlight = null;
 const curriculumResumeLocks = new Map();
@@ -381,9 +382,12 @@ async function inspectPortalTabState(tabId) {
 
 function courseOutlineRequestPath(endpoint) {
   const name = String(endpoint || "").trim();
-  if (name === COURSE_OUTLINE_LIST_PATH || name === COURSE_OUTLINE_METADATA_PATH) return `/${name.replace(/^\/+/, "")}`;
+  // getAbsPath() is the same helper used by the original iframe and expects
+  // a path relative to the current kccx application root. A leading slash
+  // would resolve from the WebVPN host root on some system versions.
+  if (name === COURSE_OUTLINE_LIST_PATH || name === COURSE_OUTLINE_METADATA_PATH) return name.replace(/^\/+/, "");
   if (!COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(name)) return "";
-  return `/modules/kcdgwhgl/${name}`;
+  return `modules/kcdgwhgl/${name}`;
 }
 
 async function executeCourseOutlinePortalRequest(tabId, path, params = {}) {
@@ -394,6 +398,10 @@ async function executeCourseOutlinePortalRequest(tabId, path, params = {}) {
     world: "MAIN",
     args: [requestPath, params],
     func: (safePath, safeParams) => {
+      const href = String(location.href || "");
+      const title = String(document.title || "");
+      const frameText = `${href} ${title}`;
+      const courseOutlineFrame = /(?:kccx|kcdgwhgl|dgcx|课程大纲)/i.test(frameText);
       if (!window.BH_UTILS?.doSyncAjax || !window.WIS_EMAP_SERV?.getAbsPath) {
         return { available: false, error: "当前框架尚未加载原系统请求封装" };
       }
@@ -402,14 +410,19 @@ async function executeCourseOutlinePortalRequest(tabId, path, params = {}) {
           window.WIS_EMAP_SERV.getAbsPath(safePath),
           safeParams || {}
         );
-        return { available: true, payload: payload === undefined ? null : payload };
+        return { available: true, courseOutlineFrame, pageUrl: href, payload: payload === undefined ? null : payload };
       } catch (error) {
-        return { available: true, error: error?.message || "原系统接口请求失败" };
+        return { available: true, courseOutlineFrame, pageUrl: href, error: error?.message || "原系统接口请求失败" };
       }
-    }
+    },
+    COURSE_OUTLINE_REQUEST_SCRIPT_TIMEOUT_MS
   });
   const values = result.map((item) => item?.result).filter(Boolean);
-  const successful = values.find((item) => item.available && !item.error);
+  // Prefer the module iframe. The top shell may also expose the common AJAX
+  // helper, but its getAbsPath() can resolve relative to homeapp instead of
+  // the active kccx module on some WebVPN versions.
+  const successful = values.find((item) => item.available && item.courseOutlineFrame && !item.error)
+    || values.find((item) => item.available && !item.error);
   if (successful) return { payload: successful.payload, tabId };
   throw new Error(values.map((item) => item.error).find(Boolean) || "课程大纲页面尚未准备好");
 }
@@ -429,8 +442,11 @@ async function navigatePortalTabToCourseOutline(tabId) {
           const href = String(location.href || "");
           const title = String(document.title || "");
           const bodyText = String(document.body?.innerText || "").slice(0, 1800);
-          if (/(?:kcdgwhgl|dgcx|课程大纲查询|课程大纲)/i.test(`${href} ${title}`)
-            || (/课程大纲查询|课程大纲/.test(bodyText) && !/首页|home|portal/i.test(title))) {
+          const headingText = Array.from(document.querySelectorAll("h1,h2,h3,[role='heading']"))
+            .map((element) => String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim())
+            .filter(Boolean);
+          if (/(?:kcdgwhgl|dgcx)/i.test(`${href} ${title}`)
+            || headingText.some((text) => text === "课程大纲查询" || text === "课程大纲")) {
             return { ready: true };
           }
           const loginByUrl = /(?:\/tpass\/login|\/login(?:[/?#]|$))/i.test(href);
