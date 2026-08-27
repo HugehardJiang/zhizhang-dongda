@@ -240,6 +240,22 @@ const t = global.__auditTest;
   assert.match(readableOutline, /未填写信息（1 项）/);
   assert.doesNotMatch(readableOutline, /class="course-outline-field"><span>KCM<\/span>/);
 
+  const teachingReferences = t.renderCourseOutlineRecord({
+    KCH: 'A1308000022', KCM: '人工智能导论', SYZY: '自动化2025级、电气工程2025级',
+    SFXYJC_DISPLAY: '否', SFXYJC: '0', XKKC: '人工智能数学基础',
+    CKSJJXZY: '《机器学习》参考资料', QTSM: '无'
+  }, { forceReadable: true, supplementalLabel: '教材参考信息' });
+  assert.match(teachingReferences, /适用专业/);
+  assert.match(teachingReferences, /是否需要先修课程/);
+  assert.match(teachingReferences, /先修课程/);
+  assert.match(teachingReferences, /参考书籍及资料/);
+  assert.match(teachingReferences, /其他说明/);
+  assert.doesNotMatch(teachingReferences, /补充信息（/);
+
+  const gradingMethod = t.renderCourseOutlineRecord({ KCCJPDFF: '平时成绩30%＋期末成绩70%', KSLXDM: '02' }, { forceReadable: true });
+  assert.match(gradingMethod, /课程成绩评定方法/);
+  assert.doesNotMatch(gradingMethod, /系统信息（/);
+
   // Input sanitization and strict calendar validation.
   assert.strictEqual(t.escapeHtml('<img src=x onerror=1>'), '&lt;img src=x onerror=1&gt;');
   assert.strictEqual(t.parseExamDate('2026-02-31'), null);

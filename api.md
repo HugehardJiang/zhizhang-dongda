@@ -1784,12 +1784,12 @@ POST modules/dgcx/cxlb.do
 
 ```text
 cxkcxxx.do           基本信息
-cxkcdgxx.do          课程大纲信息
+cxkcdgxx.do          教材参考与先修信息
 cxkcjcxx.do          课程简介/描述
 cxkcmbxx.do          课程目标
 kcmbybyzccx.do       课程目标与毕业要求支撑
 cxkcmbhnrdgx.do      课程目标与毕业要求对应关系
-cxkccjpdff.do        成绩评定方式
+cxkccjpdff.do        课程成绩评定方法
 cxkhxs.do             教学学时
 cxkhxscjzb.do        学时与成绩占比
 cxkhhjsz.do          教学环节设置
@@ -1831,4 +1831,4 @@ mrxnxqcx.do               默认学期查询
 
 ### 16.5 详情展示
 
-课程大纲详情页不会把 EMAP 内部字段名直接作为主界面标签。`KCM`、`KCH`、`XF`、`XS`、`SYXS`、`KTJSXS`、`JYKKXQ` 等常见字段会分别显示为“课程名称”“课程号”“学分”“总学时”“实验学时”“课堂教学学时”“建议开课学期”；带有 `_DISPLAY`/名称别名时优先显示可读文字，重复的代码字段自动归入“系统信息”。未知字段和空字段也不会丢失，而是按需收起；完整响应仍可在“原始数据”、复制和下载 JSON 中核对。
+课程大纲详情页不会把 EMAP 内部字段名直接作为主界面标签。`KCM`、`KCH`、`XF`、`XS`、`SYXS`、`KTJSXS`、`JYKKXQ` 等常见字段会分别显示为“课程名称”“课程号”“学分”“总学时”“实验学时”“课堂教学学时”“建议开课学期”；带有 `_DISPLAY`/名称别名时优先显示可读文字，重复的代码字段自动归入“系统信息”。“课程成绩评定方法”和“教材参考 / 先修”章节中的业务字段直接展示，不再放进补充信息折叠项。未知字段和空字段也不会丢失，而是按需收起；完整响应仍可在“原始数据”、复制和下载 JSON 中核对。

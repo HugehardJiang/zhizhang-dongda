@@ -54,12 +54,12 @@ const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
 ]);
 const COURSE_OUTLINE_ENDPOINT_LABELS = Object.freeze({
   "cxkcxxx.do": "基本信息",
-  "cxkcdgxx.do": "课程附加信息",
+  "cxkcdgxx.do": "教材参考 / 先修",
   "cxkcjcxx.do": "课程简介",
   "cxkcmbxx.do": "课程目标",
   "kcmbybyzccx.do": "毕业要求支撑",
   "cxkcmbhnrdgx.do": "教学安排",
-  "cxkccjpdff.do": "考核方式与比例",
+  "cxkccjpdff.do": "课程成绩评定方法",
   "cxkhxs.do": "考核形式",
   "cxkhxscjzb.do": "目标考核关系",
   "cxkhhjsz.do": "成绩评定",
@@ -11266,12 +11266,12 @@ const COURSE_OUTLINE_SECTION_DEFINITIONS = Object.freeze([
   { title: "课程目标", endpoint: "cxkcmbxx.do", hint: "课程目标与目标文本" },
   { title: "毕业要求支撑", endpoint: "kcmbybyzccx.do", hint: "毕业要求、支撑程度和权重" },
   { title: "教学安排", endpoint: "cxkcmbhnrdgx.do", hint: "章节、教学内容、学时与教学方法" },
-  { title: "考核方式与比例", endpoint: "cxkccjpdff.do", hint: "成绩评定方式及各环节比例" },
+  { title: "课程成绩评定方法", endpoint: "cxkccjpdff.do", hint: "课程总评成绩的组成、评定方法及各环节比例", forceReadable: true, supplementalLabel: "成绩评定信息" },
   { title: "考核形式", endpoint: "cxkhxs.do", hint: "考核形式字典与顺序" },
   { title: "目标考核关系", endpoint: "cxkhxscjzb.do", hint: "课程目标与考核环节的对应关系" },
   { title: "达成标准", endpoint: "cxkcmbdcbz.do", hint: "课程目标达成标准与评价标准" },
   { title: "成绩评定", endpoint: "cxkhhjsz.do", hint: "考核环节、目标权重和成绩计算信息" },
-  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "先修课程、参考资料和其他课程信息" },
+  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "适用专业、先修课程、参考资料和其他课程信息", forceReadable: true, supplementalLabel: "教材参考信息" },
   { title: "质量改进", endpoint: "cxkczlpjhgjjz.do", hint: "课程质量评价与持续改进记录" },
   { title: "编制信息", endpoint: "cxzbrxgxx.do", hint: "制订、审核、批准与日期" },
   { title: "附件", endpoint: "cxkcdgfj.do", hint: "原系统返回的附件字段；不猜测下载地址" }
@@ -11307,6 +11307,14 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
   KCFL1_DISPLAY: "课程分类",
   KCF1_DISPLAY: "课程分类",
   KCFDL_DISPLAY: "课程分类",
+  SYZY: "适用专业",
+  SFXYJC_DISPLAY: "是否需要先修课程",
+  SFXYJC: "是否需要先修课程（代码）",
+  XKKC: "先修课程",
+  XXK: "先修课程",
+  CKSJJXZY: "参考书籍及资料",
+  CKSJXZY: "参考书籍及资料",
+  QTSM: "其他说明",
   KSLXDM: "考核方式（代码）",
   KSLXDM_DISPLAY: "考核方式",
   KSLXMC: "考核方式",
@@ -11337,6 +11345,10 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
   SJCJ: "实践成绩",
   CJUEFS: "成绩评定方式",
   QTCJ20: "其他成绩（20%）",
+  KCCJPDFF: "课程成绩评定方法",
+  KCCJPDFF_DISPLAY: "课程成绩评定方法",
+  CJPDFF: "成绩评定方法",
+  CJPDFF_DISPLAY: "成绩评定方法",
   SFWHCJGC: "文化基础课程",
   KSSJ: "考试时间",
   KSSJ_DISPLAY: "考试时间",
@@ -11793,10 +11805,12 @@ function courseOutlineFieldMarkup(label, value, options = {}) {
   return `<div class="course-outline-field${options.className ? ` ${options.className}` : ""}"><span>${escapeHtml(label)}</span><div class="course-outline-field-content">${courseOutlineValueMarkup(value)}${source}</div></div>`;
 }
 
-function renderCourseOutlineRecord(record) {
+function renderCourseOutlineRecord(record, options = {}) {
   if (!record || typeof record !== "object") return `<div class="course-outline-value"><pre>${escapeHtml(courseOutlineText(record))}</pre></div>`;
   const entries = Object.entries(record);
   if (!entries.length) return `<div class="course-outline-empty">原系统返回了空对象。</div>`;
+  const forceReadable = options.forceReadable === true;
+  const supplementalLabel = String(options.supplementalLabel || "补充信息");
   const readable = [];
   const supplemental = [];
   const technical = [];
@@ -11806,7 +11820,7 @@ function renderCourseOutlineRecord(record) {
       empty.push([key, value]);
       return;
     }
-    if (courseOutlineIsTechnicalField(key, record)) {
+    if (!forceReadable && courseOutlineIsTechnicalField(key, record)) {
       technical.push([key, value]);
       return;
     }
@@ -11817,7 +11831,9 @@ function renderCourseOutlineRecord(record) {
 
   const readableMarkup = readable.map(([label, value]) => courseOutlineFieldMarkup(label, value)).join("");
   const supplementalMarkup = supplemental.length
-    ? `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`补充信息 ${index + 1}`, value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
+    ? forceReadable
+      ? `<div class="course-outline-record course-outline-readable-supplemental">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`${supplementalLabel} ${index + 1}`, value, { source: key, showSource: false, className: "is-supplemental" })).join("")}</div>`
+      : `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`补充信息 ${index + 1}`, value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
     : "";
   const technicalMarkup = technical.length
     ? `<details class="course-outline-more-fields course-outline-technical-fields"><summary>系统信息（${technical.length} 项）</summary><p class="course-outline-more-fields-hint">这些是教务系统内部编码，通常不影响阅读；需要核对原系统数据时可展开查看。</p><div class="course-outline-record">${technical.map(([key, value]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), value, { source: key, showSource: true, className: "is-technical" })).join("")}</div></details>`
@@ -11835,7 +11851,7 @@ function renderCourseOutlineSection(definition, detail) {
     return `<section class="course-outline-section panel is-failed"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status is-failed">读取失败</span></div><div class="course-outline-error"><strong>${escapeHtml(result.error || "原系统未返回此章节")}</strong><button class="button button-ghost button-small" type="button" data-action="retry-course-outline-endpoint" data-outline-endpoint="${escapeHtml(definition.endpoint)}">重试此章节</button></div>${result.raw !== null && result.raw !== undefined ? renderCourseOutlineRecord(result.raw) : ""}</section>`;
   }
   const content = result.records?.length
-    ? result.records.map((record) => renderCourseOutlineRecord(record)).join("")
+    ? result.records.map((record) => renderCourseOutlineRecord(record, definition)).join("")
     : `<div class="course-outline-placeholder">原系统未提供此项</div>`;
   return `<section class="course-outline-section panel"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status">${escapeHtml(`${courseOutlineShapeLabel(result.shape)} · ${result.records?.length || 0} 项`)}</span></div>${content}</section>`;
 }

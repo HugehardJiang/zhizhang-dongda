@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "东北大学教务焕新",
-  "version": "0.3.90",
+  "version": "0.3.91",
   "description": "在独立新标签页中查询东北大学的成绩、考试、个人/全校课表、课程大纲和培养方案。",
   "permissions": [
     "scripting",
