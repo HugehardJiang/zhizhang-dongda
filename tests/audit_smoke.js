@@ -74,6 +74,7 @@ globalThis.__auditTest = {
   courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
   isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
+  courseOutlineFieldLabel, courseOutlineShapeLabel, renderCourseOutlineRecord,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -220,6 +221,24 @@ const t = global.__auditTest;
   const envelopeResult = t.courseOutlineEndpointResult('cxkcxxx.do', normalizedEnvelope, { raw: rawEnvelope });
   assert.strictEqual(envelopeResult.records[0].KCH, 'A-001');
   assert.deepStrictEqual(envelopeResult.raw, rawEnvelope);
+
+  // The detail UI must be readable without exposing EMAP field names as the
+  // primary labels. Technical codes remain available in a collapsed section
+  // and in the untouched raw response/export.
+  assert.strictEqual(t.courseOutlineFieldLabel('KCM'), '课程名称');
+  assert.strictEqual(t.courseOutlineFieldLabel('KCFL1_DISPLAY'), '课程分类');
+  assert.strictEqual(t.courseOutlineShapeLabel('paged'), '分页列表');
+  const readableOutline = t.renderCourseOutlineRecord({
+    KCH: 'A1304000001', KCM: 'MATLAB语言与应用', XF: 1.75, XS: 32,
+    KCCCDM: '02', KCCCDM_DISPLAY: '本科', KSLXDM: '02',
+    SYXS: 8, NULL_FIELD: null, UNKNOWN_FIELD: '保留内容'
+  });
+  assert.match(readableOutline, /课程名称/);
+  assert.match(readableOutline, /课程层次/);
+  assert.match(readableOutline, /系统信息（1 项）/);
+  assert.match(readableOutline, /补充信息（1 项）/);
+  assert.match(readableOutline, /未填写信息（1 项）/);
+  assert.doesNotMatch(readableOutline, /class="course-outline-field"><span>KCM<\/span>/);
 
   // Input sanitization and strict calendar validation.
   assert.strictEqual(t.escapeHtml('<img src=x onerror=1>'), '&lt;img src=x onerror=1&gt;');

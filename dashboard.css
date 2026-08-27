@@ -1968,6 +1968,9 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .course-outline-detail-title h2 { margin: 0; color: var(--text-primary, #263b49); font-size: clamp(20px, 3vw, 27px); line-height: 1.25; }
 .course-outline-detail-title p { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 16px; margin: 0; color: var(--text-secondary, #5b6a79); font-size: 11px; }
 .course-outline-detail-title p small { flex-basis: 100%; color: var(--text-tertiary, #87929f); }
+.course-outline-technical-key { width: fit-content; color: var(--text-tertiary, #87929f); font-size: 10px; }
+.course-outline-technical-key summary { cursor: pointer; }
+.course-outline-technical-key code { display: block; margin-top: 5px; padding: 6px 8px; color: #597181; background: #f7fafb; border: 1px solid #e5ecef; border-radius: 6px; font-size: 10px; overflow-wrap: anywhere; }
 .course-outline-loading-note { padding: 10px 13px; color: #39749d; background: #f1f7fb; border: 1px solid #d5e6f0; border-radius: 9px; font-size: 11px; line-height: 1.5; }
 .course-outline-loading-note.is-success { color: #39755f; background: #f0f8f4; border-color: #d4e9dd; }
 .course-outline-loading-note.is-warning { color: #8a642d; background: #fff9ed; border-color: #eedfbd; }
@@ -1982,9 +1985,21 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .course-outline-field { display: grid; grid-template-columns: minmax(120px, 24%) minmax(0, 1fr); gap: 12px; padding: 10px 12px; background: #fff; border-bottom: 1px solid #edf1f3; }
 .course-outline-field:last-child { border-bottom: 0; }
 .course-outline-field:nth-child(even) { background: #fbfdfe; }
-.course-outline-field > span { color: #597181; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; font-weight: 700; overflow-wrap: anywhere; }
+.course-outline-field > span { color: #435967; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
+.course-outline-field-content { min-width: 0; }
+.course-outline-value-text { min-width: 0; color: var(--text-secondary, #5b6a79); font: 12px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+.course-outline-value-text.is-structured { color: #667784; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.course-outline-field-source { display: block; margin-top: 5px; color: #9aa6ae; font-size: 9px; font-weight: 400; }
 .course-outline-field pre, .course-outline-raw pre { min-width: 0; margin: 0; color: var(--text-secondary, #5b6a79); font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .course-outline-value { margin-top: 12px; }
+.course-outline-more-fields { margin-top: 10px; padding: 0 11px; background: #f8fbfc; border: 1px solid #e1eaed; border-radius: 8px; }
+.course-outline-more-fields > summary { padding: 10px 0; cursor: pointer; color: #597181; font-size: 11px; font-weight: 700; }
+.course-outline-more-fields .course-outline-record { margin: 0 0 10px; }
+.course-outline-more-fields-hint { margin: -2px 0 10px; color: var(--text-tertiary, #87929f); font-size: 10px; line-height: 1.5; }
+.course-outline-more-fields .course-outline-field { background: transparent; }
+.course-outline-more-fields .course-outline-field:nth-child(even) { background: rgba(255, 255, 255, 0.7); }
+.course-outline-technical-fields .course-outline-field > span { color: #6f7f89; font-weight: 600; }
+.course-outline-empty-fields .course-outline-field > span { color: #84929a; font-weight: 500; }
 .course-outline-raw { padding: 17px 20px; }
 .course-outline-raw > details > summary, .course-outline-raw-item > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; color: var(--text-primary, #263b49); font-size: 12px; font-weight: 700; }
 .course-outline-raw > details > summary span, .course-outline-raw-item > summary span { color: var(--text-tertiary, #87929f); font-size: 10px; font-weight: 500; }

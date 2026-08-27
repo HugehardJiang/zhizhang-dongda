@@ -11277,6 +11277,134 @@ const COURSE_OUTLINE_SECTION_DEFINITIONS = Object.freeze([
   { title: "附件", endpoint: "cxkcdgfj.do", hint: "原系统返回的附件字段；不猜测下载地址" }
 ]);
 
+// 原系统课程大纲接口使用的是 EMAP 内部字段名。它们适合传输和导出，
+// 但不适合直接给普通用户阅读。详情页只在“易读信息”层使用中文标签；
+// 原始字段名和完整值仍保留在下方的系统信息/原始数据折叠区中。
+const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
+  WID: "记录标识",
+  BBWID: "大纲版本",
+  XNXQDM: "适用学期",
+  KCH: "课程号",
+  KCHM: "课程号",
+  KCDM: "课程号",
+  KCM: "课程名称",
+  KCMC: "课程名称",
+  KKDWDM: "开课单位（代码）",
+  KKDWDM_DISPLAY: "开课单位",
+  KKDWMC: "开课单位",
+  KCCCDM: "课程层次（代码）",
+  KCCCDM_DISPLAY: "课程层次",
+  KCCCMC: "课程层次",
+  KCJBDM: "课程级别（代码）",
+  KCJBDM_DISPLAY: "课程级别",
+  KCJBMC: "课程级别",
+  KCLBDM: "课程类别（代码）",
+  KCLBDM_DISPLAY: "课程类别",
+  KCLBMC: "课程类别",
+  KCXZDM: "课程性质（代码）",
+  KCXZDM_DISPLAY: "课程性质",
+  KCXZMC: "课程性质",
+  KCFL1_DISPLAY: "课程分类",
+  KCF1_DISPLAY: "课程分类",
+  KCFDL_DISPLAY: "课程分类",
+  KSLXDM: "考核方式（代码）",
+  KSLXDM_DISPLAY: "考核方式",
+  KSLXMC: "考核方式",
+  KSFS_DISPLAY: "考核方式",
+  KSFSMC: "考核方式",
+  XF: "学分",
+  XS: "总学时",
+  SYXS: "实验学时",
+  SJXS: "实践学时",
+  SJIXS: "实践学时",
+  KTJSXS: "课堂教学学时",
+  TLXS: "讨论学时",
+  JYKKXQ: "建议开课学期",
+  SKJS: "授课教师",
+  SKJS_DISPLAY: "授课教师",
+  JASMC: "上课地点",
+  JASMC_DISPLAY: "上课地点",
+  JXBID: "教学班标识",
+  JXBMC: "教学班名称",
+  KCJJ: "课程简介",
+  KCDG: "课程大纲",
+  KCMB: "课程目标",
+  KCMBBZ: "课程目标标准",
+  QZCJ: "期中成绩",
+  QMCJ: "期末成绩",
+  PSCJ: "平时成绩",
+  SYCJ: "实验成绩",
+  SJCJ: "实践成绩",
+  CJUEFS: "成绩评定方式",
+  QTCJ20: "其他成绩（20%）",
+  SFWHCJGC: "文化基础课程",
+  KSSJ: "考试时间",
+  KSSJ_DISPLAY: "考试时间",
+  FZR: "课程负责人",
+  FZRMC: "课程负责人",
+  ZBR: "制订人",
+  SHR: "审核人",
+  PZR: "批准人",
+  ZBRQ: "制订日期",
+  SHRQ: "审核日期",
+  PZRQ: "批准日期"
+});
+
+const COURSE_OUTLINE_TECHNICAL_FIELD_KEYS = new Set([
+  "WID", "BBWID", "XNXQDM", "KKDWDM", "KCCCDM", "KCJBDM", "KCLBDM", "KCXZDM",
+  "KSLXDM", "JXBID", "KCFDM"
+]);
+
+function courseOutlineValueIsEmpty(value) {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim() === "";
+  if (Array.isArray(value)) return value.length === 0;
+  if (typeof value === "object") return Object.keys(value).length === 0;
+  return false;
+}
+
+function courseOutlineFieldBaseKey(key) {
+  return String(key || "").replace(/(?:_DISPLAY|_TEXT|_LABEL|_NAME|MC)$/i, "");
+}
+
+function courseOutlineHasReadableAlias(record, key) {
+  if (!record || typeof record !== "object") return false;
+  const base = courseOutlineFieldBaseKey(key);
+  const aliases = [
+    `${base}_DISPLAY`, `${base}_TEXT`, `${base}_LABEL`, `${base}_NAME`, `${base}MC`, `${base}MC_DISPLAY`
+  ];
+  return aliases.some((alias) => alias !== key && !courseOutlineValueIsEmpty(record[alias]));
+}
+
+function courseOutlineFieldLabel(key) {
+  const normalizedKey = String(key || "").trim();
+  if (COURSE_OUTLINE_FIELD_LABELS[normalizedKey]) return COURSE_OUTLINE_FIELD_LABELS[normalizedKey];
+  const base = courseOutlineFieldBaseKey(normalizedKey);
+  if (COURSE_OUTLINE_FIELD_LABELS[base]) return COURSE_OUTLINE_FIELD_LABELS[base];
+  // 少数部署会直接返回中文字段名；这种情况无需再翻译。
+  if (/[\u3400-\u9fff]/.test(normalizedKey)) return normalizedKey;
+  return "补充信息";
+}
+
+function courseOutlineIsTechnicalField(key, record) {
+  const normalizedKey = String(key || "").trim();
+  if (courseOutlineHasReadableAlias(record, normalizedKey)) return false;
+  if (COURSE_OUTLINE_TECHNICAL_FIELD_KEYS.has(normalizedKey)) return true;
+  // 不认识的新字段也不要把类似 XXXXXXDM / XXXXXXID 的内部代码直接铺在主界面。
+  return /(?:DM|ID|UUID|WID)$/i.test(normalizedKey) && !["KCH", "KCHM", "KCDM"].includes(normalizedKey);
+}
+
+function courseOutlineShapeLabel(shape) {
+  return ({
+    paged: "分页列表",
+    rows: "列表",
+    array: "列表",
+    object: "单条信息",
+    empty: "暂无内容",
+    unknown: "原始响应"
+  })[shape] || "已读取";
+}
+
 function courseOutlinePayloadFromResponse(response) {
   const data = response?.data ?? response;
   const payload = data && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, "payload")
@@ -11652,11 +11780,52 @@ function courseOutlineText(value) {
   return String(value);
 }
 
+function courseOutlineValueMarkup(value) {
+  const text = courseOutlineText(value);
+  const className = value && typeof value === "object" ? "course-outline-value-text is-structured" : "course-outline-value-text";
+  return `<div class="${className}">${escapeHtml(text)}</div>`;
+}
+
+function courseOutlineFieldMarkup(label, value, options = {}) {
+  const source = options.showSource && options.source
+    ? `<small class="course-outline-field-source">原系统字段：${escapeHtml(options.source)}</small>`
+    : "";
+  return `<div class="course-outline-field${options.className ? ` ${options.className}` : ""}"><span>${escapeHtml(label)}</span><div class="course-outline-field-content">${courseOutlineValueMarkup(value)}${source}</div></div>`;
+}
+
 function renderCourseOutlineRecord(record) {
   if (!record || typeof record !== "object") return `<div class="course-outline-value"><pre>${escapeHtml(courseOutlineText(record))}</pre></div>`;
   const entries = Object.entries(record);
   if (!entries.length) return `<div class="course-outline-empty">原系统返回了空对象。</div>`;
-  return `<div class="course-outline-record">${entries.map(([key, value]) => `<div class="course-outline-field"><span>${escapeHtml(key)}</span><pre>${escapeHtml(courseOutlineText(value))}</pre></div>`).join("")}</div>`;
+  const readable = [];
+  const supplemental = [];
+  const technical = [];
+  const empty = [];
+  entries.forEach(([key, value]) => {
+    if (courseOutlineValueIsEmpty(value)) {
+      empty.push([key, value]);
+      return;
+    }
+    if (courseOutlineIsTechnicalField(key, record)) {
+      technical.push([key, value]);
+      return;
+    }
+    const label = courseOutlineFieldLabel(key);
+    if (label === "补充信息") supplemental.push([key, value]);
+    else readable.push([label, value, key]);
+  });
+
+  const readableMarkup = readable.map(([label, value]) => courseOutlineFieldMarkup(label, value)).join("");
+  const supplementalMarkup = supplemental.length
+    ? `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`补充信息 ${index + 1}`, value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
+    : "";
+  const technicalMarkup = technical.length
+    ? `<details class="course-outline-more-fields course-outline-technical-fields"><summary>系统信息（${technical.length} 项）</summary><p class="course-outline-more-fields-hint">这些是教务系统内部编码，通常不影响阅读；需要核对原系统数据时可展开查看。</p><div class="course-outline-record">${technical.map(([key, value]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), value, { source: key, showSource: true, className: "is-technical" })).join("")}</div></details>`
+    : "";
+  const emptyMarkup = empty.length
+    ? `<details class="course-outline-more-fields course-outline-empty-fields"><summary>未填写信息（${empty.length} 项）</summary><div class="course-outline-record">${empty.map(([key]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), "未提供", { source: key, showSource: true, className: "is-empty" })).join("")}</div></details>`
+    : "";
+  return `<div class="course-outline-record course-outline-readable-record">${readableMarkup || (!supplemental.length && !technical.length ? `<div class="course-outline-empty">原系统没有提供可显示的课程信息。</div>` : "")}</div>${supplementalMarkup}${technicalMarkup}${emptyMarkup}`;
 }
 
 function renderCourseOutlineSection(definition, detail) {
@@ -11668,7 +11837,7 @@ function renderCourseOutlineSection(definition, detail) {
   const content = result.records?.length
     ? result.records.map((record) => renderCourseOutlineRecord(record)).join("")
     : `<div class="course-outline-placeholder">原系统未提供此项</div>`;
-  return `<section class="course-outline-section panel"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status">${escapeHtml(`${result.shape} · ${result.records?.length || 0} 条`)}</span></div>${content}</section>`;
+  return `<section class="course-outline-section panel"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status">${escapeHtml(`${courseOutlineShapeLabel(result.shape)} · ${result.records?.length || 0} 项`)}</span></div>${content}</section>`;
 }
 
 function courseOutlineJsonText(detail = state.courseOutline.detail) {
@@ -11774,8 +11943,9 @@ function renderCourseOutlineDetail() {
   const key = courseOutlineKey(row);
   const failures = Object.values(detail.endpoints || {}).filter((item) => item.status === "failed").length;
   const actions = `<div class="course-outline-detail-actions"><button class="button button-ghost" type="button" data-action="back-course-outline">返回目录</button><button class="button button-primary" type="button" data-action="refresh-course-outline-detail">${detail.loading ? "读取中…" : "刷新全部"}</button><button class="button button-ghost" type="button" data-action="copy-course-outline">复制完整 JSON</button><button class="button button-ghost" type="button" data-action="download-course-outline">下载完整 JSON</button><button class="button button-ghost" type="button" data-action="print-course-outline">打印</button><button class="button button-ghost" type="button" data-action="open-course-outline-original">原系统查看</button></div>`;
-  const raw = `<section class="course-outline-raw panel"><details><summary>原始数据（保留所有接口响应）<span>${escapeHtml(`${Object.keys(detail.endpoints || {}).length} 个接口${failures ? ` · ${failures} 个失败` : ""}`)}</span></summary><div class="course-outline-raw-list">${Object.entries(detail.endpoints || {}).map(([endpoint, result]) => `<details class="course-outline-raw-item"><summary><code>${escapeHtml(endpoint)}</code><span>${escapeHtml(`${result.status} · ${result.shape || "empty"}`)}</span></summary><pre>${escapeHtml(courseOutlineText(result.raw))}</pre></details>`).join("")}</div></details></section>`;
-  return `<div class="course-outline-page course-outline-detail-page">${sectionHeading("课程大纲详情", "每个章节独立读取；单个接口失败不会隐藏其他章节，失败章节可单独重试。", "") }<header class="course-outline-detail-header panel"><div class="course-outline-detail-title"><span class="eyebrow">COURSE OUTLINE</span><h2>${escapeHtml(name)}</h2><p><code>${escapeHtml(code)}</code><span>版本/学期：${escapeHtml(term)}</span><small>数据键：${escapeHtml(key)}</small></p></div>${actions}</header>${detail.loading ? `<div class="course-outline-loading-note">正在并行读取 ${COURSE_OUTLINE_DETAIL_ENDPOINTS.length} 个课程章节…已返回的章节会逐步显示。</div>` : failures ? `<div class="course-outline-loading-note is-warning">有 ${failures} 个章节读取失败；其他原始数据仍已保留，可点击对应章节的“重试此章节”。</div>` : `<div class="course-outline-loading-note is-success">课程大纲读取完成；原始字段和未知字段均已保留。</div>`}${COURSE_OUTLINE_SECTION_DEFINITIONS.map((definition) => renderCourseOutlineSection(definition, detail)).join("")}${raw}</div>`;
+  const raw = `<section class="course-outline-raw panel"><details><summary>原始数据（完整保留，供需要时核对）<span>${escapeHtml(`${Object.keys(detail.endpoints || {}).length} 个接口${failures ? ` · ${failures} 个失败` : ""}`)}</span></summary><div class="course-outline-raw-list">${Object.entries(detail.endpoints || {}).map(([endpoint, result]) => `<details class="course-outline-raw-item"><summary><code>${escapeHtml(endpoint)}</code><span>${escapeHtml(`${result.status} · ${courseOutlineShapeLabel(result.shape || "empty")}`)}</span></summary><pre>${escapeHtml(courseOutlineText(result.raw))}</pre></details>`).join("")}</div></details></section>`;
+  const technicalKey = `<details class="course-outline-technical-key"><summary>查看查询标识</summary><code>${escapeHtml(key)}</code></details>`;
+  return `<div class="course-outline-page course-outline-detail-page">${sectionHeading("课程大纲详情", "常用信息已翻译成中文；系统编码和完整原始响应已收起，单个章节仍可独立重试。", "") }<header class="course-outline-detail-header panel"><div class="course-outline-detail-title"><span class="eyebrow">COURSE OUTLINE</span><h2>${escapeHtml(name)}</h2><p><span>课程号：<code>${escapeHtml(code)}</code></span><span>适用学期：${escapeHtml(term)}</span></p>${technicalKey}</div>${actions}</header>${detail.loading ? `<div class="course-outline-loading-note">正在并行读取 ${COURSE_OUTLINE_DETAIL_ENDPOINTS.length} 个课程章节…已返回的章节会逐步显示。</div>` : failures ? `<div class="course-outline-loading-note is-warning">有 ${failures} 个章节读取失败；其他原始数据仍已保留，可点击对应章节的“重试此章节”。</div>` : `<div class="course-outline-loading-note is-success">课程大纲读取完成；常用字段已转换为中文，完整原始数据仍可展开查看。</div>`}${COURSE_OUTLINE_SECTION_DEFINITIONS.map((definition) => renderCourseOutlineSection(definition, detail)).join("")}${raw}</div>`;
 }
 
 function renderCourseOutline() {
