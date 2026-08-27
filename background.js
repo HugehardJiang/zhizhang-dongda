@@ -18,9 +18,29 @@ const LOGIN_METHOD_WECHAT = "wechat";
 const CURRICULUM_PENDING_KEY = "zhizhang.curriculumBootstrap";
 const CURRICULUM_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
 const CURRICULUM_NAVIGATION_TIMEOUT_MS = 18000;
+const COURSE_OUTLINE_LIST_PATH = "modules/dgcx/cxlb.do";
+const COURSE_OUTLINE_METADATA_PATH = "modules/kcdgwhgl.do";
+const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
+  "cxkcxxx.do",
+  "cxkcdgxx.do",
+  "cxkcjcxx.do",
+  "cxkcmbxx.do",
+  "kcmbybyzccx.do",
+  "cxkcmbhnrdgx.do",
+  "cxkccjpdff.do",
+  "cxkhxs.do",
+  "cxkhxscjzb.do",
+  "cxkhhjsz.do",
+  "cxkcmbdcbz.do",
+  "cxkczlpjhgjjz.do",
+  "cxzbrxgxx.do",
+  "cxkcdgfj.do"
+]);
+const COURSE_OUTLINE_NAVIGATION_TIMEOUT_MS = 18000;
 let curriculumPendingFallback = null;
 let curriculumBootstrapInFlight = null;
 const curriculumResumeLocks = new Map();
+let courseOutlineBootstrapInFlight = null;
 
 function isWebVpnPortalUrl(url = "") {
   return /^https:\/\/webvpn\.neu\.edu\.cn\//i.test(String(url || ""));
@@ -34,7 +54,12 @@ function isCurriculumPageIdentity(url = "", title = "") {
   return moduleUrl || moduleTitle || /pyfagl|pyfaglepg|pyfacx|pyfakz|pyfa/i.test(identity);
 }
 
-async function findLatestPortalTab(preferredTabId = null) {
+function isCourseOutlinePageIdentity(url = "", title = "") {
+  const identity = `${String(url || "")} ${String(title || "")}`;
+  return /(?:kcdgwhgl|dgcx|课程大纲查询|课程大纲)/i.test(identity);
+}
+
+async function findLatestPortalTab(preferredTabId = null, preferredModule = "curriculum") {
   const tabs = await chrome.tabs.query({ url: "https://webvpn.neu.edu.cn/*" });
   const portalTabs = tabs
     .filter((item) => item.id && isWebVpnPortalUrl(item.url))
@@ -44,9 +69,17 @@ async function findLatestPortalTab(preferredTabId = null) {
       // 当前活动的 WebVPN 标签页优先；否则优先最近访问且已经进入原系统模块的页面。
       const activeDelta = Number(Boolean(right.active)) - Number(Boolean(left.active));
       if (activeDelta) return activeDelta;
+      const outlineDelta = Number(isCourseOutlinePageIdentity(right.url, right.title))
+        - Number(isCourseOutlinePageIdentity(left.url, left.title));
       const curriculumDelta = Number(isCurriculumPageIdentity(right.url, right.title))
         - Number(isCurriculumPageIdentity(left.url, left.title));
-      if (curriculumDelta) return curriculumDelta;
+      // Keep the two portal workflows from stealing each other's tab when
+      // both the curriculum and course-outline pages are open.  The default
+      // remains the legacy curriculum preference for all existing callers.
+      const moduleDelta = preferredModule === "outline" ? outlineDelta : curriculumDelta;
+      if (moduleDelta) return moduleDelta;
+      const secondaryDelta = preferredModule === "outline" ? curriculumDelta : outlineDelta;
+      if (secondaryDelta) return secondaryDelta;
       return Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0);
     });
   return portalTabs[0] || null;
@@ -314,14 +347,16 @@ async function inspectPortalTabState(tabId) {
         const href = String(location.href || "");
         const title = String(document.title || "");
         const bodyText = String(document.body?.innerText || "").slice(0, 1800);
-        const curriculum = /(?:pyfagl|pyfaglepg|pyfacx|pyfakz|pyfadm|pyfa)/i.test(`${href} ${title}`)
-          || (/培养方案查询|培养方案管理|培养计划/.test(title) && !/首页|home|portal/i.test(title));
+          const curriculum = /(?:pyfagl|pyfaglepg|pyfacx|pyfakz|pyfadm|pyfa)/i.test(`${href} ${title}`)
+            || (/培养方案查询|培养方案管理|培养计划/.test(title) && !/首页|home|portal/i.test(title));
+          const courseOutline = /(?:kcdgwhgl|dgcx|课程大纲查询|课程大纲)/i.test(`${href} ${title}`);
         const loginByUrl = /(?:\/tpass\/login|\/login(?:[/?#]|$))/i.test(href);
         const loginText = /统一身份认证|用户登录|账号登录|用户名|密码/.test(`${title} ${bodyText}`);
         const hasPassword = Boolean(document.querySelector("input[type='password'],input[name*='pass' i],#password"));
-        return {
-          curriculum,
-          loginRequired: loginByUrl || (hasPassword && loginText),
+          return {
+            curriculum,
+            courseOutline,
+            loginRequired: loginByUrl || (hasPassword && loginText),
           pageUrl: href,
           title
         };
@@ -329,16 +364,187 @@ async function inspectPortalTabState(tabId) {
     });
     const values = result.map((item) => item?.result).filter(Boolean);
     const ready = values.find((item) => item.curriculum);
+    const outline = values.find((item) => item.courseOutline);
     const login = values.find((item) => item.loginRequired);
     return {
       ready: Boolean(ready),
+      courseOutlineReady: Boolean(outline),
       loginRequired: !ready && Boolean(login),
+      courseOutlinePage: outline?.pageUrl || "",
       pageUrl: ready?.pageUrl || login?.pageUrl || values[0]?.pageUrl || "",
       title: ready?.title || login?.title || values[0]?.title || ""
     };
   } catch (error) {
     return { ready: false, loginRequired: false, error: error?.message || "原系统页面尚未完成加载" };
   }
+}
+
+function courseOutlineRequestPath(endpoint) {
+  const name = String(endpoint || "").trim();
+  if (name === COURSE_OUTLINE_LIST_PATH || name === COURSE_OUTLINE_METADATA_PATH) return `/${name.replace(/^\/+/, "")}`;
+  if (!COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(name)) return "";
+  return `/modules/kcdgwhgl/${name}`;
+}
+
+async function executeCourseOutlinePortalRequest(tabId, path, params = {}) {
+  const requestPath = courseOutlineRequestPath(path);
+  if (!requestPath) throw new Error("课程大纲接口不在允许范围内");
+  const result = await executePortalScript(tabId, {
+    target: { tabId, allFrames: true },
+    world: "MAIN",
+    args: [requestPath, params],
+    func: (safePath, safeParams) => {
+      if (!window.BH_UTILS?.doSyncAjax || !window.WIS_EMAP_SERV?.getAbsPath) {
+        return { available: false, error: "当前框架尚未加载原系统请求封装" };
+      }
+      try {
+        const payload = window.BH_UTILS.doSyncAjax(
+          window.WIS_EMAP_SERV.getAbsPath(safePath),
+          safeParams || {}
+        );
+        return { available: true, payload: payload === undefined ? null : payload };
+      } catch (error) {
+        return { available: true, error: error?.message || "原系统接口请求失败" };
+      }
+    }
+  });
+  const values = result.map((item) => item?.result).filter(Boolean);
+  const successful = values.find((item) => item.available && !item.error);
+  if (successful) return { payload: successful.payload, tabId };
+  throw new Error(values.map((item) => item.error).find(Boolean) || "课程大纲页面尚未准备好");
+}
+
+async function navigatePortalTabToCourseOutline(tabId) {
+  const labels = ["课程大纲查询", "课程大纲", "课程查询", "培养"];
+  const clickedLabels = [];
+  let lastError = "";
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < COURSE_OUTLINE_NAVIGATION_TIMEOUT_MS) {
+    try {
+      const result = await executePortalScript(tabId, {
+        target: { tabId, allFrames: true },
+        world: "MAIN",
+        args: [clickedLabels],
+        func: (ignoredLabels) => {
+          const href = String(location.href || "");
+          const title = String(document.title || "");
+          const bodyText = String(document.body?.innerText || "").slice(0, 1800);
+          if (/(?:kcdgwhgl|dgcx|课程大纲查询|课程大纲)/i.test(`${href} ${title}`)
+            || (/课程大纲查询|课程大纲/.test(bodyText) && !/首页|home|portal/i.test(title))) {
+            return { ready: true };
+          }
+          const loginByUrl = /(?:\/tpass\/login|\/login(?:[/?#]|$))/i.test(href);
+          const loginText = /统一身份认证|用户登录|账号登录|用户名|密码/.test(`${title} ${bodyText}`);
+          if (loginByUrl || (document.querySelector("input[type='password'],input[name*='pass' i],#password") && loginText)) {
+            return { loginRequired: true };
+          }
+          const labels = ["课程大纲查询", "课程大纲", "课程查询", "培养"];
+          const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+          const candidates = [];
+          const selector = "a,button,[role='button'],[onclick],li,div,span,[class*='item'],[class*='menu'],[class*='nav'],[class*='card']";
+          Array.from(document.querySelectorAll(selector)).forEach((element) => {
+            const text = normalize(element.innerText || element.textContent || "");
+            const label = labels.find((item) => text === item || text.includes(item));
+            if (!label || ignoredLabels.includes(label) || text.length > 90) return;
+            const style = window.getComputedStyle?.(element);
+            const rect = element.getBoundingClientRect?.();
+            if (style && (style.display === "none" || style.visibility === "hidden")) return;
+            if (rect && (!rect.width || !rect.height)) return;
+            const interactive = /^(A|BUTTON|LI)$/i.test(element.tagName || "")
+              || element.hasAttribute?.("role")
+              || /item|menu|nav|card|click/i.test(String(element.className || ""));
+            candidates.push({ label, text, score: (labels.length - labels.indexOf(label)) * 1000 + (text === label ? 250 : 0) + (interactive ? 100 : 0) - text.length / 10 });
+          });
+          candidates.sort((left, right) => right.score - left.score);
+          return { candidates: candidates.slice(0, 6) };
+        }
+      });
+      const frameResults = result.map((item) => item?.result ? { ...item.result, frameId: item.frameId } : null).filter(Boolean);
+      if (frameResults.some((item) => item.ready)) return { ready: true };
+      if (frameResults.some((item) => item.loginRequired)) return { loginRequired: true };
+      const chosen = frameResults
+        .flatMap((item) => (item.candidates || []).map((candidate) => ({ ...candidate, frameId: item.frameId })))
+        .sort((left, right) => right.score - left.score)[0];
+      if (chosen) {
+        const clickResult = await executePortalScript(tabId, {
+          target: { tabId, frameIds: [chosen.frameId] },
+          world: "MAIN",
+          args: [chosen.label, chosen.text],
+          func: (requestedLabel, requestedText) => {
+            const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+            const selector = "a,button,[role='button'],[onclick],li,div,span,[class*='item'],[class*='menu'],[class*='nav'],[class*='card']";
+            const target = Array.from(document.querySelectorAll(selector)).find((element) => {
+              const text = normalize(element.innerText || element.textContent || "");
+              return text === requestedText && text.includes(requestedLabel);
+            });
+            if (!target || typeof target.click !== "function") return false;
+            target.click();
+            return true;
+          }
+        });
+        if (clickResult.some((item) => item?.result === true) && !clickedLabels.includes(chosen.label)) clickedLabels.push(chosen.label);
+      }
+    } catch (error) {
+      lastError = error?.message || "原系统页面尚未完成加载";
+    }
+    await delay(450);
+  }
+  try {
+    const finalState = await inspectPortalTabState(tabId);
+    if (finalState.courseOutlineReady) return { ready: true };
+    if (finalState.loginRequired) return { loginRequired: true };
+  } catch {
+    // 上层返回可操作的重试提示。
+  }
+  return { ready: false, error: lastError || "没有识别到课程大纲入口，请在原系统进入“培养 → 课程查询 → 课程大纲查询”后重试" };
+}
+
+async function startCourseOutlineBootstrap(preferredTabId = null) {
+  if (courseOutlineBootstrapInFlight) return courseOutlineBootstrapInFlight;
+  courseOutlineBootstrapInFlight = (async () => {
+    let tab = await findLatestPortalTab(preferredTabId, "outline");
+    if (!tab?.id) tab = await chrome.tabs.create({ url: PORTAL_URL, active: false });
+    if (!tab?.id) return { ok: false, status: "failed", error: "无法打开教务系统页面" };
+    const current = await inspectPortalTabState(tab.id);
+    if (current.loginRequired) return { ok: false, status: "login-required", tabId: tab.id, error: "请先在原系统完成登录" };
+    if (current.courseOutlineReady) return { ok: true, status: "ready", tabId: tab.id };
+    const navigation = await navigatePortalTabToCourseOutline(tab.id);
+    if (navigation.loginRequired) return { ok: false, status: "login-required", tabId: tab.id, error: "请先在原系统完成登录" };
+    if (!navigation.ready) return { ok: false, status: "failed", tabId: tab.id, error: navigation.error || "无法进入课程大纲查询" };
+    return { ok: true, status: "ready", tabId: tab.id };
+  })();
+  try {
+    return await courseOutlineBootstrapInFlight;
+  } finally {
+    courseOutlineBootstrapInFlight = null;
+  }
+}
+
+async function openCourseOutlinePortalPage(preferredTabId = null) {
+  const result = await startCourseOutlineBootstrap(preferredTabId);
+  if (result?.tabId) await activatePortalTab(result.tabId);
+  return result;
+}
+
+async function readCourseOutlinePortalRequest(endpoint, params = {}, preferredTabId = null) {
+  const bootstrap = await startCourseOutlineBootstrap(preferredTabId);
+  if (!bootstrap?.ok || bootstrap.status !== "ready") {
+    throw new Error(bootstrap?.error || (bootstrap?.status === "login-required" ? "请先完成教务系统登录" : "课程大纲页面暂不可用"));
+  }
+  return executeCourseOutlinePortalRequest(bootstrap.tabId, endpoint, params);
+}
+
+async function readCourseOutlineListFromPortalTab(body = {}, preferredTabId = null) {
+  return readCourseOutlinePortalRequest(COURSE_OUTLINE_LIST_PATH, body, preferredTabId);
+}
+
+async function readCourseOutlineDetailEndpoint(endpoint, body = {}, preferredTabId = null) {
+  if (!COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(String(endpoint || ""))) throw new Error("课程大纲章节接口不在允许范围内");
+  return readCourseOutlinePortalRequest(String(endpoint), body, preferredTabId);
+}
+
+async function readCourseOutlineMetadata(preferredTabId = null) {
+  return readCourseOutlinePortalRequest(COURSE_OUTLINE_METADATA_PATH, { "*json": 1 }, preferredTabId);
 }
 
 async function getCurriculumPending() {
@@ -794,6 +1000,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     openCurriculumPortalPage(message.dashboardTabId || sender?.tab?.id || null)
       .then((data) => sendResponse(data))
       .catch((error) => sendResponse({ ok: false, error: error.message || "无法打开培养方案原查询" }));
+    return true;
+  }
+  if (message?.type === "open-course-outline-portal") {
+    openCourseOutlinePortalPage(message.tabId || sender?.tab?.id || null)
+      .then((data) => sendResponse(data))
+      .catch((error) => sendResponse({ ok: false, status: "failed", error: error.message || "无法打开课程大纲原查询" }));
+    return true;
+  }
+  if (message?.type === "course-outline-bootstrap") {
+    startCourseOutlineBootstrap(message.tabId || null)
+      .then((data) => sendResponse(data))
+      .catch((error) => sendResponse({ ok: false, status: "failed", error: error.message || "无法进入课程大纲查询" }));
+    return true;
+  }
+  if (message?.type === "course-outline-list-read") {
+    readCourseOutlineListFromPortalTab(message.body || {}, message.tabId || null)
+      .then((data) => sendResponse({ ok: true, data: { ...data, endpoint: COURSE_OUTLINE_LIST_PATH } }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || "原系统课程大纲列表读取失败" }));
+    return true;
+  }
+  if (message?.type === "course-outline-detail-read") {
+    readCourseOutlineDetailEndpoint(message.endpoint, message.body || {}, message.tabId || null)
+      .then((data) => sendResponse({ ok: true, data: { ...data, endpoint: message.endpoint } }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || "原系统课程大纲章节读取失败" }));
+    return true;
+  }
+  if (message?.type === "course-outline-metadata-read") {
+    readCourseOutlineMetadata(message.tabId || null)
+      .then((data) => sendResponse({ ok: true, data: { ...data, endpoint: COURSE_OUTLINE_METADATA_PATH } }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || "原系统课程大纲元数据读取失败" }));
     return true;
   }
   if (message?.type === "curriculum-bootstrap") {

@@ -58,6 +58,8 @@ let nativeCampusSetting = "";
 const nativeCalls = [];
 const androidCurriculumEntry = createElementStub();
 androidCurriculumEntry.remove = () => { androidCurriculumEntry.removed = true; };
+const androidCourseOutlineEntry = createElementStub();
+androidCourseOutlineEntry.remove = () => { androidCourseOutlineEntry.removed = true; };
 global.window = global;
 global.AndroidApi = {
   request() {},
@@ -131,7 +133,9 @@ global.document = {
     return null;
   },
   querySelectorAll(selector) {
-    return selector === '[data-view="curriculum"]' ? [androidCurriculumEntry] : [];
+    if (selector === '[data-view="curriculum"]') return [androidCurriculumEntry];
+    if (selector === '[data-view="course-outline"]') return [androidCourseOutlineEntry];
+    return [];
   },
   createElement() { return createElementStub(); }
 };
@@ -177,6 +181,15 @@ const card = audit.card;
 const touch = (clientY) => ({ touches: [{ clientY }], changedTouches: [{ clientY }] });
 
 assert.strictEqual(androidCurriculumEntry.removed, true);
+assert.strictEqual(androidCourseOutlineEntry.removed, true);
+
+// A stale desktop route can never make Android render or request the
+// desktop-only outline module.
+audit.state.view = 'course-outline';
+audit.render();
+assert.strictEqual(audit.state.view, 'overview');
+assert.strictEqual(audit.state.courseOutline.list.loaded, false);
+assert.deepStrictEqual(audit.state.courseOutline.list.rows, []);
 
 // Android defaults to the native built-in login while preserving both school
 // page fallbacks in settings.

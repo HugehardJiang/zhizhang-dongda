@@ -6,6 +6,9 @@ if (IS_ANDROID_APP) {
   // 培养计划需要桌面浏览器后台挂着原系统页面，手机端不展示这个入口，
   // 避免用户误以为 Android 端也能直接读取浏览器标签页会话。
   document.querySelectorAll('[data-view="curriculum"]').forEach((node) => node.remove());
+  // 课程大纲同样依赖桌面浏览器中的原系统页面；Android 不显示、不请求、
+  // 不缓存课程大纲，误入旧链接时 render() 也会回到总览。
+  document.querySelectorAll('[data-view="course-outline"]').forEach((node) => node.remove());
 }
 
 // 登录后教务系统会把入口从 /https/ 重定向到 /http/；原系统的课表 iframe、
@@ -26,6 +29,40 @@ const PYFA_API_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl`;
 const PYFA_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl/*default`;
 // 培养方案模块和课表模块使用不同的 WebVPN 目标标记。
 const PYFA_TARGET_MARKER = "vpn-12-o1-jwxt.neu.edu.cn";
+const COURSE_OUTLINE_LIST_PATH = "modules/dgcx/cxlb.do";
+const COURSE_OUTLINE_METADATA_PATH = "modules/kcdgwhgl.do";
+const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
+  "cxkcxxx.do",
+  "cxkcdgxx.do",
+  "cxkcjcxx.do",
+  "cxkcmbxx.do",
+  "kcmbybyzccx.do",
+  "cxkcmbhnrdgx.do",
+  "cxkccjpdff.do",
+  "cxkhxs.do",
+  "cxkhxscjzb.do",
+  "cxkhhjsz.do",
+  "cxkcmbdcbz.do",
+  "cxkczlpjhgjjz.do",
+  "cxzbrxgxx.do",
+  "cxkcdgfj.do"
+]);
+const COURSE_OUTLINE_ENDPOINT_LABELS = Object.freeze({
+  "cxkcxxx.do": "基本信息",
+  "cxkcdgxx.do": "课程附加信息",
+  "cxkcjcxx.do": "课程简介",
+  "cxkcmbxx.do": "课程目标",
+  "kcmbybyzccx.do": "毕业要求支撑",
+  "cxkcmbhnrdgx.do": "教学安排",
+  "cxkccjpdff.do": "考核方式与比例",
+  "cxkhxs.do": "考核形式",
+  "cxkhxscjzb.do": "目标考核关系",
+  "cxkhhjsz.do": "成绩评定",
+  "cxkcmbdcbz.do": "达成标准",
+  "cxkczlpjhgjjz.do": "质量改进",
+  "cxzbrxgxx.do": "编制信息",
+  "cxkcdgfj.do": "附件"
+});
 const ALL_SCHEDULE_RETRY_LIMIT = 8;
 const ALL_SCHEDULE_RETRY_DELAY = 1500;
 const API_REQUEST_TIMEOUT = 12000;
@@ -355,6 +392,33 @@ const state = {
       reading: false
     }
   },
+  // 课程大纲是课程目录查询，和培养计划、顶部当前学期及个人业务缓存
+  // 完全隔离。原始响应只存在当前页面会话中，关闭页面即释放。
+  courseOutline: {
+    list: {
+      filters: { code: "", name: "", unit: "", level: "", grade: "" },
+      rows: [],
+      pageNumber: 1,
+      pageSize: 10,
+      totalSize: 0,
+      loading: false,
+      loaded: false,
+      error: "",
+      requestSequence: 0,
+      scrollTop: 0
+    },
+    detail: null,
+    bootstrap: {
+      status: "idle",
+      message: "",
+      error: "",
+      tabId: null
+    },
+    metadata: {
+      loaded: false,
+      endpoints: {}
+    }
+  },
   scheduleTypes: [],
   scheduleTypesLoaded: false,
   scheduleTypeError: "",
@@ -496,6 +560,7 @@ let allScheduleRequestSequence = 0;
 let allScheduleDetailRequestSequence = 0;
 let curriculumListRequestSequence = 0;
 let curriculumPlanRequestSequence = 0;
+let courseOutlineDetailRequestSequence = 0;
 let sportProjectRequestSequence = 0;
 
 const elements = {
@@ -1193,6 +1258,200 @@ function firstArray(value, depth = 0) {
 
 function rowsOf(payload) {
   return firstArray(payload).filter((item) => item && typeof item === "object");
+}
+
+// 课程大纲接口的返回包装在不同版本的教务系统中并不一致：既可能直接
+// 返回对象/数组，也可能是 datas.model.rows，甚至是只带业务字段的未知
+// 包装。这里统一做“只读索引”，绝不改写 raw，也不把未知字段压扁掉。
+function courseOutlineCollection(payload) {
+  const visited = new Set();
+  const preferredKeys = ["rows", "model", "datas", "data", "result", "content", "records", "items", "list"];
+  const walk = (value, path = [], depth = 0) => {
+    if (depth > 9) return null;
+    if (value === null || value === undefined) {
+      // An explicit datas.model=null is a valid empty response, not a
+      // reason to promote the surrounding code/datas wrapper to a record.
+      return path[path.length - 1] === "model"
+        ? { rows: [], shape: "empty", path, container: null, record: null }
+        : null;
+    }
+    if (Array.isArray(value)) return { rows: value, shape: path[path.length - 1] === "rows" ? "rows" : "array", path, container: value };
+    if (typeof value !== "object") return null;
+    if (visited.has(value)) return null;
+    visited.add(value);
+    if (Array.isArray(value.rows)) {
+      const paged = ["totalSize", "total", "totalCount", "pageNumber", "pageSize", "page"].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+      return { rows: value.rows, shape: paged ? "paged" : "rows", path: [...path, "rows"], container: value };
+    }
+    // Some endpoint versions wrap a single detail record as
+    // { code: 0, datas: { model: { ...record } } }.  Once the explicit
+    // model node has been reached, the model object is the record; the
+    // outer response wrapper must not become a fake record itself.
+    if (path[path.length - 1] === "model") {
+      return { rows: [value], shape: "object", path, container: value, record: value };
+    }
+    for (const key of preferredKeys) {
+      if (value[key] === undefined) continue;
+      const found = walk(value[key], [...path, key], depth + 1);
+      if (found?.rows) return found;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (preferredKeys.includes(key)) continue;
+      const found = walk(child, [...path, key], depth + 1);
+      if (found?.rows) return found;
+    }
+    return null;
+  };
+  const found = walk(payload);
+  if (found) return found;
+  if (payload === null || payload === undefined) return { rows: [], shape: "empty", path: [], container: null };
+  if (Array.isArray(payload)) return { rows: payload, shape: "array", path: [], container: payload };
+  return { rows: [], shape: typeof payload === "object" ? "object" : "unknown", path: [], container: payload, record: payload };
+}
+
+function courseOutlineFirstValue(payload, keys) {
+  if (!payload || typeof payload !== "object") return undefined;
+  for (const key of keys) {
+    if (payload[key] !== undefined && payload[key] !== null && String(payload[key]).trim() !== "") return payload[key];
+  }
+  return undefined;
+}
+
+function courseOutlinePageMeta(payload, collection = courseOutlineCollection(payload)) {
+  const candidates = [collection?.container, payload].filter((value) => value && typeof value === "object" && !Array.isArray(value));
+  const read = (keys, fallback = 0) => {
+    for (const candidate of candidates) {
+      const value = courseOutlineFirstValue(candidate, keys);
+      if (value !== undefined) {
+        const number = Number(value);
+        if (Number.isFinite(number)) return number;
+      }
+    }
+    return fallback;
+  };
+  return {
+    pageNumber: read(["pageNumber", "page", "currentPage"], 1) || 1,
+    pageSize: read(["pageSize", "limit", "size"], 0),
+    totalSize: read(["totalSize", "total", "totalCount", "recordsTotal", "count"], collection?.rows?.length || 0)
+  };
+}
+
+function normalizeCourseOutlineEndpointPayload(payload, endpoint = "") {
+  const collection = courseOutlineCollection(payload);
+  const records = collection.shape === "object"
+    ? (collection.record && typeof collection.record === "object" && !Array.isArray(collection.record)
+      ? [collection.record]
+      : payload && typeof payload === "object" && !Array.isArray(payload) ? [payload] : [])
+    : collection.rows.filter((item) => item !== undefined);
+  const meta = courseOutlinePageMeta(payload, collection);
+  return {
+    endpoint: String(endpoint || ""),
+    shape: collection.shape,
+    containerPath: collection.path,
+    records,
+    totalSize: meta.totalSize,
+    pageNumber: meta.pageNumber,
+    pageSize: meta.pageSize
+  };
+}
+
+function courseOutlineEndpointPath(endpoint) {
+  const name = String(endpoint || "").trim();
+  if (!name) return "";
+  if (name === COURSE_OUTLINE_LIST_PATH || name === COURSE_OUTLINE_METADATA_PATH) return name;
+  return `modules/kcdgwhgl/${name.replace(/^.*\//, "")}`;
+}
+
+function courseOutlineEndpointResult(endpoint, payload, options = {}) {
+  const normalized = normalizeCourseOutlineEndpointPayload(payload, endpoint);
+  const startedAt = options.startedAt || new Date().toISOString();
+  const finishedAt = options.finishedAt || new Date().toISOString();
+  return {
+    endpoint: String(endpoint || ""),
+    path: options.path || courseOutlineEndpointPath(endpoint),
+    status: options.status || "success",
+    httpStatus: Number(options.httpStatus) || 0,
+    businessStatus: options.businessStatus ?? null,
+    shape: normalized.shape,
+    raw: payload,
+    records: normalized.records,
+    totalSize: normalized.totalSize,
+    pageNumber: normalized.pageNumber,
+    pageSize: normalized.pageSize,
+    error: String(options.error || ""),
+    startedAt,
+    finishedAt,
+    durationMs: Math.max(0, new Date(finishedAt).getTime() - new Date(startedAt).getTime())
+  };
+}
+
+function courseOutlineQuerySettings(filters = {}) {
+  const fields = [
+    ["KCH", filters.code],
+    ["KCM", filters.name],
+    ["KKDWDM", filters.unit],
+    ["KCCCDM", filters.level],
+    ["KCJBDM", filters.grade]
+  ];
+  return fields
+    .map(([name, value]) => ({ name, value: String(value || "").trim(), linkOpt: "AND", builder: "like" }))
+    .filter((item) => item.value)
+    .concat([{ name: "*order", value: "+KCH", linkOpt: "AND", builder: "equal" }]);
+}
+
+function courseOutlineListBody(filters = {}, pageNumber = 1, pageSize = 10) {
+  const safePage = Math.max(1, Number(pageNumber) || 1);
+  const safeSize = Math.max(1, Math.min(100, Number(pageSize) || 10));
+  return {
+    "*order": "+KCH",
+    querySetting: JSON.stringify(courseOutlineQuerySettings(filters)),
+    pageSize: safeSize,
+    pageNumber: safePage
+  };
+}
+
+function courseOutlineDetailBody(row = {}) {
+  const body = {};
+  ["KCH", "BBWID", "XNXQDM", "WID"].forEach((key) => {
+    if (row[key] !== undefined && row[key] !== null && String(row[key]) !== "") body[key] = row[key];
+  });
+  if (!body.KCH) {
+    const code = courseOutlineFirstValue(row, ["courseCode", "courseNo", "code"]);
+    if (code !== undefined) body.KCH = code;
+  }
+  return body;
+}
+
+function courseOutlineKey(row = {}, fallbackIndex = 0) {
+  const kch = String(courseOutlineFirstValue(row, ["KCH", "courseCode", "courseNo", "code"]) ?? "").trim();
+  const bbwId = String(courseOutlineFirstValue(row, ["BBWID", "bbwid", "versionId"]) ?? "").trim();
+  const termCode = String(courseOutlineFirstValue(row, ["XNXQDM", "termCode", "xnxqdm"]) ?? "").trim();
+  const wid = String(courseOutlineFirstValue(row, ["WID", "wid", "id"]) ?? "").trim();
+  if (kch && bbwId && termCode) return `${kch}|${bbwId}|${termCode}`;
+  if (kch && wid) return `${kch}|${wid}`;
+  return `${kch || "course"}|${wid || bbwId || termCode || fallbackIndex}`;
+}
+
+function courseOutlineListRows(payload) {
+  return normalizeCourseOutlineEndpointPayload(payload, COURSE_OUTLINE_LIST_PATH).records;
+}
+
+function courseOutlineRequestIsCurrent(requestId, currentRequestId) {
+  return Number(requestId) === Number(currentRequestId);
+}
+
+function courseOutlineExportDocument(detail = {}) {
+  const endpoints = {};
+  Object.entries(detail.endpoints || {}).forEach(([endpoint, result]) => {
+    endpoints[endpoint] = result;
+  });
+  return {
+    schema: "zhizhang-course-outline/v1",
+    exportedAt: new Date().toISOString(),
+    key: String(detail.key || ""),
+    course: detail.row ?? null,
+    endpoints
+  };
 }
 
 function apiUrl(root, path) {
@@ -6683,6 +6942,7 @@ function renderSettingsWithLocalOverlay() {
   const configuredCurrentCode = currentTermCodeFor(currentTermCandidates());
   const localCount = (state.localSchedule.items || []).filter((item) => item.termCode === configuredCurrentCode || !configuredCurrentCode).length;
   const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
+  const courseOutlineMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>课程大纲</strong><small>查询课程目录并查看完整课程大纲</small></div><button class="button button-ghost" type="button" data-action="view-course-outline">打开</button></div>`;
   const cachePrivacy = IS_ANDROID_APP
     ? "查询缓存按学号隔离，不包含密码、验证码、Cookie 或令牌；Android 内置登录凭据另行由 Keystore 加密保存。"
     : "缓存按学号隔离，只保存页面展示所需查询结果；不会保存密码、验证码、Cookie 或令牌。";
@@ -6697,7 +6957,7 @@ function renderSettingsWithLocalOverlay() {
   const loginPrivacy = IS_ANDROID_APP
     ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
     : "插件不会保存账号、密码或验证码。";
-  const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
+  const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}${courseOutlineMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
   const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示底部 Toast 提示</strong><small>关闭后隐藏所有底部 Toast，包括登录状态、缓存和数据刷新提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
   const campusBlock = `<section class="settings-section campus-settings"><div class="settings-intro"><h3>默认校区与上课时间</h3><p>当教务课表只提供节次时，用于计算正在上课、下一节课和今日是否结束。课程地点中明确的校区会优先于此设置。</p></div><label class="settings-field"><span>默认校区</span><select id="campusSettingSelect"><option value="" ${state.campus.code ? "" : "selected"}>未设置</option><option value="nanhu" ${state.campus.code === CAMPUS_CODES.NANHU ? "selected" : ""}>南湖校区</option><option value="hunnan" ${state.campus.code === CAMPUS_CODES.HUNNAN ? "selected" : ""}>浑南校区</option></select><small>当前：${escapeHtml(campusLabel(state.campus.code))}。南湖早课 08:00 开始，浑南早课 08:30 开始；第 5–12 节时间相同。</small></label><div class="settings-actions"><button class="button button-primary" type="button" data-action="save-campus-setting">保存校区</button></div><div class="settings-callout"><strong>节次时间</strong><span>南湖1–4节：08:00–11:40；浑南1–4节：08:30–12:10；5–8节：14:00–17:40；9–12节：18:30–22:00。</span></div></section>`;
   return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}${campusBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
@@ -9559,12 +9819,13 @@ function renderAndroidLoginEntry() {
 
 function render() {
   try {
-  if (IS_ANDROID_APP && state.view === "curriculum") state.view = "overview";
+  if (IS_ANDROID_APP && ["curriculum", "course-outline"].includes(state.view)) state.view = "overview";
   try { updatePersonalTermSelect(); } catch { /* 初始化阶段元素可能尚未准备好 */ }
-  const pageTitles = { overview: "总览", personal: "课表", exams: "考试", scores: "成绩", all: "全校课表", curriculum: "培养计划", settings: "设置" };
+  const pageTitles = { overview: "总览", personal: "课表", exams: "考试", scores: "成绩", all: "全校课表", curriculum: "培养计划", "course-outline": "课程大纲", settings: "设置" };
   document.querySelectorAll("[data-view]").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === state.view));
   if (elements.pageTitle) elements.pageTitle.textContent = pageTitles[state.view] || "执掌东大";
   elements.content.classList.toggle("curriculum-content", state.view === "curriculum");
+  elements.content.classList.toggle("course-outline-content", state.view === "course-outline");
   // content.innerHTML 会随路由切换重建，但 Campus Header 属于外层
   // Mobile Shell；每次 render 只重新套用已有状态，绝不默认显示。
   applyNativeEcodePlaceholderState();
@@ -9587,6 +9848,7 @@ function render() {
   if (state.view === "overview") elements.content.innerHTML = renderOverview();
   if (state.view === "scores") elements.content.innerHTML = state.loading && !state.data.scores.length ? loadingCard() : renderScores();
   if (state.view === "curriculum") elements.content.innerHTML = renderCurriculum();
+  if (state.view === "course-outline") elements.content.innerHTML = renderCourseOutline();
   if (state.view === "exams") elements.content.innerHTML = state.loading && !state.data.exams.length ? loadingCard() : renderExams();
   if (state.view === "personal") elements.content.innerHTML = state.loading && !state.data.courses.length ? `${loadingCard()}${renderCampusPromptModal()}` : renderPersonal();
   if (state.view === "all") elements.content.innerHTML = renderAll();
@@ -10785,6 +11047,383 @@ function courseDataAttributes(course, scope = "personal") {
   return `data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
 }
 
+const COURSE_OUTLINE_SECTION_DEFINITIONS = Object.freeze([
+  { title: "基本信息", endpoint: "cxkcxxx.do", hint: "课程编号、名称、学分、学时及原系统课程属性" },
+  { title: "课程简介", endpoint: "cxkcjcxx.do", hint: "课程中文简介与英文简介" },
+  { title: "课程目标", endpoint: "cxkcmbxx.do", hint: "课程目标与目标文本" },
+  { title: "毕业要求支撑", endpoint: "kcmbybyzccx.do", hint: "毕业要求、支撑程度和权重" },
+  { title: "教学安排", endpoint: "cxkcmbhnrdgx.do", hint: "章节、教学内容、学时与教学方法" },
+  { title: "考核方式与比例", endpoint: "cxkccjpdff.do", hint: "成绩评定方式及各环节比例" },
+  { title: "考核形式", endpoint: "cxkhxs.do", hint: "考核形式字典与顺序" },
+  { title: "目标考核关系", endpoint: "cxkhxscjzb.do", hint: "课程目标与考核环节的对应关系" },
+  { title: "达成标准", endpoint: "cxkcmbdcbz.do", hint: "课程目标达成标准与评价标准" },
+  { title: "成绩评定", endpoint: "cxkhhjsz.do", hint: "考核环节、目标权重和成绩计算信息" },
+  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "先修课程、参考资料和其他课程信息" },
+  { title: "质量改进", endpoint: "cxkczlpjhgjjz.do", hint: "课程质量评价与持续改进记录" },
+  { title: "编制信息", endpoint: "cxzbrxgxx.do", hint: "制订、审核、批准与日期" },
+  { title: "附件", endpoint: "cxkcdgfj.do", hint: "原系统返回的附件字段；不猜测下载地址" }
+]);
+
+function courseOutlinePayloadFromRuntimeResponse(response) {
+  const data = response?.data ?? response;
+  if (data && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, "payload")) return data.payload;
+  return data === undefined ? null : data;
+}
+
+function courseOutlineBusinessError(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+  const code = payload.code ?? payload.status ?? payload.errCode ?? payload.errorCode;
+  if (Number(code) === 401 || Number(code) === 403) return String(payload.message || payload.msg || "教务系统登录已失效");
+  if (payload.success === false || payload.ok === false || payload.error === true) {
+    return String(payload.message || payload.msg || payload.errorMessage || "原系统返回了失败状态");
+  }
+  return "";
+}
+
+function courseOutlineDetailStateFrom(row) {
+  const endpoints = {};
+  COURSE_OUTLINE_DETAIL_ENDPOINTS.forEach((endpoint) => {
+    endpoints[endpoint] = {
+      endpoint,
+      path: courseOutlineEndpointPath(endpoint),
+      status: "loading",
+      shape: "empty",
+      raw: null,
+      records: [],
+      error: "",
+      startedAt: "",
+      finishedAt: "",
+      durationMs: 0
+    };
+  });
+  return {
+    key: courseOutlineKey(row),
+    row,
+    endpoints,
+    loading: true,
+    error: "",
+    requestSequence: 0,
+    startedAt: new Date().toISOString(),
+    finishedAt: ""
+  };
+}
+
+async function ensureCourseOutlineReady() {
+  if (IS_ANDROID_APP) throw new ApiError("Android 端不提供课程大纲查询");
+  const current = state.courseOutline.bootstrap || {};
+  if (current.status === "ready" && Number(current.tabId) > 0) return Number(current.tabId);
+  if (!globalThis.chrome?.runtime?.sendMessage) throw new ApiError("当前环境不能调用原系统课程大纲页面");
+  state.courseOutline.bootstrap = { ...current, status: "checking", message: "正在准备课程大纲页面…", error: "" };
+  if (state.view === "course-outline") render();
+  const response = await runtimeMessageWithTimeout(
+    { type: "course-outline-bootstrap", tabId: Number(current.tabId) > 0 ? Number(current.tabId) : null },
+    30000,
+    "原系统课程大纲页面准备超时，请先打开原系统课程大纲页后重试"
+  );
+  if (!response?.ok || response.status !== "ready" || !Number(response.tabId)) {
+    const error = response?.error || (response?.status === "login-required" ? "请先在原系统完成登录" : "无法进入原系统课程大纲查询");
+    state.courseOutline.bootstrap = { ...state.courseOutline.bootstrap, status: response?.status || "failed", error, message: error, tabId: response?.tabId || current.tabId || null };
+    throw new ApiError(error);
+  }
+  state.courseOutline.bootstrap = { ...state.courseOutline.bootstrap, status: "ready", error: "", message: "课程大纲页面已准备好", tabId: Number(response.tabId) };
+  return Number(response.tabId);
+}
+
+async function readCourseOutlineListViaRuntime(body, tabId) {
+  const response = await runtimeMessageWithTimeout(
+    { type: "course-outline-list-read", body, tabId },
+    30000,
+    "课程大纲列表读取超时，请保持原系统课程大纲页打开后重试"
+  );
+  if (!response?.ok) throw new ApiError(response?.error || "原系统没有返回课程大纲列表");
+  return courseOutlinePayloadFromRuntimeResponse(response);
+}
+
+async function readCourseOutlineEndpointViaRuntime(endpoint, row, tabId) {
+  const response = await runtimeMessageWithTimeout(
+    { type: "course-outline-detail-read", endpoint, body: courseOutlineDetailBody(row), tabId },
+    20000,
+    `课程大纲“${COURSE_OUTLINE_ENDPOINT_LABELS[endpoint] || endpoint}”读取超时`
+  );
+  if (!response?.ok) throw new ApiError(response?.error || `原系统没有返回“${COURSE_OUTLINE_ENDPOINT_LABELS[endpoint] || endpoint}”`);
+  return courseOutlinePayloadFromRuntimeResponse(response);
+}
+
+async function loadCourseOutlineList(options = {}) {
+  if (IS_ANDROID_APP) return false;
+  const list = state.courseOutline.list;
+  if (list.loading && !options.force) return false;
+  const requestId = ++list.requestSequence;
+  const filters = { ...list.filters, ...(options.filters || {}) };
+  const pageNumber = Math.max(1, Number(options.pageNumber || list.pageNumber) || 1);
+  const pageSize = Math.max(1, Math.min(100, Number(options.pageSize || list.pageSize) || 10));
+  list.filters = filters;
+  list.pageNumber = pageNumber;
+  list.pageSize = pageSize;
+  list.loading = true;
+  list.error = "";
+  if (state.view === "course-outline") render();
+  try {
+    const tabId = await ensureCourseOutlineReady();
+    const payload = await readCourseOutlineListViaRuntime(courseOutlineListBody(filters, pageNumber, pageSize), tabId);
+    if (!courseOutlineRequestIsCurrent(requestId, list.requestSequence)) return false;
+    const normalized = normalizeCourseOutlineEndpointPayload(payload, COURSE_OUTLINE_LIST_PATH);
+    list.rows = normalized.records;
+    list.totalSize = normalized.totalSize || normalized.records.length;
+    list.loaded = true;
+    list.loading = false;
+    list.error = "";
+    state.courseOutline.bootstrap = { ...state.courseOutline.bootstrap, status: "ready", tabId };
+    if (state.view === "course-outline") render();
+    return true;
+  } catch (error) {
+    if (!courseOutlineRequestIsCurrent(requestId, list.requestSequence)) return false;
+    list.loading = false;
+    list.loaded = true;
+    list.error = error?.message || "课程大纲列表读取失败";
+    if (state.view === "course-outline") render();
+    return false;
+  }
+}
+
+function captureCourseOutlineFilters() {
+  const list = state.courseOutline.list;
+  const ids = { code: "outlineFilterCode", name: "outlineFilterName", unit: "outlineFilterUnit", level: "outlineFilterLevel", grade: "outlineFilterGrade" };
+  Object.entries(ids).forEach(([key, id]) => {
+    const input = document.getElementById(id);
+    if (input) list.filters[key] = input.value;
+  });
+  return { ...list.filters };
+}
+
+function searchCourseOutline() {
+  const filters = captureCourseOutlineFilters();
+  return loadCourseOutlineList({ filters, pageNumber: 1, force: true });
+}
+
+async function loadCourseOutlineDetail(row) {
+  if (IS_ANDROID_APP || !row || typeof row !== "object") return false;
+  const detail = courseOutlineDetailStateFrom(row);
+  const requestId = ++courseOutlineDetailRequestSequence;
+  detail.requestSequence = requestId;
+  state.courseOutline.detail = detail;
+  state.view = "course-outline";
+  render();
+  let tabId;
+  try {
+    tabId = await ensureCourseOutlineReady();
+    detail.tabId = tabId;
+  } catch (error) {
+    if (state.courseOutline.detail !== detail) return false;
+    COURSE_OUTLINE_DETAIL_ENDPOINTS.forEach((endpoint) => {
+      detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, null, { status: "failed", error: error?.message || "课程大纲页面不可用" });
+    });
+    detail.loading = false;
+    detail.error = error?.message || "课程大纲页面不可用";
+    detail.finishedAt = new Date().toISOString();
+    render();
+    return false;
+  }
+  const settled = await Promise.allSettled(COURSE_OUTLINE_DETAIL_ENDPOINTS.map(async (endpoint) => {
+    const startedAt = new Date().toISOString();
+    try {
+      const payload = await readCourseOutlineEndpointViaRuntime(endpoint, row, tabId);
+      const businessError = courseOutlineBusinessError(payload);
+      return { endpoint, payload, startedAt, businessError };
+    } catch (error) {
+      return { endpoint, error, startedAt };
+    }
+  }));
+  if (state.courseOutline.detail !== detail || !courseOutlineRequestIsCurrent(requestId, courseOutlineDetailRequestSequence)) return false;
+  settled.forEach((settledResult, index) => {
+    const endpoint = COURSE_OUTLINE_DETAIL_ENDPOINTS[index];
+    const item = settledResult.status === "fulfilled" ? settledResult.value : { endpoint, error: settledResult.reason, startedAt: new Date().toISOString() };
+    if (item.error || item.businessError) {
+      detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, item.payload ?? null, {
+        status: "failed",
+        error: item.businessError || item.error?.message || String(item.error || "原系统章节读取失败"),
+        startedAt: item.startedAt,
+        finishedAt: new Date().toISOString()
+      });
+    } else {
+      detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, item.payload, {
+        status: "success",
+        startedAt: item.startedAt,
+        finishedAt: new Date().toISOString()
+      });
+    }
+  });
+  detail.loading = false;
+  detail.finishedAt = new Date().toISOString();
+  render();
+  return true;
+}
+
+async function retryCourseOutlineEndpoint(endpoint) {
+  const detail = state.courseOutline.detail;
+  if (!detail || !COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(endpoint) || detail.loading && detail.endpoints[endpoint]?.status === "loading") return false;
+  const requestId = ++courseOutlineDetailRequestSequence;
+  const previous = detail.endpoints[endpoint] || {};
+  detail.requestSequence = requestId;
+  detail.endpoints[endpoint] = { ...previous, endpoint, path: courseOutlineEndpointPath(endpoint), status: "loading", error: "", startedAt: new Date().toISOString() };
+  render();
+  try {
+    const tabId = await ensureCourseOutlineReady();
+    const startedAt = detail.endpoints[endpoint].startedAt;
+    const payload = await readCourseOutlineEndpointViaRuntime(endpoint, detail.row, tabId);
+    if (state.courseOutline.detail !== detail || !courseOutlineRequestIsCurrent(requestId, courseOutlineDetailRequestSequence)) return false;
+    const businessError = courseOutlineBusinessError(payload);
+    detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, payload, { status: businessError ? "failed" : "success", error: businessError, startedAt, finishedAt: new Date().toISOString() });
+  } catch (error) {
+    if (state.courseOutline.detail !== detail || !courseOutlineRequestIsCurrent(requestId, courseOutlineDetailRequestSequence)) return false;
+    detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, previous.raw ?? null, { status: "failed", error: error?.message || "章节读取失败", startedAt: detail.endpoints[endpoint].startedAt, finishedAt: new Date().toISOString() });
+  }
+  render();
+  return true;
+}
+
+function courseOutlineDisplayValue(row, keys, fallback = "") {
+  return courseOutlineFirstValue(row, keys) ?? fallback;
+}
+
+function courseOutlineText(value) {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  if (typeof value === "object") {
+    try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+  }
+  return String(value);
+}
+
+function renderCourseOutlineRecord(record) {
+  if (!record || typeof record !== "object") return `<div class="course-outline-value"><pre>${escapeHtml(courseOutlineText(record))}</pre></div>`;
+  const entries = Object.entries(record);
+  if (!entries.length) return `<div class="course-outline-empty">原系统返回了空对象。</div>`;
+  return `<div class="course-outline-record">${entries.map(([key, value]) => `<div class="course-outline-field"><span>${escapeHtml(key)}</span><pre>${escapeHtml(courseOutlineText(value))}</pre></div>`).join("")}</div>`;
+}
+
+function renderCourseOutlineSection(definition, detail) {
+  const result = detail?.endpoints?.[definition.endpoint];
+  if (!result || result.status === "loading") return `<section class="course-outline-section panel"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status is-loading">读取中</span></div><div class="course-outline-placeholder">正在读取原系统数据…</div></section>`;
+  if (result.status === "failed") {
+    return `<section class="course-outline-section panel is-failed"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status is-failed">读取失败</span></div><div class="course-outline-error"><strong>${escapeHtml(result.error || "原系统未返回此章节")}</strong><button class="button button-ghost button-small" type="button" data-action="retry-course-outline-endpoint" data-outline-endpoint="${escapeHtml(definition.endpoint)}">重试此章节</button></div>${result.raw !== null && result.raw !== undefined ? renderCourseOutlineRecord(result.raw) : ""}</section>`;
+  }
+  const content = result.records?.length
+    ? result.records.map((record) => renderCourseOutlineRecord(record)).join("")
+    : `<div class="course-outline-placeholder">原系统未提供此项</div>`;
+  return `<section class="course-outline-section panel"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status">${escapeHtml(`${result.shape} · ${result.records?.length || 0} 条`)}</span></div>${content}</section>`;
+}
+
+function courseOutlineJsonText(detail = state.courseOutline.detail) {
+  return JSON.stringify(courseOutlineExportDocument(detail || {}), null, 2);
+}
+
+async function copyCourseOutline() {
+  try {
+    const text = courseOutlineJsonText();
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+    else {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "readonly");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      if (!document.execCommand("copy")) throw new Error("浏览器拒绝复制");
+      textarea.remove();
+    }
+    setNotice("完整课程大纲 JSON 已复制。", "success");
+  } catch (error) {
+    setNotice(`复制课程大纲失败：${error?.message || "请重试"}`, "error");
+  }
+}
+
+function courseOutlineFileName(detail = state.courseOutline.detail) {
+  const row = detail?.row || {};
+  const name = courseOutlineText(courseOutlineDisplayValue(row, ["KCM", "KCMC", "name"], "课程大纲"))
+    .replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "课程大纲";
+  return `${name}-${String(courseOutlineDisplayValue(row, ["KCH", "courseCode", "code"], "course")).replace(/[^\w-]+/g, "-")}.json`;
+}
+
+function downloadCourseOutline() {
+  try {
+    const blob = new Blob([courseOutlineJsonText()], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = courseOutlineFileName();
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setNotice("完整课程大纲 JSON 已下载。", "success");
+  } catch (error) {
+    setNotice(`下载课程大纲失败：${error?.message || "请重试"}`, "error");
+  }
+}
+
+async function openCourseOutlineOriginal() {
+  if (IS_ANDROID_APP) return;
+  try {
+    const response = await runtimeMessageWithTimeout(
+      { type: "open-course-outline-portal", tabId: state.courseOutline.bootstrap?.tabId || null },
+      30000,
+      "打开原系统课程大纲超时"
+    );
+    if (!response?.ok && response?.status !== "login-required") throw new ApiError(response?.error || "无法打开原系统课程大纲");
+    setNotice(response?.status === "login-required" ? "请先在原系统完成登录。" : "已打开原系统课程大纲页面。", response?.status === "login-required" ? "error" : "success");
+  } catch (error) {
+    setNotice(error?.message || "无法打开原系统课程大纲", "error");
+  }
+}
+
+function renderCourseOutlineList() {
+  const list = state.courseOutline.list;
+  const filters = list.filters;
+  const filterMarkup = [
+    ["code", "课程代码", "如 A1502000016", "outlineFilterCode"],
+    ["name", "课程名称", "支持名称关键字", "outlineFilterName"],
+    ["unit", "开课单位", "单位代码或名称", "outlineFilterUnit"],
+    ["level", "课程层次", "如 本科", "outlineFilterLevel"],
+    ["grade", "课程级别", "如 基础 / 核心", "outlineFilterGrade"]
+  ].map(([key, label, placeholder, id]) => `<label class="course-outline-filter"><span>${escapeHtml(label)}</span><input id="${id}" data-outline-filter="${key}" value="${escapeHtml(filters[key] || "")}" placeholder="${escapeHtml(placeholder)}" /></label>`).join("");
+  const rows = list.rows || [];
+  const table = rows.length
+    ? `<div class="course-outline-list">${rows.map((row, index) => {
+      const name = courseOutlineDisplayValue(row, ["KCM", "KCMC", "courseName", "name"], "未命名课程");
+      const code = courseOutlineDisplayValue(row, ["KCH", "courseCode", "courseNo", "code"], "—");
+      const unit = courseOutlineDisplayValue(row, ["KKDWDM_DISPLAY", "KKDWMC", "KKDWDM", "unit"], "—");
+      const level = courseOutlineDisplayValue(row, ["KCCCDM_DISPLAY", "KCCCMC", "KCCCDM", "level"], "—");
+      const grade = courseOutlineDisplayValue(row, ["KCJBDM_DISPLAY", "KCJBMC", "KCJBDM", "grade"], "—");
+      const credits = courseOutlineDisplayValue(row, ["XF", "credit", "credits"], "—");
+      return `<article class="course-outline-list-row"><div class="course-outline-list-main"><div class="course-outline-list-title"><strong>${escapeHtml(name)}</strong><code>${escapeHtml(code)}</code></div><div class="course-outline-list-meta"><span>开课单位：${escapeHtml(unit)}</span><span>层次：${escapeHtml(level)}</span><span>级别：${escapeHtml(grade)}</span><span>学分：${escapeHtml(credits)}</span></div></div><button class="button button-primary button-small" type="button" data-action="show-course-outline-detail" data-outline-row-index="${index}">查看大纲</button></article>`;
+    }).join("")}</div>`
+    : list.loading ? `<div class="course-outline-placeholder course-outline-list-placeholder">正在读取原系统课程目录…</div>` : `<div class="course-outline-placeholder course-outline-list-placeholder">${list.loaded ? "没有符合条件的课程" : "输入筛选条件后查询课程大纲"}</div>`;
+  const total = Number(list.totalSize) || rows.length;
+  const pages = total ? Math.max(1, Math.ceil(total / list.pageSize)) : 1;
+  const pagination = `<div class="course-outline-pagination"><span>第 ${escapeHtml(list.pageNumber)} / ${escapeHtml(pages)} 页 · 共 ${escapeHtml(total)} 门课程</span><div><button class="button button-ghost button-small" type="button" data-action="course-outline-page" data-outline-page="${Math.max(1, list.pageNumber - 1)}" ${list.pageNumber <= 1 || list.loading ? "disabled" : ""}>上一页</button><button class="button button-ghost button-small" type="button" data-action="course-outline-page" data-outline-page="${Math.min(pages, list.pageNumber + 1)}" ${list.pageNumber >= pages || list.loading ? "disabled" : ""}>下一页</button><label class="course-outline-page-size">每页<select data-outline-page-size ${list.loading ? "disabled" : ""}><option value="10" ${list.pageSize === 10 ? "selected" : ""}>10</option><option value="20" ${list.pageSize === 20 ? "selected" : ""}>20</option><option value="50" ${list.pageSize === 50 ? "selected" : ""}>50</option></select></label></div></div>`;
+  const error = list.error ? `<div class="course-outline-error"><strong>${escapeHtml(list.error)}</strong><button class="button button-ghost button-small" type="button" data-action="refresh-course-outline-list">重试</button></div>` : "";
+  return `<div class="course-outline-page">${sectionHeading("课程大纲", "从教务系统课程目录查询并完整保留课程大纲原始信息。课程目录不随顶部当前学期选择自动清空。", `<button class="button button-ghost" type="button" data-action="open-course-outline-original">原系统查看</button>`)}<section class="panel course-outline-query-panel"><div class="course-outline-query-head"><div><h3>课程查询</h3><p class="muted">支持课程代码、名称、开课单位、层次和级别；查询结果按原系统服务端分页。</p></div><div class="course-outline-query-actions"><button class="button button-primary" type="button" data-action="search-course-outline">查询</button><button class="button button-ghost" type="button" data-action="clear-course-outline">清空</button></div></div><div class="course-outline-filter-grid">${filterMarkup}</div></section>${error}<section class="course-outline-results panel"><div class="course-outline-results-head"><div><h3>课程目录</h3><span>${list.loading ? "正在同步原系统…" : list.loaded ? "点击课程查看完整大纲" : "等待查询"}</span></div><span class="course-outline-session-state">${escapeHtml(state.courseOutline.bootstrap.status === "ready" ? "原系统已连接" : "需要打开原系统页面")}</span></div>${table}${pagination}</section></div>`;
+}
+
+function renderCourseOutlineDetail() {
+  const detail = state.courseOutline.detail;
+  if (!detail) return renderCourseOutlineList();
+  const row = detail.row || {};
+  const name = courseOutlineDisplayValue(row, ["KCM", "KCMC", "courseName", "name"], "未命名课程");
+  const code = courseOutlineDisplayValue(row, ["KCH", "courseCode", "courseNo", "code"], "—");
+  const term = courseOutlineDisplayValue(row, ["XNXQDM", "termCode", "xnxqdm"], "未提供");
+  const key = courseOutlineKey(row);
+  const failures = Object.values(detail.endpoints || {}).filter((item) => item.status === "failed").length;
+  const actions = `<div class="course-outline-detail-actions"><button class="button button-ghost" type="button" data-action="back-course-outline">返回目录</button><button class="button button-primary" type="button" data-action="refresh-course-outline-detail">${detail.loading ? "读取中…" : "刷新全部"}</button><button class="button button-ghost" type="button" data-action="copy-course-outline">复制完整 JSON</button><button class="button button-ghost" type="button" data-action="download-course-outline">下载完整 JSON</button><button class="button button-ghost" type="button" data-action="print-course-outline">打印</button><button class="button button-ghost" type="button" data-action="open-course-outline-original">原系统查看</button></div>`;
+  const raw = `<section class="course-outline-raw panel"><details><summary>原始数据（保留所有接口响应）<span>${escapeHtml(`${Object.keys(detail.endpoints || {}).length} 个接口${failures ? ` · ${failures} 个失败` : ""}`)}</span></summary><div class="course-outline-raw-list">${Object.entries(detail.endpoints || {}).map(([endpoint, result]) => `<details class="course-outline-raw-item"><summary><code>${escapeHtml(endpoint)}</code><span>${escapeHtml(`${result.status} · ${result.shape || "empty"}`)}</span></summary><pre>${escapeHtml(courseOutlineText(result.raw))}</pre></details>`).join("")}</div></details></section>`;
+  return `<div class="course-outline-page course-outline-detail-page">${sectionHeading("课程大纲详情", "每个章节独立读取；单个接口失败不会隐藏其他章节，失败章节可单独重试。", "") }<header class="course-outline-detail-header panel"><div class="course-outline-detail-title"><span class="eyebrow">COURSE OUTLINE</span><h2>${escapeHtml(name)}</h2><p><code>${escapeHtml(code)}</code><span>版本/学期：${escapeHtml(term)}</span><small>数据键：${escapeHtml(key)}</small></p></div>${actions}</header>${detail.loading ? `<div class="course-outline-loading-note">正在并行读取 ${COURSE_OUTLINE_DETAIL_ENDPOINTS.length} 个原系统章节…已返回的章节会逐步显示。</div>` : failures ? `<div class="course-outline-loading-note is-warning">有 ${failures} 个章节读取失败；其他原始数据仍已保留，可点击对应章节的“重试此章节”。</div>` : `<div class="course-outline-loading-note is-success">课程大纲读取完成；原始字段和未知字段均已保留。</div>`}${COURSE_OUTLINE_SECTION_DEFINITIONS.map((definition) => renderCourseOutlineSection(definition, detail)).join("")}${raw}</div>`;
+}
+
+function renderCourseOutline() {
+  return state.courseOutline.detail ? renderCourseOutlineDetail() : renderCourseOutlineList();
+}
+
 // Final presentation-layer overrides. The legacy export helpers are kept for
 // full-school pages; personal exports must use the merged school + local rows.
 function scheduleExportRows(scope = "personal") {
@@ -10861,6 +11500,7 @@ function renderSettings() {
 document.querySelectorAll("[data-view]").forEach((tab) => {
   tab.addEventListener("click", async () => {
     const nextView = tab.dataset.view;
+    if (IS_ANDROID_APP && nextView === "course-outline") return;
     const previousView = state.view;
     if (nextView !== state.view) {
       clearActiveModalState();
@@ -10885,6 +11525,8 @@ document.querySelectorAll("[data-view]").forEach((tab) => {
       if (!state.scheduleTypesLoaded) tasks.push(loadScheduleTypes());
       if (!state.allTermsLoaded) tasks.push(loadAllTerms());
       if (tasks.length) await Promise.all(tasks);
+    } else if (state.view === "course-outline" && !state.courseOutline.list.loaded && !state.courseOutline.list.loading && !state.courseOutline.detail) {
+      loadCourseOutlineList();
     }
   });
 });
@@ -10907,6 +11549,11 @@ elements.refresh.addEventListener("click", refresh);
 document.getElementById("openPortal").addEventListener("click", openPortal);
 
 elements.content.addEventListener("input", (event) => {
+  const outlineFilter = event.target.dataset.outlineFilter;
+  if (outlineFilter && state.courseOutline?.list?.filters) {
+    state.courseOutline.list.filters[outlineFilter] = event.target.value;
+    return;
+  }
   const filter = event.target.dataset.filter;
   if (filter) {
     state.filters[filter] = event.target.value;
@@ -11064,6 +11711,10 @@ elements.content.addEventListener("change", (event) => {
     render();
     return;
   }
+  if (event.target.matches("[data-outline-page-size]")) {
+    state.courseOutline.list.pageSize = Math.max(1, Math.min(100, Number(event.target.value) || 10));
+    return loadCourseOutlineList({ pageNumber: 1, pageSize: state.courseOutline.list.pageSize, force: true });
+  }
   if (event.target.id === "loginMethodSelect") {
     const requestedMethod = String(event.target.value || "");
     const method = IS_ANDROID_APP
@@ -11153,6 +11804,39 @@ elements.content.addEventListener("click", async (event) => {
   if (action === "open-webvpn-url") return openGeneratedWebVpnUrl();
   if (action === "open-portal") return openPortal();
   if (action === "start-curriculum-bootstrap" || action === "open-curriculum-portal") return startCurriculumBootstrap();
+  if (action === "open-course-outline-original") return openCourseOutlineOriginal();
+  if (action === "search-course-outline") return searchCourseOutline();
+  if (action === "clear-course-outline") {
+    state.courseOutline.list.filters = { code: "", name: "", unit: "", level: "", grade: "" };
+    return loadCourseOutlineList({ pageNumber: 1, force: true });
+  }
+  if (action === "refresh-course-outline-list") return loadCourseOutlineList({ force: true });
+  if (action === "course-outline-page") {
+    const page = Number(button.dataset.outlinePage);
+    if (page > 0) return loadCourseOutlineList({ pageNumber: page, force: true });
+    return;
+  }
+  if (action === "show-course-outline-detail") {
+    const row = state.courseOutline.list.rows[Number(button.dataset.outlineRowIndex)];
+    return loadCourseOutlineDetail(row);
+  }
+  if (action === "back-course-outline") {
+    courseOutlineDetailRequestSequence += 1;
+    state.courseOutline.detail = null;
+    render();
+    return;
+  }
+  if (action === "refresh-course-outline-detail") {
+    if (state.courseOutline.detail?.row) return loadCourseOutlineDetail(state.courseOutline.detail.row);
+    return;
+  }
+  if (action === "retry-course-outline-endpoint") return retryCourseOutlineEndpoint(button.dataset.outlineEndpoint || "");
+  if (action === "copy-course-outline") return copyCourseOutline();
+  if (action === "download-course-outline") return downloadCourseOutline();
+  if (action === "print-course-outline") {
+    if (typeof window.print === "function") window.print();
+    return;
+  }
   if (action === "open-schedule-image-export") return openScheduleImageExport(button.dataset.scheduleScope || "personal");
   if (action === "export-schedule-csv") return exportScheduleCsv(button.dataset.scheduleScope || "personal");
   if (action === "close-schedule-export") {
@@ -11351,7 +12035,7 @@ elements.content.addEventListener("click", async (event) => {
   if (action === "show-all-detail") {
     return queryAllScheduleDetail(Number(button.dataset.rowIndex));
   }
-  if (["view-scores", "view-curriculum", "view-exams", "view-personal", "view-all"].includes(action)) {
+  if (["view-scores", "view-curriculum", "view-course-outline", "view-exams", "view-personal", "view-all"].includes(action)) {
     state.selectedCourse = null;
     state.selectedCourseScope = "personal";
   }
@@ -11360,6 +12044,10 @@ elements.content.addEventListener("click", async (event) => {
     state.view = "curriculum";
     invalidateCurriculum();
     state.curriculum.bootstrap = { status: "idle", message: "", error: "", tabId: null, reading: false };
+  }
+  if (action === "view-course-outline" && !IS_ANDROID_APP) {
+    state.view = "course-outline";
+    state.courseOutline.detail = null;
   }
   if (action === "view-exams") state.view = "exams";
   if (action === "view-personal") {
@@ -11383,6 +12071,9 @@ elements.content.addEventListener("click", async (event) => {
   render();
   if (action === "view-scores" && !state.loading) {
     await refresh();
+  }
+  if (state.view === "course-outline" && !state.courseOutline.list.loaded && !state.courseOutline.list.loading) {
+    loadCourseOutlineList();
   }
   if (state.view === "all") {
     const tasks = [];
