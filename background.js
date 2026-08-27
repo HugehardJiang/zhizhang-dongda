@@ -414,9 +414,8 @@ async function executeCourseOutlinePortalRequest(tabId, path, params = {}) {
       } catch (error) {
         return { available: true, courseOutlineFrame, pageUrl: href, error: error?.message || "原系统接口请求失败" };
       }
-    },
-    COURSE_OUTLINE_REQUEST_SCRIPT_TIMEOUT_MS
-  });
+    }
+  }, COURSE_OUTLINE_REQUEST_SCRIPT_TIMEOUT_MS);
   const values = result.map((item) => item?.result).filter(Boolean);
   // Prefer the module iframe. The top shell may also expose the common AJAX
   // helper, but its getAbsPath() can resolve relative to homeapp instead of
