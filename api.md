@@ -1768,7 +1768,7 @@ Chrome 写入 `chrome.storage.local`，键名由稳定哈希后的 profile key �
 
 ## 16. 课程大纲查询
 
-课程大纲查询对应原系统路径“培养 → 课程查询 → 课程大纲查询”，属于桌面插件功能；Android 端不显示入口。课程列表使用原系统当前登录页面提供的 WebVPN 会话读取，不保存账号、密码、Cookie、Token 或完整个人查询参数。
+课程大纲查询对应原系统路径“培养 → 课程查询 → 课程大纲查询”，属于桌面插件功能；Android 端不显示入口。课程列表和详情在扩展页面直接复用浏览器已有的 WebVPN Cookie 会话读取，不要求原系统课程大纲页面保持打开；不保存账号、密码、Cookie、Token 或完整个人查询参数。
 
 ### 16.1 课程列表
 
@@ -1799,17 +1799,22 @@ cxzbrxgxx.do         负责人/任课教师信息
 cxkcdgfj.do          课程大纲附件
 ```
 
-### 16.3 无损保留与浏览器桥接
+### 16.3 无损保留与直连传输
 
 详情标准化只用于页面分组和检索，不删除原始结构。每个模块同时保留原始响应、响应状态、记录数组或单对象、`WID`/`BBWID`/`XNXQDM` 等标识、所有未知字段和 `*_DISPLAY` 字段，以及 `null`、空字符串、多行文本和原始顺序。用户可以复制或下载完整 JSON，下载内容不拼接账号信息，也不把原始对象发送到第三方。
 
-由于 WebVPN、主页面 Cookie 和跨域限制，插件不直接从扩展上下文请求这些接口，而是在当前已登录的原系统课程大纲页面/模块 iframe 的主世界中调用：
+课程大纲不依赖隐藏标签页、iframe 或原系统页面 DOM。扩展页面使用浏览器已有的 WebVPN 会话直接请求课程大纲模块：
 
-```js
-BH_UTILS.doSyncAjax(WIS_EMAP_SERV.getAbsPath(path), params)
+```text
+POST/GET ${PORTAL_ROOT}/jwapp/sys/kccx/...
+Cookie: credentials=include
+X-Requested-With: XMLHttpRequest
+课程大纲目标标记：vpn-12-o2-jwxt.neu.edu.cn
 ```
 
-请求优先使用课程大纲模块 iframe，找不到时再兼容当前页面；桥接只允许课程大纲白名单路径，并设有有限超时。打开原系统按钮只负责导航到原页面，不执行写操作。
+列表请求使用 `application/x-www-form-urlencoded`，保留原系统的 `*order`、`querySetting`、`pageSize` 和 `pageNumber` 结构，并明确不发送其他模块使用的 `Fetch-Api: true`。`/http/` 和 `/https/` 入口只在网络错误、超时或 5xx 时有限重试；收到 401/403、登录页 HTML 或业务层会话失效时直接显示“教务系统登录已失效”，不会把认证失败误判为网络问题。课程详情最多并行读取 5 个章节，单个章节失败可独立重试。元数据返回的动态字典地址必须严格匹配同一 WebVPN 应用下的 `/jwapp/code/<UUID>.do`，字典失败不会阻断课程列表。
+
+“原系统查看”按钮只负责在用户明确点击后导航到原页面，不参与课程列表或详情读取。
 
 ### 16.4 辅助元数据接口
 

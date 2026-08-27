@@ -6,8 +6,9 @@ if (IS_ANDROID_APP) {
   // 培养计划需要桌面浏览器后台挂着原系统页面，手机端不展示这个入口，
   // 避免用户误以为 Android 端也能直接读取浏览器标签页会话。
   document.querySelectorAll('[data-view="curriculum"]').forEach((node) => node.remove());
-  // 课程大纲同样依赖桌面浏览器中的原系统页面；Android 不显示、不请求、
-  // 不缓存课程大纲，误入旧链接时 render() 也会回到总览。
+  // 课程大纲只在桌面插件提供；Android 不显示、不请求、不缓存课程大纲，
+  // 误入旧链接时 render() 也会回到总览。桌面端通过扩展请求复用登录会话，
+  // 不要求用户常驻原系统课程大纲页面。
   document.querySelectorAll('[data-view="course-outline"]').forEach((node) => node.remove());
 }
 
@@ -29,6 +30,10 @@ const PYFA_API_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl`;
 const PYFA_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl/*default`;
 // 培养方案模块和课表模块使用不同的 WebVPN 目标标记。
 const PYFA_TARGET_MARKER = "vpn-12-o1-jwxt.neu.edu.cn";
+// 课程大纲走独立的 WebVPN 目标路由；不要复用课表/培养方案的 o1 标记。
+const COURSE_OUTLINE_TARGET_MARKER = "o2";
+const COURSE_OUTLINE_WEBVPN_MARKER = `vpn-12-${COURSE_OUTLINE_TARGET_MARKER}-jwxt.neu.edu.cn`;
+const COURSE_OUTLINE_API_ROOT = `${PORTAL_URL}/jwapp/sys/kccx`;
 const COURSE_OUTLINE_LIST_PATH = "modules/dgcx/cxlb.do";
 const COURSE_OUTLINE_METADATA_PATH = "modules/kcdgwhgl.do";
 const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
@@ -67,6 +72,8 @@ const ALL_SCHEDULE_RETRY_LIMIT = 8;
 const ALL_SCHEDULE_RETRY_DELAY = 1500;
 const API_REQUEST_TIMEOUT = 12000;
 const ALL_SCHEDULE_REQUEST_TIMEOUT = 8000;
+const COURSE_OUTLINE_REQUEST_TIMEOUT = 12000;
+const COURSE_OUTLINE_DETAIL_CONCURRENCY = 5;
 const CAMPUS_HEADER_VISIBLE = "VISIBLE";
 const CAMPUS_HEADER_HIDDEN = "HIDDEN";
 const CAMPUS_HEADER_HIDDEN_AT_TOP = "HIDDEN_AT_TOP";
@@ -401,6 +408,7 @@ const state = {
       pageNumber: 1,
       pageSize: 10,
       totalSize: 0,
+      rawResponse: null,
       loading: false,
       loaded: false,
       error: "",
@@ -411,12 +419,15 @@ const state = {
     bootstrap: {
       status: "idle",
       message: "",
-      error: "",
-      tabId: null
+      error: ""
     },
     metadata: {
       loaded: false,
-      endpoints: {}
+      loading: false,
+      error: "",
+      rawResponse: null,
+      endpoints: {},
+      codePaths: []
     }
   },
   scheduleTypes: [],
@@ -1100,11 +1111,13 @@ function bindNativeEcodeScroll() {
 }
 
 class ApiError extends Error {
-  constructor(message, details = "", status = 0) {
+  constructor(message, details = "", status = 0, options = {}) {
     super(message);
     this.name = "ApiError";
     this.details = details;
     this.status = Number(status) || 0;
+    this.authFailure = Boolean(options.authFailure);
+    this.retryable = Boolean(options.retryable);
   }
 }
 
@@ -1388,7 +1401,8 @@ function courseOutlineEndpointPath(endpoint) {
   const name = String(endpoint || "").trim();
   if (!name) return "";
   if (name === COURSE_OUTLINE_LIST_PATH || name === COURSE_OUTLINE_METADATA_PATH) return name;
-  return `modules/kcdgwhgl/${name.replace(/^.*\//, "")}`;
+  if (!COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(name)) return "";
+  return `modules/kcdgwhgl/${name}`;
 }
 
 function courseOutlineEndpointResult(endpoint, payload, options = {}) {
@@ -1402,7 +1416,7 @@ function courseOutlineEndpointResult(endpoint, payload, options = {}) {
     httpStatus: Number(options.httpStatus) || 0,
     businessStatus: options.businessStatus ?? null,
     shape: normalized.shape,
-    raw: payload,
+    raw: Object.prototype.hasOwnProperty.call(options, "raw") ? options.raw : payload,
     records: normalized.records,
     totalSize: normalized.totalSize,
     pageNumber: normalized.pageNumber,
@@ -1415,15 +1429,26 @@ function courseOutlineEndpointResult(endpoint, payload, options = {}) {
 }
 
 function courseOutlineQuerySettings(filters = {}) {
+  // 课程大纲页使用的是 EMAP 查询组件的标准字符串条件。旧实现把所有
+  // 字段都发成 builder=like，教务系统会把它当成另一种查询表达式，结果
+  // 可能退化成只有课程号的“未命名课程”。这里复现原系统实际请求：
+  // caption/builderList/builder 三个字段必须同时存在，文本匹配使用 include。
   const fields = [
-    ["KCH", filters.code],
-    ["KCM", filters.name],
-    ["KKDWDM", filters.unit],
-    ["KCCCDM", filters.level],
-    ["KCJBDM", filters.grade]
+    ["KCH", "课程代码", filters.code],
+    ["KCM", "课程名称", filters.name],
+    ["KKDWDM", "开课单位", filters.unit],
+    ["KCCCDM", "课程层次", filters.level],
+    ["KCJBDM", "课程级别", filters.grade]
   ];
   return fields
-    .map(([name, value]) => ({ name, value: String(value || "").trim(), linkOpt: "AND", builder: "like" }))
+    .map(([name, caption, value]) => ({
+      name,
+      caption,
+      linkOpt: "AND",
+      builderList: "cbl_String",
+      builder: "include",
+      value: String(value || "").trim()
+    }))
     .filter((item) => item.value)
     .concat([{ name: "*order", value: "+KCH", linkOpt: "AND", builder: "equal" }]);
 }
@@ -1487,6 +1512,86 @@ function apiUrl(root, path) {
   return `${root}/${String(path).replace(/^\/+/, "")}`;
 }
 
+function courseOutlineCodePathFromMetadata(value) {
+  const uuidPattern = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  const canonicalPath = (pathname) => {
+    const match = String(pathname || "").match(new RegExp(`^/jwapp/code/(${uuidPattern})\\.do$`, "i"));
+    return match ? `/jwapp/code/${match[1]}.do` : "";
+  };
+  const raw = String(value || "").trim();
+  if (!raw || raw.startsWith("//")) return "";
+
+  // Metadata commonly returns a relative path. Query parameters are ignored
+  // after validating the pathname, and are rebuilt by the safe URL helper.
+  if (/^\/?jwapp\/code\//i.test(raw)) {
+    try { return canonicalPath(new URL(raw.replace(/^\/?/, "/"), "https://webvpn.neu.edu.cn/").pathname); } catch { return ""; }
+  }
+
+  // Absolute metadata links must stay on the WebVPN origin and under the
+  // current application route. Never accept a look-alike hostname or an
+  // arbitrary same-origin path.
+  try {
+    const target = new URL(raw);
+    const portal = new URL(PORTAL_URL);
+    if (target.protocol !== "https:" || target.origin !== portal.origin) return "";
+    const portalPath = portal.pathname.replace(/\/+$/, "");
+    const relativePath = target.pathname === "/jwapp/code/"
+      ? target.pathname
+      : target.pathname.startsWith(`${portalPath}/`) ? target.pathname.slice(portalPath.length) : target.pathname;
+    return canonicalPath(relativePath);
+  } catch {
+    return "";
+  }
+}
+
+function courseOutlineCodePathsFromMetadata(metadata) {
+  const paths = [];
+  const seenObjects = new Set();
+  const seenPaths = new Set();
+  const walk = (value, depth = 0) => {
+    if (depth > 12 || value === null || value === undefined) return;
+    if (typeof value === "string") {
+      const path = courseOutlineCodePathFromMetadata(value);
+      if (path && !seenPaths.has(path)) {
+        seenPaths.add(path);
+        paths.push(path);
+      }
+      return;
+    }
+    if (typeof value !== "object" || seenObjects.has(value)) return;
+    seenObjects.add(value);
+    if (Array.isArray(value)) value.forEach((child) => walk(child, depth + 1));
+    else Object.values(value).forEach((child) => walk(child, depth + 1));
+  };
+  walk(metadata);
+  return paths;
+}
+
+function appendCourseOutlineWebVpnMarker(url) {
+  const target = new URL(url);
+  if (!target.searchParams.has(COURSE_OUTLINE_WEBVPN_MARKER)) {
+    // Keep the marker as a valueless query key, while preserving any existing
+    // query such as json=1. This avoids producing the invalid json=1?vpn form.
+    target.search = target.search
+      ? `${target.search}&${COURSE_OUTLINE_WEBVPN_MARKER}`
+      : `?${COURSE_OUTLINE_WEBVPN_MARKER}`;
+  }
+  return target.toString();
+}
+
+function courseOutlineApiUrl(path, query = {}) {
+  const raw = String(path || "").trim();
+  const codePath = courseOutlineCodePathFromMetadata(raw);
+  const relativePath = codePath || courseOutlineEndpointPath(raw);
+  if (!relativePath) throw new ApiError("课程大纲接口不在允许范围内");
+  const base = codePath ? `${PORTAL_URL}${codePath}` : apiUrl(COURSE_OUTLINE_API_ROOT, relativePath);
+  const target = new URL(base);
+  Object.entries(query || {}).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") target.searchParams.set(key, String(value));
+  });
+  return appendCourseOutlineWebVpnMarker(target.toString());
+}
+
 function webVpnApiUrl(root, path) {
   return `${apiUrl(root, path)}?${WEBVPN_TARGET_MARKER}`;
 }
@@ -1501,6 +1606,30 @@ function portalUrlVariants(url) {
   if (suffixIndex < 0) return [url];
   const suffix = String(url).slice(suffixIndex);
   return [...new Set([`${PORTAL_URL}${suffix}`, `${PORTAL_FALLBACK_URL}${suffix}`])];
+}
+
+function isAuthenticationUrl(url = "") {
+  return /(?:\/tpass\/login|\/cas\/login|\/login(?:[/?#]|$)|统一身份认证)/i.test(String(url || ""));
+}
+
+function isAuthenticationPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const codes = [payload.code, payload.status, payload.errCode, payload.errorCode]
+    .map((value) => String(value ?? "").trim().toLowerCase());
+  if (codes.some((value) => value === "401" || value === "403")) return true;
+  if (payload.loginRequired === true || payload.authenticated === false || payload.loggedIn === false || payload.sessionValid === false) return true;
+  const message = [payload.message, payload.msg, payload.errorMessage, payload.error, payload.statusText]
+    .filter((value) => typeof value === "string")
+    .join(" ");
+  return /登录失效|请先登录|未登录|登录过期|会话(?:已)?(?:失效|过期)|统一身份认证|unauthori[sz]ed|forbidden|authentication required|session expired|login required/i.test(message);
+}
+
+function authenticationFailure(details = "", status = 0) {
+  return new ApiError("教务系统登录已失效", details, status, { authFailure: true, retryable: false });
+}
+
+function isRetryableRequestError(error) {
+  return Boolean(error?.retryable) && !error?.authFailure;
 }
 
 async function requestJsonOnce(url, options = {}) {
@@ -1536,7 +1665,7 @@ async function requestJsonOnce(url, options = {}) {
     for (const [requestId, pending] of nativeRequests.entries()) {
       if (pending.timer !== timeout) continue;
       nativeRequests.delete(requestId);
-      pending.reject(new ApiError("教务接口请求超时", `超过 ${options.timeoutMs || API_REQUEST_TIMEOUT} 毫秒未返回`));
+      pending.reject(new ApiError("教务接口请求超时", `超过 ${options.timeoutMs || API_REQUEST_TIMEOUT} 毫秒未返回`, 0, { retryable: true }));
     }
   }, options.timeoutMs || API_REQUEST_TIMEOUT);
   try {
@@ -1561,6 +1690,8 @@ async function requestJsonOnce(url, options = {}) {
       response = {
         ok: nativeResult.status >= 200 && nativeResult.status < 300,
         status: nativeResult.status,
+        url: target.toString(),
+        redirected: false,
         text: async () => nativeResult.body
       };
     } else {
@@ -1574,42 +1705,95 @@ async function requestJsonOnce(url, options = {}) {
       });
     }
   } catch (error) {
-    if (error?.name === "AbortError") throw new ApiError("教务接口请求超时", `超过 ${options.timeoutMs || API_REQUEST_TIMEOUT} 毫秒未返回`);
-    throw new ApiError("无法连接教务系统", error?.message || "网络请求被浏览器拦截");
+    if (error instanceof ApiError) throw error;
+    if (error?.name === "AbortError") {
+      throw new ApiError("教务接口请求超时", `超过 ${options.timeoutMs || API_REQUEST_TIMEOUT} 毫秒未返回`, 0, { retryable: true });
+    }
+    throw new ApiError("无法连接教务系统", error?.message || "网络请求被浏览器拦截", 0, { retryable: true });
   } finally {
     clearTimeout(timeout);
   }
 
+  const responseStatus = Number(response.status) || 0;
+  if (responseStatus === 401 || responseStatus === 403) {
+    throw authenticationFailure(`HTTP ${responseStatus}`, responseStatus);
+  }
   const raw = await response.text();
+  const responseUrl = String(response.url || target.toString());
+  const looksLikeHtml = /<\s*!doctype\s+html|<\s*html\b|<\s*(?:head|body|form)\b/i.test(raw)
+    || /text\/html/i.test(String(response.headers?.get?.("content-type") || ""));
+  if (isAuthenticationUrl(responseUrl) || (response.redirected && looksLikeHtml)) {
+    throw authenticationFailure("认证页面重定向", responseStatus);
+  }
   let payload;
   try {
     payload = raw ? JSON.parse(raw) : {};
   } catch {
-    const looksLikeLogin = /登录|统一身份认证|login|cas/i.test(raw);
+    if (looksLikeHtml || /登录|统一身份认证|login|cas/i.test(raw)) {
+      throw authenticationFailure(`HTTP ${responseStatus}`, responseStatus);
+    }
     throw new ApiError(
-      looksLikeLogin ? "教务系统登录已失效" : "教务接口返回了无法识别的数据",
-      `HTTP ${response.status}`,
-      response.status
+      "教务接口返回了无法识别的数据",
+      `HTTP ${responseStatus}`,
+      responseStatus,
+      { retryable: false }
     );
   }
 
-  if (!response.ok) throw new ApiError(`教务接口请求失败（${response.status}）`, `HTTP ${response.status}`, response.status);
-  if (payload && (payload.code === 401 || payload.status === 401 || payload.loginRequired === true)) {
-    throw new ApiError("教务系统登录已失效");
+  if (isAuthenticationPayload(payload)) throw authenticationFailure("业务层返回登录失效", responseStatus);
+  if (!response.ok) {
+    throw new ApiError(
+      `教务接口请求失败（${responseStatus}）`,
+      `HTTP ${responseStatus}`,
+      responseStatus,
+      { retryable: responseStatus >= 500 && responseStatus <= 599 }
+    );
   }
   return payload;
 }
 
 async function requestJson(url, options = {}) {
   let lastError;
-  for (const target of portalUrlVariants(url)) {
+  const targets = portalUrlVariants(url);
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
     try {
       return await requestJsonOnce(target, options);
     } catch (error) {
       lastError = error;
+      const canRetryVariant = options.variantRetryPolicy === "retryable-only"
+        ? isRetryableRequestError(error)
+        : true;
+      if (index >= targets.length - 1 || !canRetryVariant) break;
     }
   }
   throw lastError || new ApiError("无法连接教务系统");
+}
+
+function courseOutlineHeaders(headers = {}) {
+  return { ...headers, "X-Requested-With": "XMLHttpRequest" };
+}
+
+function getCourseOutline(path, query = {}, options = {}) {
+  return requestJson(courseOutlineApiUrl(path, query), {
+    ...options,
+    variantRetryPolicy: "retryable-only",
+    headers: courseOutlineHeaders(options.headers),
+    includeFetchApi: false,
+    timeoutMs: options.timeoutMs || COURSE_OUTLINE_REQUEST_TIMEOUT
+  });
+}
+
+function postCourseOutline(path, body = {}, options = {}) {
+  return requestJson(courseOutlineApiUrl(path), {
+    ...options,
+    variantRetryPolicy: "retryable-only",
+    method: "POST",
+    body,
+    headers: courseOutlineHeaders(options.headers),
+    includeFetchApi: false,
+    timeoutMs: options.timeoutMs || COURSE_OUTLINE_REQUEST_TIMEOUT
+  });
 }
 
 function getHome(path, query = {}) {
@@ -11093,24 +11277,51 @@ const COURSE_OUTLINE_SECTION_DEFINITIONS = Object.freeze([
   { title: "附件", endpoint: "cxkcdgfj.do", hint: "原系统返回的附件字段；不猜测下载地址" }
 ]);
 
-function courseOutlinePayloadFromRuntimeResponse(response) {
+function courseOutlinePayloadFromResponse(response) {
   const data = response?.data ?? response;
-  if (data && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, "payload")) return data.payload;
-  return data === undefined ? null : data;
+  const payload = data && typeof data === "object" && Object.prototype.hasOwnProperty.call(data, "payload")
+    ? data.payload
+    : data;
+  if (payload === undefined || payload === null) return payload ?? null;
+  // BH_UTILS 在不同版本的教务前端里既可能返回已解析对象，也可能返回
+  // JSON 文本。先尝试解析文本，避免列表被当成一个没有 KCH/KCM 字段的
+  // “未知对象”；解析失败时保留原字符串，原始数据仍可在详情导出中看到。
+  if (typeof payload === "string") {
+    const text = payload.trim();
+    if (!text) return payload;
+    try { return JSON.parse(text); } catch { return payload; }
+  }
+  return payload;
+}
+
+// 保留旧测试/调用方的纯解析名称；课程大纲正常请求不再依赖 runtime 消息。
+function courseOutlinePayloadFromRuntimeResponse(response) {
+  return courseOutlinePayloadFromResponse(response);
 }
 
 function courseOutlineBusinessError(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
-  const code = payload.code ?? payload.status ?? payload.errCode ?? payload.errorCode;
+  const normalizedPayload = courseOutlinePayloadFromResponse(payload);
+  if (!normalizedPayload || typeof normalizedPayload !== "object" || Array.isArray(normalizedPayload)) return "";
+  if (isAuthenticationPayload(normalizedPayload)) return "教务系统登录已失效";
+  const code = normalizedPayload.code ?? normalizedPayload.status ?? normalizedPayload.errCode ?? normalizedPayload.errorCode;
   const codeText = String(code ?? "").trim().toLowerCase();
-  if (["401", "403"].includes(codeText)) return String(payload.message || payload.msg || "教务系统登录已失效");
+  if (["401", "403"].includes(codeText)) return String(normalizedPayload.message || normalizedPayload.msg || "教务系统登录已失效");
   if (codeText && !["0", "200", "ok", "success"].includes(codeText)) {
-    return String(payload.message || payload.msg || payload.errorMessage || `原系统返回失败状态（${codeText}）`);
+    return String(normalizedPayload.message || normalizedPayload.msg || normalizedPayload.errorMessage || `教务系统返回失败状态（${codeText}）`);
   }
-  if (payload.success === false || payload.ok === false || payload.error === true) {
-    return String(payload.message || payload.msg || payload.errorMessage || "原系统返回了失败状态");
+  if (normalizedPayload.success === false || normalizedPayload.ok === false || normalizedPayload.error === true) {
+    return String(normalizedPayload.message || normalizedPayload.msg || normalizedPayload.errorMessage || "教务系统返回了失败状态");
   }
   return "";
+}
+
+function courseOutlineErrorFromPayload(payload) {
+  const message = courseOutlineBusinessError(payload);
+  if (!message) return null;
+  const normalizedPayload = courseOutlinePayloadFromResponse(payload);
+  const error = new ApiError(message, "课程大纲业务响应失败", 0, { retryable: false });
+  if (isAuthenticationPayload(normalizedPayload)) error.authFailure = true;
+  return error;
 }
 
 function courseOutlineDetailStateFrom(row) {
@@ -11141,45 +11352,129 @@ function courseOutlineDetailStateFrom(row) {
   };
 }
 
-async function ensureCourseOutlineReady() {
-  if (IS_ANDROID_APP) throw new ApiError("Android 端不提供课程大纲查询");
-  const current = state.courseOutline.bootstrap || {};
-  if (current.status === "ready" && Number(current.tabId) > 0) return Number(current.tabId);
-  if (!globalThis.chrome?.runtime?.sendMessage) throw new ApiError("当前环境不能调用原系统课程大纲页面");
-  state.courseOutline.bootstrap = { ...current, status: "checking", message: "正在准备课程大纲页面…", error: "" };
-  if (state.view === "course-outline") render();
-  const response = await runtimeMessageWithTimeout(
-    { type: "course-outline-bootstrap", tabId: Number(current.tabId) > 0 ? Number(current.tabId) : null },
-    30000,
-    "原系统课程大纲页面准备超时，请先打开原系统课程大纲页后重试"
-  );
-  if (!response?.ok || response.status !== "ready" || !Number(response.tabId)) {
-    const error = response?.error || (response?.status === "login-required" ? "请先在原系统完成登录" : "无法进入原系统课程大纲查询");
-    state.courseOutline.bootstrap = { ...state.courseOutline.bootstrap, status: response?.status || "failed", error, message: error, tabId: response?.tabId || current.tabId || null };
-    throw new ApiError(error);
+function setCourseOutlineTransportState(status, message = "", error = "") {
+  state.courseOutline.bootstrap = {
+    ...state.courseOutline.bootstrap,
+    status,
+    message,
+    error
+  };
+}
+
+function isCourseOutlineLoginError(error) {
+  return Boolean(error?.authFailure)
+    || [401, 403].includes(Number(error?.status))
+    || /登录失效|请先登录|认证页面重定向/i.test(String(error?.message || ""));
+}
+
+function courseOutlineTransportStatusLabel(status = state.courseOutline.bootstrap?.status) {
+  if (status === "ready") return "已连接";
+  if (status === "login-required") return "登录失效";
+  return "使用浏览器登录会话";
+}
+
+function courseOutlinePayloadOrThrow(response, fallbackMessage = "教务系统没有返回课程大纲数据") {
+  const payload = courseOutlinePayloadFromResponse(response);
+  const businessError = courseOutlineErrorFromPayload(payload);
+  if (businessError) throw businessError;
+  if (payload === undefined || payload === null) throw new ApiError(fallbackMessage);
+  return payload;
+}
+
+async function readCourseOutlineDirect(path, body = {}, options = {}) {
+  const response = await postCourseOutline(path, body, options);
+  try {
+    return {
+      payload: courseOutlinePayloadOrThrow(response),
+      rawResponse: response
+    };
+  } catch (error) {
+    // Preserve a valid business-error envelope as well. Transport failures
+    // happen before a response exists and are handled by requestJsonOnce.
+    error.rawResponse = response;
+    throw error;
   }
-  state.courseOutline.bootstrap = { ...state.courseOutline.bootstrap, status: "ready", error: "", message: "课程大纲页面已准备好", tabId: Number(response.tabId) };
-  return Number(response.tabId);
 }
 
-async function readCourseOutlineListViaRuntime(body, tabId) {
-  const response = await runtimeMessageWithTimeout(
-    { type: "course-outline-list-read", body, tabId },
-    30000,
-    "课程大纲列表读取超时，请保持原系统课程大纲页打开后重试"
-  );
-  if (!response?.ok) throw new ApiError(response?.error || "原系统没有返回课程大纲列表");
-  return courseOutlinePayloadFromRuntimeResponse(response);
+async function courseOutlineMapWithConcurrency(items, limit, mapper) {
+  const values = Array.isArray(items) ? items : [];
+  const results = new Array(values.length);
+  const workerCount = Math.min(Math.max(1, Number(limit) || 1), values.length);
+  let nextIndex = 0;
+  const consume = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= values.length) return;
+      try {
+        results[index] = { status: "fulfilled", value: await mapper(values[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: workerCount }, () => consume()));
+  return results;
 }
 
-async function readCourseOutlineEndpointViaRuntime(endpoint, row, tabId) {
-  const response = await runtimeMessageWithTimeout(
-    { type: "course-outline-detail-read", endpoint, body: courseOutlineDetailBody(row), tabId },
-    20000,
-    `课程大纲“${COURSE_OUTLINE_ENDPOINT_LABELS[endpoint] || endpoint}”读取超时`
-  );
-  if (!response?.ok) throw new ApiError(response?.error || `原系统没有返回“${COURSE_OUTLINE_ENDPOINT_LABELS[endpoint] || endpoint}”`);
-  return courseOutlinePayloadFromRuntimeResponse(response);
+async function loadCourseOutlineMetadata(options = {}) {
+  if (IS_ANDROID_APP) return false;
+  const metadata = state.courseOutline.metadata;
+  if (metadata.loading || metadata.loaded && !options.force) return metadata.loaded;
+  metadata.loading = true;
+  metadata.error = "";
+  try {
+    // 两种接口实现都接受 JSON 查询开关；*json 是原系统请求组件的
+    // 形式，URL 构造器会在其后安全追加 WebVPN marker。
+    const response = await getCourseOutline(COURSE_OUTLINE_METADATA_PATH, { "*json": 1 }, { timeoutMs: options.timeoutMs || 8000 });
+    const normalized = courseOutlinePayloadOrThrow(response, "课程大纲元数据为空");
+    const codePaths = courseOutlineCodePathsFromMetadata(normalized);
+    const settled = await courseOutlineMapWithConcurrency(codePaths, 4, async (path) => {
+      try {
+        const dictionaryResponse = await getCourseOutline(path, {}, { timeoutMs: options.dictionaryTimeoutMs || 8000 });
+        return {
+          path,
+          status: "success",
+          payload: courseOutlinePayloadOrThrow(dictionaryResponse, "筛选字典为空"),
+          rawResponse: dictionaryResponse,
+          error: ""
+        };
+      } catch (error) {
+        return {
+          path,
+          status: "failed",
+          payload: null,
+          rawResponse: error?.rawResponse ?? null,
+          error: error?.message || "筛选字典读取失败"
+        };
+      }
+    });
+    const endpoints = {};
+    settled.forEach((item, index) => {
+      const path = codePaths[index];
+      endpoints[path] = item.status === "fulfilled"
+        ? item.value
+        : {
+          path,
+          status: "failed",
+          payload: null,
+          rawResponse: item.reason?.rawResponse ?? null,
+          error: item.reason?.message || "筛选字典读取失败"
+        };
+    });
+    metadata.loaded = true;
+    metadata.loading = false;
+    metadata.error = "";
+    metadata.rawResponse = response;
+    metadata.endpoints = endpoints;
+    metadata.codePaths = codePaths;
+    return true;
+  } catch (error) {
+    metadata.loading = false;
+    metadata.loaded = false;
+    metadata.error = error?.message || "课程大纲元数据读取失败";
+    if (isCourseOutlineLoginError(error)) setCourseOutlineTransportState("login-required", "登录失效", metadata.error);
+    return false;
+  }
 }
 
 async function loadCourseOutlineList(options = {}) {
@@ -11195,18 +11490,23 @@ async function loadCourseOutlineList(options = {}) {
   list.pageSize = pageSize;
   list.loading = true;
   list.error = "";
+  setCourseOutlineTransportState("connecting", "使用浏览器登录会话", "");
   if (state.view === "course-outline") render();
   try {
-    const tabId = await ensureCourseOutlineReady();
-    const payload = await readCourseOutlineListViaRuntime(courseOutlineListBody(filters, pageNumber, pageSize), tabId);
+    const response = await readCourseOutlineDirect(
+      COURSE_OUTLINE_LIST_PATH,
+      courseOutlineListBody(filters, pageNumber, pageSize),
+      { timeoutMs: options.timeoutMs || COURSE_OUTLINE_REQUEST_TIMEOUT }
+    );
     if (!courseOutlineRequestIsCurrent(requestId, list.requestSequence)) return false;
-    const normalized = normalizeCourseOutlineEndpointPayload(payload, COURSE_OUTLINE_LIST_PATH);
+    const normalized = normalizeCourseOutlineEndpointPayload(response.payload, COURSE_OUTLINE_LIST_PATH);
     list.rows = normalized.records;
     list.totalSize = normalized.totalSize || normalized.records.length;
+    list.rawResponse = response.rawResponse;
     list.loaded = true;
     list.loading = false;
     list.error = "";
-    state.courseOutline.bootstrap = { ...state.courseOutline.bootstrap, status: "ready", tabId };
+    setCourseOutlineTransportState("ready", "已连接", "");
     if (state.view === "course-outline") render();
     return true;
   } catch (error) {
@@ -11214,6 +11514,12 @@ async function loadCourseOutlineList(options = {}) {
     list.loading = false;
     list.loaded = true;
     list.error = error?.message || "课程大纲列表读取失败";
+    list.rawResponse = error?.rawResponse ?? list.rawResponse;
+    setCourseOutlineTransportState(
+      isCourseOutlineLoginError(error) ? "login-required" : "failed",
+      isCourseOutlineLoginError(error) ? "登录失效" : "使用浏览器登录会话",
+      list.error
+    );
     if (state.view === "course-outline") render();
     return false;
   }
@@ -11241,45 +11547,43 @@ async function loadCourseOutlineDetail(row) {
   detail.requestSequence = requestId;
   state.courseOutline.detail = detail;
   state.view = "course-outline";
+  setCourseOutlineTransportState("connecting", "使用浏览器登录会话", "");
   render();
-  let tabId;
-  try {
-    tabId = await ensureCourseOutlineReady();
-    detail.tabId = tabId;
-  } catch (error) {
-    if (state.courseOutline.detail !== detail) return false;
-    COURSE_OUTLINE_DETAIL_ENDPOINTS.forEach((endpoint) => {
-      detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, null, { status: "failed", error: error?.message || "课程大纲页面不可用" });
-    });
-    detail.loading = false;
-    detail.error = error?.message || "课程大纲页面不可用";
-    detail.finishedAt = new Date().toISOString();
-    render();
-    return false;
-  }
-  const settled = await Promise.allSettled(COURSE_OUTLINE_DETAIL_ENDPOINTS.map(async (endpoint) => {
+  const settled = await courseOutlineMapWithConcurrency(COURSE_OUTLINE_DETAIL_ENDPOINTS, COURSE_OUTLINE_DETAIL_CONCURRENCY, async (endpoint) => {
     const startedAt = new Date().toISOString();
     try {
-      const payload = await readCourseOutlineEndpointViaRuntime(endpoint, row, tabId);
-      const businessError = courseOutlineBusinessError(payload);
-      return { endpoint, payload, startedAt, businessError };
+      const response = await readCourseOutlineDirect(endpoint, courseOutlineDetailBody(row), { timeoutMs: COURSE_OUTLINE_REQUEST_TIMEOUT });
+      return { endpoint, payload: response.payload, rawResponse: response.rawResponse, startedAt };
     } catch (error) {
-      return { endpoint, error, startedAt };
+      return { endpoint, error, rawResponse: error?.rawResponse ?? null, startedAt };
     }
-  }));
+  });
   if (state.courseOutline.detail !== detail || !courseOutlineRequestIsCurrent(requestId, courseOutlineDetailRequestSequence)) return false;
+  let hasSuccess = false;
+  let hasLoginFailure = false;
   settled.forEach((settledResult, index) => {
     const endpoint = COURSE_OUTLINE_DETAIL_ENDPOINTS[index];
-    const item = settledResult.status === "fulfilled" ? settledResult.value : { endpoint, error: settledResult.reason, startedAt: new Date().toISOString() };
-    if (item.error || item.businessError) {
+    const item = settledResult.status === "fulfilled"
+      ? settledResult.value
+      : {
+        endpoint,
+        error: settledResult.reason,
+        rawResponse: settledResult.reason?.rawResponse ?? null,
+        startedAt: new Date().toISOString()
+      };
+    if (item.error) {
+      hasLoginFailure ||= isCourseOutlineLoginError(item.error);
       detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, item.payload ?? null, {
+        raw: item.rawResponse,
         status: "failed",
-        error: item.businessError || item.error?.message || String(item.error || "原系统章节读取失败"),
+        error: item.error?.message || String(item.error || "课程章节读取失败"),
         startedAt: item.startedAt,
         finishedAt: new Date().toISOString()
       });
     } else {
+      hasSuccess = true;
       detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, item.payload, {
+        raw: item.rawResponse,
         status: "success",
         startedAt: item.startedAt,
         finishedAt: new Date().toISOString()
@@ -11288,6 +11592,9 @@ async function loadCourseOutlineDetail(row) {
   });
   detail.loading = false;
   detail.finishedAt = new Date().toISOString();
+  if (hasLoginFailure) setCourseOutlineTransportState("login-required", "登录失效", "课程大纲接口返回登录失效");
+  else if (hasSuccess) setCourseOutlineTransportState("ready", "已连接", "");
+  else setCourseOutlineTransportState("failed", "使用浏览器登录会话", "课程大纲章节读取失败");
   render();
   return true;
 }
@@ -11299,17 +11606,34 @@ async function retryCourseOutlineEndpoint(endpoint) {
   const previous = detail.endpoints[endpoint] || {};
   detail.requestSequence = requestId;
   detail.endpoints[endpoint] = { ...previous, endpoint, path: courseOutlineEndpointPath(endpoint), status: "loading", error: "", startedAt: new Date().toISOString() };
+  setCourseOutlineTransportState("connecting", "使用浏览器登录会话", "");
   render();
   try {
-    const tabId = await ensureCourseOutlineReady();
     const startedAt = detail.endpoints[endpoint].startedAt;
-    const payload = await readCourseOutlineEndpointViaRuntime(endpoint, detail.row, tabId);
+    const response = await readCourseOutlineDirect(endpoint, courseOutlineDetailBody(detail.row), { timeoutMs: COURSE_OUTLINE_REQUEST_TIMEOUT });
     if (state.courseOutline.detail !== detail || !courseOutlineRequestIsCurrent(requestId, courseOutlineDetailRequestSequence)) return false;
-    const businessError = courseOutlineBusinessError(payload);
-    detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, payload, { status: businessError ? "failed" : "success", error: businessError, startedAt, finishedAt: new Date().toISOString() });
+    detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, response.payload, {
+      raw: response.rawResponse,
+      status: "success",
+      error: "",
+      startedAt,
+      finishedAt: new Date().toISOString()
+    });
+    setCourseOutlineTransportState("ready", "已连接", "");
   } catch (error) {
     if (state.courseOutline.detail !== detail || !courseOutlineRequestIsCurrent(requestId, courseOutlineDetailRequestSequence)) return false;
-    detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, previous.raw ?? null, { status: "failed", error: error?.message || "章节读取失败", startedAt: detail.endpoints[endpoint].startedAt, finishedAt: new Date().toISOString() });
+    detail.endpoints[endpoint] = courseOutlineEndpointResult(endpoint, previous.raw ?? null, {
+      raw: error?.rawResponse ?? previous.raw ?? null,
+      status: "failed",
+      error: error?.message || "课程章节读取失败",
+      startedAt: detail.endpoints[endpoint].startedAt,
+      finishedAt: new Date().toISOString()
+    });
+    setCourseOutlineTransportState(
+      isCourseOutlineLoginError(error) ? "login-required" : "failed",
+      isCourseOutlineLoginError(error) ? "登录失效" : "使用浏览器登录会话",
+      error?.message || "课程章节读取失败"
+    );
   }
   render();
   return true;
@@ -11399,7 +11723,7 @@ async function openCourseOutlineOriginal() {
   if (IS_ANDROID_APP) return;
   try {
     const response = await runtimeMessageWithTimeout(
-      { type: "open-course-outline-portal", tabId: state.courseOutline.bootstrap?.tabId || null },
+      { type: "open-course-outline-portal" },
       30000,
       "打开原系统课程大纲超时"
     );
@@ -11431,12 +11755,13 @@ function renderCourseOutlineList() {
       const credits = courseOutlineDisplayValue(row, ["XF", "credit", "credits"], "—");
       return `<article class="course-outline-list-row"><div class="course-outline-list-main"><div class="course-outline-list-title"><strong>${escapeHtml(name)}</strong><code>${escapeHtml(code)}</code></div><div class="course-outline-list-meta"><span>开课单位：${escapeHtml(unit)}</span><span>层次：${escapeHtml(level)}</span><span>级别：${escapeHtml(grade)}</span><span>学分：${escapeHtml(credits)}</span></div></div><button class="button button-primary button-small" type="button" data-action="show-course-outline-detail" data-outline-row-index="${index}">查看大纲</button></article>`;
     }).join("")}</div>`
-    : list.loading ? `<div class="course-outline-placeholder course-outline-list-placeholder">正在读取原系统课程目录…</div>` : `<div class="course-outline-placeholder course-outline-list-placeholder">${list.loaded ? "没有符合条件的课程" : "输入筛选条件后查询课程大纲"}</div>`;
+    : list.loading ? `<div class="course-outline-placeholder course-outline-list-placeholder">正在读取课程目录…</div>` : `<div class="course-outline-placeholder course-outline-list-placeholder">${list.loaded ? "没有符合条件的课程" : "输入筛选条件后查询课程大纲"}</div>`;
   const total = Number(list.totalSize) || rows.length;
   const pages = total ? Math.max(1, Math.ceil(total / list.pageSize)) : 1;
   const pagination = `<div class="course-outline-pagination"><span>第 ${escapeHtml(list.pageNumber)} / ${escapeHtml(pages)} 页 · 共 ${escapeHtml(total)} 门课程</span><div><button class="button button-ghost button-small" type="button" data-action="course-outline-page" data-outline-page="${Math.max(1, list.pageNumber - 1)}" ${list.pageNumber <= 1 || list.loading ? "disabled" : ""}>上一页</button><button class="button button-ghost button-small" type="button" data-action="course-outline-page" data-outline-page="${Math.min(pages, list.pageNumber + 1)}" ${list.pageNumber >= pages || list.loading ? "disabled" : ""}>下一页</button><label class="course-outline-page-size">每页<select data-outline-page-size ${list.loading ? "disabled" : ""}><option value="10" ${list.pageSize === 10 ? "selected" : ""}>10</option><option value="20" ${list.pageSize === 20 ? "selected" : ""}>20</option><option value="50" ${list.pageSize === 50 ? "selected" : ""}>50</option></select></label></div></div>`;
   const error = list.error ? `<div class="course-outline-error"><strong>${escapeHtml(list.error)}</strong><button class="button button-ghost button-small" type="button" data-action="refresh-course-outline-list">重试</button></div>` : "";
-  return `<div class="course-outline-page">${sectionHeading("课程大纲", "从教务系统课程目录查询并完整保留课程大纲原始信息。课程目录不随顶部当前学期选择自动清空。", `<button class="button button-ghost" type="button" data-action="open-course-outline-original">原系统查看</button>`)}<section class="panel course-outline-query-panel"><div class="course-outline-query-head"><div><h3>课程查询</h3><p class="muted">支持课程代码、名称、开课单位、层次和级别；查询结果按原系统服务端分页。</p></div><div class="course-outline-query-actions"><button class="button button-primary" type="button" data-action="search-course-outline">查询</button><button class="button button-ghost" type="button" data-action="clear-course-outline">清空</button></div></div><div class="course-outline-filter-grid">${filterMarkup}</div></section>${error}<section class="course-outline-results panel"><div class="course-outline-results-head"><div><h3>课程目录</h3><span>${list.loading ? "正在同步原系统…" : list.loaded ? "点击课程查看完整大纲" : "等待查询"}</span></div><span class="course-outline-session-state">${escapeHtml(state.courseOutline.bootstrap.status === "ready" ? "原系统已连接" : "需要打开原系统页面")}</span></div>${table}${pagination}</section></div>`;
+  const transportLabel = courseOutlineTransportStatusLabel();
+  return `<div class="course-outline-page">${sectionHeading("课程大纲", "从教务系统课程目录查询并完整保留课程大纲原始信息。课程目录不随顶部当前学期选择自动清空。", `<button class="button button-ghost" type="button" data-action="open-course-outline-original">原系统查看</button>`)}<section class="panel course-outline-query-panel"><div class="course-outline-query-head"><div><h3>课程查询</h3><p class="muted">支持课程代码、名称、开课单位、层次和级别；查询结果按教务系统服务端分页。</p></div><div class="course-outline-query-actions"><button class="button button-primary" type="button" data-action="search-course-outline">查询</button><button class="button button-ghost" type="button" data-action="clear-course-outline">清空</button></div></div><div class="course-outline-filter-grid">${filterMarkup}</div></section>${error}<section class="course-outline-results panel"><div class="course-outline-results-head"><div><h3>课程目录</h3><span>${list.loading ? "正在同步课程目录…" : list.loaded ? "点击课程查看完整大纲" : "等待查询"}</span></div><span class="course-outline-session-state">${escapeHtml(transportLabel)}</span></div>${table}${pagination}</section></div>`;
 }
 
 function renderCourseOutlineDetail() {
@@ -11450,7 +11775,7 @@ function renderCourseOutlineDetail() {
   const failures = Object.values(detail.endpoints || {}).filter((item) => item.status === "failed").length;
   const actions = `<div class="course-outline-detail-actions"><button class="button button-ghost" type="button" data-action="back-course-outline">返回目录</button><button class="button button-primary" type="button" data-action="refresh-course-outline-detail">${detail.loading ? "读取中…" : "刷新全部"}</button><button class="button button-ghost" type="button" data-action="copy-course-outline">复制完整 JSON</button><button class="button button-ghost" type="button" data-action="download-course-outline">下载完整 JSON</button><button class="button button-ghost" type="button" data-action="print-course-outline">打印</button><button class="button button-ghost" type="button" data-action="open-course-outline-original">原系统查看</button></div>`;
   const raw = `<section class="course-outline-raw panel"><details><summary>原始数据（保留所有接口响应）<span>${escapeHtml(`${Object.keys(detail.endpoints || {}).length} 个接口${failures ? ` · ${failures} 个失败` : ""}`)}</span></summary><div class="course-outline-raw-list">${Object.entries(detail.endpoints || {}).map(([endpoint, result]) => `<details class="course-outline-raw-item"><summary><code>${escapeHtml(endpoint)}</code><span>${escapeHtml(`${result.status} · ${result.shape || "empty"}`)}</span></summary><pre>${escapeHtml(courseOutlineText(result.raw))}</pre></details>`).join("")}</div></details></section>`;
-  return `<div class="course-outline-page course-outline-detail-page">${sectionHeading("课程大纲详情", "每个章节独立读取；单个接口失败不会隐藏其他章节，失败章节可单独重试。", "") }<header class="course-outline-detail-header panel"><div class="course-outline-detail-title"><span class="eyebrow">COURSE OUTLINE</span><h2>${escapeHtml(name)}</h2><p><code>${escapeHtml(code)}</code><span>版本/学期：${escapeHtml(term)}</span><small>数据键：${escapeHtml(key)}</small></p></div>${actions}</header>${detail.loading ? `<div class="course-outline-loading-note">正在并行读取 ${COURSE_OUTLINE_DETAIL_ENDPOINTS.length} 个原系统章节…已返回的章节会逐步显示。</div>` : failures ? `<div class="course-outline-loading-note is-warning">有 ${failures} 个章节读取失败；其他原始数据仍已保留，可点击对应章节的“重试此章节”。</div>` : `<div class="course-outline-loading-note is-success">课程大纲读取完成；原始字段和未知字段均已保留。</div>`}${COURSE_OUTLINE_SECTION_DEFINITIONS.map((definition) => renderCourseOutlineSection(definition, detail)).join("")}${raw}</div>`;
+  return `<div class="course-outline-page course-outline-detail-page">${sectionHeading("课程大纲详情", "每个章节独立读取；单个接口失败不会隐藏其他章节，失败章节可单独重试。", "") }<header class="course-outline-detail-header panel"><div class="course-outline-detail-title"><span class="eyebrow">COURSE OUTLINE</span><h2>${escapeHtml(name)}</h2><p><code>${escapeHtml(code)}</code><span>版本/学期：${escapeHtml(term)}</span><small>数据键：${escapeHtml(key)}</small></p></div>${actions}</header>${detail.loading ? `<div class="course-outline-loading-note">正在并行读取 ${COURSE_OUTLINE_DETAIL_ENDPOINTS.length} 个课程章节…已返回的章节会逐步显示。</div>` : failures ? `<div class="course-outline-loading-note is-warning">有 ${failures} 个章节读取失败；其他原始数据仍已保留，可点击对应章节的“重试此章节”。</div>` : `<div class="course-outline-loading-note is-success">课程大纲读取完成；原始字段和未知字段均已保留。</div>`}${COURSE_OUTLINE_SECTION_DEFINITIONS.map((definition) => renderCourseOutlineSection(definition, detail)).join("")}${raw}</div>`;
 }
 
 function renderCourseOutline() {

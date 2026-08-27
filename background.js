@@ -18,27 +18,7 @@ const LOGIN_METHOD_WECHAT = "wechat";
 const CURRICULUM_PENDING_KEY = "zhizhang.curriculumBootstrap";
 const CURRICULUM_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
 const CURRICULUM_NAVIGATION_TIMEOUT_MS = 18000;
-const COURSE_OUTLINE_LIST_PATH = "modules/dgcx/cxlb.do";
-const COURSE_OUTLINE_METADATA_PATH = "modules/kcdgwhgl.do";
-const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
-  "cxkcxxx.do",
-  "cxkcdgxx.do",
-  "cxkcjcxx.do",
-  "cxkcmbxx.do",
-  "kcmbybyzccx.do",
-  "cxkcmbhnrdgx.do",
-  "cxkccjpdff.do",
-  "cxkhxs.do",
-  "cxkhxscjzb.do",
-  "cxkhhjsz.do",
-  "cxkcmbdcbz.do",
-  "cxkczlpjhgjjz.do",
-  "cxzbrxgxx.do",
-  "cxkcdgfj.do"
-]);
 const COURSE_OUTLINE_NAVIGATION_TIMEOUT_MS = 18000;
-const COURSE_OUTLINE_REQUEST_SCRIPT_TIMEOUT_MS = 12000;
-const COURSE_OUTLINE_FRAME_PROBE_TIMEOUT_MS = 5000;
 let curriculumPendingFallback = null;
 let curriculumBootstrapInFlight = null;
 const curriculumResumeLocks = new Map();
@@ -381,89 +361,6 @@ async function inspectPortalTabState(tabId) {
   }
 }
 
-function courseOutlineRequestPath(endpoint) {
-  const name = String(endpoint || "").trim();
-  // getAbsPath() is the same helper used by the original iframe and expects
-  // a path relative to the current kccx application root. A leading slash
-  // would resolve from the WebVPN host root on some system versions.
-  if (name === COURSE_OUTLINE_LIST_PATH || name === COURSE_OUTLINE_METADATA_PATH) return name.replace(/^\/+/, "");
-  if (!COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(name)) return "";
-  return `modules/kcdgwhgl/${name}`;
-}
-
-async function executeCourseOutlinePortalRequest(tabId, path, params = {}) {
-  const requestPath = courseOutlineRequestPath(path);
-  if (!requestPath) throw new Error("课程大纲接口不在允许范围内");
-  // First inspect every frame without making a request. Calling doSyncAjax in
-  // allFrames at once is unsafe: a hidden shell or an unrelated WebVPN frame
-  // can block the whole executeScript promise and make a healthy module look
-  // like a timeout. After the probe, issue the real request in one frame only.
-  let frameResults = [];
-  try {
-    const probe = await executePortalScript(tabId, {
-      target: { tabId, allFrames: true },
-      world: "MAIN",
-      func: () => {
-        const href = String(location.href || "");
-        const title = String(document.title || "");
-        return {
-          available: Boolean(window.BH_UTILS?.doSyncAjax && window.WIS_EMAP_SERV?.getAbsPath),
-          courseOutlineFrame: /(?:kccx|kcdgwhgl|dgcx|课程大纲)/i.test(`${href} ${title}`),
-          pageUrl: href,
-          title
-        };
-      }
-    }, COURSE_OUTLINE_FRAME_PROBE_TIMEOUT_MS);
-    frameResults = probe.map((item) => item?.result ? { ...item.result, frameId: item.frameId } : null).filter(Boolean);
-  } catch (error) {
-    // If the page is replacing frames while the probe runs, the top frame is
-    // still a safe last-resort candidate and the targeted request below will
-    // return the actual Chrome/WebVPN error instead of masking it as a probe
-    // failure.
-    frameResults = [{ frameId: 0, available: true, courseOutlineFrame: false }];
-  }
-
-  const candidates = frameResults
-    .filter((item) => item.available && Number.isInteger(item.frameId))
-    .sort((left, right) => Number(right.courseOutlineFrame) - Number(left.courseOutlineFrame)
-      || Number(left.frameId) - Number(right.frameId));
-  if (!candidates.length) throw new Error("课程大纲页面尚未加载原系统请求封装");
-
-  let lastError = "";
-  for (const candidate of candidates) {
-    try {
-      const result = await executePortalScript(tabId, {
-        target: { tabId, frameIds: [candidate.frameId] },
-        world: "MAIN",
-        args: [requestPath, params],
-        func: (safePath, safeParams) => {
-          const href = String(location.href || "");
-          const title = String(document.title || "");
-          const courseOutlineFrame = /(?:kccx|kcdgwhgl|dgcx|课程大纲)/i.test(`${href} ${title}`);
-          if (!window.BH_UTILS?.doSyncAjax || !window.WIS_EMAP_SERV?.getAbsPath) {
-            return { available: false, courseOutlineFrame, pageUrl: href, error: "当前框架尚未加载原系统请求封装" };
-          }
-          try {
-            const payload = window.BH_UTILS.doSyncAjax(
-              window.WIS_EMAP_SERV.getAbsPath(safePath),
-              safeParams || {}
-            );
-            return { available: true, courseOutlineFrame, pageUrl: href, payload: payload === undefined ? null : payload };
-          } catch (error) {
-            return { available: true, courseOutlineFrame, pageUrl: href, error: error?.message || "原系统接口请求失败" };
-          }
-        }
-      }, COURSE_OUTLINE_REQUEST_SCRIPT_TIMEOUT_MS);
-      const values = result.map((item) => item?.result).filter(Boolean);
-      const successful = values.find((item) => item.available && !item.error);
-      if (successful) return { payload: successful.payload, tabId };
-      lastError = values.map((item) => item.error).find(Boolean) || lastError;
-    } catch (error) {
-      lastError = error?.message || lastError;
-    }
-  }
-  throw new Error(lastError || "课程大纲页面尚未准备好");
-}
 
 async function navigatePortalTabToCourseOutline(tabId) {
   const labels = ["课程大纲查询", "课程大纲", "课程查询", "培养"];
@@ -580,26 +477,6 @@ async function openCourseOutlinePortalPage(preferredTabId = null) {
   return result;
 }
 
-async function readCourseOutlinePortalRequest(endpoint, params = {}, preferredTabId = null) {
-  const bootstrap = await startCourseOutlineBootstrap(preferredTabId);
-  if (!bootstrap?.ok || bootstrap.status !== "ready") {
-    throw new Error(bootstrap?.error || (bootstrap?.status === "login-required" ? "请先完成教务系统登录" : "课程大纲页面暂不可用"));
-  }
-  return executeCourseOutlinePortalRequest(bootstrap.tabId, endpoint, params);
-}
-
-async function readCourseOutlineListFromPortalTab(body = {}, preferredTabId = null) {
-  return readCourseOutlinePortalRequest(COURSE_OUTLINE_LIST_PATH, body, preferredTabId);
-}
-
-async function readCourseOutlineDetailEndpoint(endpoint, body = {}, preferredTabId = null) {
-  if (!COURSE_OUTLINE_DETAIL_ENDPOINTS.includes(String(endpoint || ""))) throw new Error("课程大纲章节接口不在允许范围内");
-  return readCourseOutlinePortalRequest(String(endpoint), body, preferredTabId);
-}
-
-async function readCourseOutlineMetadata(preferredTabId = null) {
-  return readCourseOutlinePortalRequest(COURSE_OUTLINE_METADATA_PATH, { "*json": 1 }, preferredTabId);
-}
 
 async function getCurriculumPending() {
   let pending = null;
@@ -1060,30 +937,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     openCourseOutlinePortalPage(message.tabId || sender?.tab?.id || null)
       .then((data) => sendResponse(data))
       .catch((error) => sendResponse({ ok: false, status: "failed", error: error.message || "无法打开课程大纲原查询" }));
-    return true;
-  }
-  if (message?.type === "course-outline-bootstrap") {
-    startCourseOutlineBootstrap(message.tabId || null)
-      .then((data) => sendResponse(data))
-      .catch((error) => sendResponse({ ok: false, status: "failed", error: error.message || "无法进入课程大纲查询" }));
-    return true;
-  }
-  if (message?.type === "course-outline-list-read") {
-    readCourseOutlineListFromPortalTab(message.body || {}, message.tabId || null)
-      .then((data) => sendResponse({ ok: true, data: { ...data, endpoint: COURSE_OUTLINE_LIST_PATH } }))
-      .catch((error) => sendResponse({ ok: false, error: error.message || "原系统课程大纲列表读取失败" }));
-    return true;
-  }
-  if (message?.type === "course-outline-detail-read") {
-    readCourseOutlineDetailEndpoint(message.endpoint, message.body || {}, message.tabId || null)
-      .then((data) => sendResponse({ ok: true, data: { ...data, endpoint: message.endpoint } }))
-      .catch((error) => sendResponse({ ok: false, error: error.message || "原系统课程大纲章节读取失败" }));
-    return true;
-  }
-  if (message?.type === "course-outline-metadata-read") {
-    readCourseOutlineMetadata(message.tabId || null)
-      .then((data) => sendResponse({ ok: true, data: { ...data, endpoint: COURSE_OUTLINE_METADATA_PATH } }))
-      .catch((error) => sendResponse({ ok: false, error: error.message || "原系统课程大纲元数据读取失败" }));
     return true;
   }
   if (message?.type === "curriculum-bootstrap") {

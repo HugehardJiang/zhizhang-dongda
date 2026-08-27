@@ -70,8 +70,10 @@ globalThis.__auditTest = {
   currentScoreReminder, acknowledgeCurrentScoreReminder, renderNewScoreReminderModal,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
   scheduleCsvHasRows, renderPersonal, renderOverview, renderOverviewPriority, renderSettings, renderCourseDetailModal,
-  courseOutlineCollection, normalizeCourseOutlineEndpointPayload, courseOutlineQuerySettings,
+  courseOutlinePayloadFromRuntimeResponse, courseOutlineCollection, normalizeCourseOutlineEndpointPayload, courseOutlineQuerySettings,
   courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
+  courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
+  isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -101,6 +103,26 @@ const t = global.__auditTest;
   assert.strictEqual(outlineList.records[0].UNKNOWN_FIELD, '保留');
   assert.deepStrictEqual(outlineListPayload, outlineListCopy);
 
+  const observedPortalList = {
+    code: '0',
+    datas: {
+      cxlb: {
+        totalSize: 3, pageNumber: 1, pageSize: 10,
+        rows: [
+          { WID: 'wid-1', KCH: 'A1501000080', KCM: '复变函数与积分变换', KKDWDM: '15', KCCCDM: '01', KCJBDM: null, XF: 2.5, XS: 40, KKDWDM_DISPLAY: '理学院', KCCCDM_DISPLAY: '本科', KCJBDM_DISPLAY: '' },
+          { WID: 'wid-2', KCH: 'A1501000081', KCM: '复变函数与积分变换③（双语）', KKDWDM: '15', KCCCDM: '01', KCJBDM: null, XF: 2.5, XS: 48, KKDWDM_DISPLAY: '理学院', KCCCDM_DISPLAY: '本科', KCJBDM_DISPLAY: '' },
+          { WID: 'wid-3', KCH: 'A1501000220', KCM: '复变函数', KKDWDM: '15', KCCCDM: '01', KCJBDM: null, XF: 3, XS: 48, KKDWDM_DISPLAY: '理学院', KCCCDM_DISPLAY: '本科', KCJBDM_DISPLAY: '' }
+        ]
+      }
+    }
+  };
+  const observedList = t.normalizeCourseOutlineEndpointPayload(observedPortalList, 'modules/dgcx/cxlb.do');
+  assert.deepStrictEqual(observedList.records.map((row) => row.KCH), ['A1501000080', 'A1501000081', 'A1501000220']);
+  assert.deepStrictEqual(observedList.records.map((row) => row.KCM), ['复变函数与积分变换', '复变函数与积分变换③（双语）', '复变函数']);
+  assert.equal(observedList.records[0].KCCCDM_DISPLAY, '本科');
+  assert.deepStrictEqual(t.courseOutlinePayloadFromRuntimeResponse(JSON.stringify(observedPortalList)), observedPortalList);
+  assert.strictEqual(t.courseOutlinePayloadFromRuntimeResponse('not-json'), 'not-json');
+
   const outlineSinglePayload = {
     code: '0',
     datas: { cxkcxxx: { KCH: 'A-001', KCM: '测试课程', MULTILINE: '第一行\n第二行', NULL_FIELD: null, UNKNOWN_FIELD: '不丢失' } }
@@ -116,17 +138,88 @@ const t = global.__auditTest;
   const unknownOutline = t.normalizeCourseOutlineEndpointPayload({ code: '0', datas: { cxkcjcxx: { arbitrary: 'value' } } }, 'cxkcjcxx.do');
   assert.strictEqual(unknownOutline.records[0].arbitrary, 'value');
   assert.strictEqual(t.courseOutlineBusinessError({ code: '0' }), '');
-  assert.match(t.courseOutlineBusinessError({ code: '401', msg: '登录失效' }), /登录失效/);
+  assert.match(t.courseOutlineBusinessError({ code: '401', msg: '登录失效' }), /登录.*失效/);
+  // The transport adds a product-level prefix while preserving the login-loss meaning.
   assert.match(t.courseOutlineBusinessError({ code: '9', message: '业务失败' }), /业务失败/);
+
+  // Direct transport contract: no page/iframe bridge, the course-outline
+  // marker is a single query key after existing query parameters, and the
+  // form matches the original EMAP request shape.
+  const directUrl = new URL(t.courseOutlineApiUrl('modules/dgcx/cxlb.do', { '*json': 1 }));
+  assert.equal(directUrl.pathname.endsWith('/jwapp/sys/kccx/modules/dgcx/cxlb.do'), true);
+  assert.equal(directUrl.searchParams.get('*json'), '1');
+  assert.equal(directUrl.searchParams.has('vpn-12-o2-jwxt.neu.edu.cn'), true);
+  assert.equal(directUrl.toString().indexOf('?'), directUrl.toString().lastIndexOf('?'));
+  assert.equal(t.courseOutlineCodePathFromMetadata('/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do?x=1'), '/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do');
+  assert.equal(t.courseOutlineCodePathFromMetadata('https://example.com/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do'), '');
+  assert.deepEqual(t.courseOutlineCodePathsFromMetadata({ a: '/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do', b: ['/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do'] }), ['/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do']);
+  assert.equal(t.isAuthenticationUrl('https://webvpn.neu.edu.cn/tpass/login'), true);
+  assert.equal(t.isAuthenticationUrl('https://webvpn.neu.edu.cn/jwapp/sys/kccx/modules/dgcx/cxlb.do'), false);
+  assert.equal(t.isAuthenticationPayload({ code: 403 }), true);
+  assert.equal(t.isCourseOutlineLoginError(t.authenticationFailure('HTTP 403', 403)), true);
+  assert.equal(t.courseOutlineHeaders({ 'Fetch-Api': 'true' })['X-Requested-With'], 'XMLHttpRequest');
+
+  const savedFetch = global.fetch;
+  const directCalls = [];
+  global.fetch = async (url, options) => {
+    directCalls.push({ url: String(url), options });
+    return {
+      ok: true, status: 200, url: String(url), redirected: false,
+      headers: { get() { return 'application/json'; } },
+      text: async () => JSON.stringify({ code: '0', datas: { cxlb: { totalSize: 0, rows: [] } } })
+    };
+  };
+  try {
+    await t.postCourseOutline('modules/dgcx/cxlb.do', t.courseOutlineListBody({ name: '复变' }, 1, 10), { timeoutMs: 1000 });
+  } finally {
+    global.fetch = savedFetch;
+  }
+  assert.equal(directCalls.length, 1);
+  const directCallUrl = new URL(directCalls[0].url);
+  assert.equal(directCallUrl.searchParams.has('vpn-12-o2-jwxt.neu.edu.cn'), true);
+  assert.equal(directCalls[0].options.headers['X-Requested-With'], 'XMLHttpRequest');
+  assert.equal(Object.hasOwn(directCalls[0].options.headers, 'Fetch-Api'), false);
+  const directForm = new URLSearchParams(directCalls[0].options.body.toString());
+  assert.equal(directForm.get('*order'), '+KCH');
+  assert.deepEqual(JSON.parse(directForm.get('querySetting')), t.courseOutlineQuerySettings({ name: '复变' }));
+
+  let authVariantCalls = 0;
+  global.fetch = async () => {
+    authVariantCalls += 1;
+    return {
+      ok: false, status: 403, url: 'https://webvpn.neu.edu.cn/tpass/login',
+      redirected: true, headers: { get() { return 'text/html'; } },
+      text: async () => '<html>登录</html>'
+    };
+  };
+  try {
+    await assert.rejects(
+      t.requestJson(t.courseOutlineApiUrl('modules/dgcx/cxlb.do'), { variantRetryPolicy: 'retryable-only' }),
+      (error) => error.authFailure === true && /登录.*失效/.test(error.message)
+    );
+  } finally {
+    global.fetch = savedFetch;
+  }
+  assert.equal(authVariantCalls, 1);
 
   const outlineQuery = t.courseOutlineQuerySettings({ code: 'A-001', name: '测试', unit: '07', level: '1', grade: '2' });
   assert.deepStrictEqual(outlineQuery.map((item) => item.name), ['KCH', 'KCM', 'KKDWDM', 'KCCCDM', 'KCJBDM', '*order']);
-  assert.ok(outlineQuery.slice(0, 5).every((item) => item.builder === 'like'));
+  assert.ok(outlineQuery.slice(0, 5).every((item) => item.builder === 'include' && item.builderList === 'cbl_String'));
+  assert.deepStrictEqual(outlineQuery.slice(0, 5).map((item) => item.caption), ['课程代码', '课程名称', '开课单位', '课程层次', '课程级别']);
+  assert.deepStrictEqual(t.courseOutlineQuerySettings({ name: '复变' }), [
+    { name: 'KCM', caption: '课程名称', linkOpt: 'AND', builderList: 'cbl_String', builder: 'include', value: '复变' },
+    { name: '*order', value: '+KCH', linkOpt: 'AND', builder: 'equal' }
+  ]);
   assert.strictEqual(JSON.parse(t.courseOutlineListBody({ code: 'A-001' }, 3, 20).querySetting)[0].name, 'KCH');
   assert.notStrictEqual(t.courseOutlineKey({ KCH: 'A-001', BBWID: 'version-1', XNXQDM: '2025' }), t.courseOutlineKey({ KCH: 'A-001', BBWID: 'version-2', XNXQDM: '2025' }));
   const outlineExport = t.courseOutlineExportDocument({ key: 'A-001|version-1|2025', row: outlineSinglePayload.datas.cxkcxxx, endpoints: { 'cxkcxxx.do': { raw: outlineSinglePayload, records: outlineSingle.records } } });
   assert.strictEqual(outlineExport.schema, 'zhizhang-course-outline/v1');
   assert.strictEqual(outlineExport.endpoints['cxkcxxx.do'].raw.datas.cxkcxxx.MULTILINE, '第一行\n第二行');
+  const rawEnvelope = { code: '0', data: { payload: { datas: { cxkcxxx: { KCH: 'A-001' } } }, trace: 'preserve' } };
+  const normalizedEnvelope = t.courseOutlinePayloadFromResponse(rawEnvelope);
+  const envelopeResult = t.courseOutlineEndpointResult('cxkcxxx.do', normalizedEnvelope, { raw: rawEnvelope });
+  assert.strictEqual(envelopeResult.records[0].KCH, 'A-001');
+  assert.deepStrictEqual(envelopeResult.raw, rawEnvelope);
 
   // Input sanitization and strict calendar validation.
   assert.strictEqual(t.escapeHtml('<img src=x onerror=1>'), '&lt;img src=x onerror=1&gt;');
