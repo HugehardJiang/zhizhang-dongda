@@ -571,8 +571,13 @@ let allScheduleRequestSequence = 0;
 let allScheduleDetailRequestSequence = 0;
 let curriculumListRequestSequence = 0;
 let curriculumPlanRequestSequence = 0;
+let curriculumTextbookRequestSequence = 0;
 let courseOutlineDetailRequestSequence = 0;
 let sportProjectRequestSequence = 0;
+
+// 培养方案课程详情里的教材查询是一个独立的短期会话缓存。它不能写入
+// state.courseOutline，否则打开培养方案课程会污染课程大纲页的筛选和详情。
+const curriculumTextbookCache = new Map();
 
 const elements = {
   pageTitle: document.getElementById("pageTitle"),
@@ -1298,6 +1303,11 @@ function courseOutlineCollection(payload) {
       return path.length > 0 && envelopeKeys.has(String(path[path.length - 1]))
         ? { rows: [], shape: "empty", path, container: null, record: null }
         : null;
+    }
+    if (typeof value === "string") {
+      const text = value.trim();
+      if (!text || !/^[\[{]/.test(text)) return null;
+      try { return walk(JSON.parse(text), path, depth + 1); } catch { return null; }
     }
     if (Array.isArray(value)) {
       return { rows: value, shape: path[path.length - 1] === "rows" ? "rows" : "array", path, container: value };
@@ -2717,6 +2727,7 @@ function currentPortalPlanInfo(data) {
 function invalidateCurriculum() {
   curriculumListRequestSequence += 1;
   curriculumPlanRequestSequence += 1;
+  curriculumTextbookRequestSequence += 1;
   state.curriculum.loaded = false;
   state.curriculum.loading = false;
   state.curriculum.error = "";
@@ -2847,6 +2858,8 @@ async function loadCurriculumPlans() {
 
 async function loadCurriculumPlan(planId, showLoading = true) {
   const requestId = ++curriculumPlanRequestSequence;
+  curriculumTextbookRequestSequence += 1;
+  state.curriculum.courseDetail = null;
   let plan = state.curriculum.plans.find((item) => item.id === String(planId)) || state.curriculum.plans[0];
   if (!plan) return false;
   const directPlanApiAllowed = Boolean(plan.id) && !String(plan.id).startsWith("portal-name:");
@@ -3852,12 +3865,13 @@ async function exportCurriculumPdf() {
 function curriculumCourseDetailMarkup(detail) {
   if (!detail) return "";
   const row = detail?.row || {};
+  const textbook = detail.textbook || { status: "idle", candidates: [], items: [], error: "" };
   const fields = [
     ["课程名称", row.name], ["课程号", row.code], ["学分", row.credit], ["课程类别", row.category],
     ["课程性质", row.nature], ["考核方式", courseAssessmentLabel(row)], ["开课学期", curriculumSemesterLabel(row.semester, state.curriculum.selectedPlan || {})], ["修读要求", row.required], ["专业方向", row.direction], ["学时", row.hours], ["所属课组", row.groupName]
   ].filter(([, value]) => value);
   const rawText = row.raw && typeof row.raw === "object" ? JSON.stringify(row.raw, null, 2) : "";
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal curriculum-course-modal" role="dialog" aria-modal="true" aria-label="培养计划课程详情"><div class="detail-modal-head"><div><p class="eyebrow">CURRICULUM COURSE</p><h3>${escapeHtml(row.name || "课程详情")}</h3><p class="muted">${escapeHtml(row.code || "")}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-curriculum-course">关闭</button></div>${detail?.loading ? loadingCard("正在读取课程详情…") : ""}${detail?.error ? `<div class="error-card"><h3>课程详情接口未返回</h3><p>${escapeHtml(detail.error)}</p><p class="muted">已显示培养方案接口返回的全部可识别字段。</p></div>` : ""}<div class="detail-grid curriculum-detail-grid">${fields.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("") || `<div class="schedule-note">没有可识别的课程字段。</div>`}</div>${rawText ? `<details class="raw-details" open><summary>查看原系统全部字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal curriculum-course-modal" role="dialog" aria-modal="true" aria-label="培养计划课程详情"><div class="detail-modal-head"><div><p class="eyebrow">CURRICULUM COURSE</p><h3>${escapeHtml(row.name || "课程详情")}</h3><p class="muted">${escapeHtml(row.code || "")}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-curriculum-course">关闭</button></div>${detail?.loading ? loadingCard("正在读取课程详情…") : ""}${detail?.error ? `<div class="error-card"><h3>课程详情接口未返回</h3><p>${escapeHtml(detail.error)}</p><p class="muted">已显示培养方案接口返回的全部可识别字段。</p></div>` : ""}<div class="detail-grid curriculum-detail-grid">${fields.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("") || `<div class="schedule-note">没有可识别的课程字段。</div>`}</div>${renderCurriculumTextbookSection(textbook)}${rawText ? `<details class="raw-details" open><summary>查看原系统全部字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
 }
 
 function renderCurriculum() {
@@ -6788,6 +6802,7 @@ function clearActiveModalState() {
   state.selectedCourse = null;
   state.selectedCourseScope = "personal";
   state.scoreDetail = null;
+  curriculumTextbookRequestSequence += 1;
   state.curriculum.courseDetail = null;
   state.localSchedule.editorOpen = false;
   state.localSchedule.managerOpen = false;
@@ -11658,6 +11673,505 @@ async function readCourseOutlineDirect(path, body = {}, options = {}) {
   }
 }
 
+// --------------------- 培养方案课程教材查询 ---------------------
+// 这组函数只服务于培养方案课程详情弹窗。它们复用课程大纲的直接
+// WebVPN 请求和响应解析，但不读写 state.courseOutline，避免弹窗查询
+// 改变课程大纲页面的筛选条件、分页和详情状态。
+function normalizeCourseOutlineCourseCode(value) {
+  let text = String(value ?? "");
+  if (typeof text.normalize === "function") text = text.normalize("NFKC");
+  return text.replace(/\s+/g, "").trim().toUpperCase();
+}
+
+function normalizeCourseOutlineCourseName(value) {
+  let text = String(value ?? "");
+  if (typeof text.normalize === "function") text = text.normalize("NFKC");
+  return text
+    .replace(/[\uFF08（]/g, "(")
+    .replace(/[\uFF09）]/g, ")")
+    .replace(/[\u3010【]/g, "[")
+    .replace(/[\u3011】]/g, "]")
+    .replace(/\s+/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function courseOutlineCandidateFromRow(row = {}, index = 0) {
+  const raw = row && typeof row === "object" && row.row && typeof row.row === "object"
+    ? row.row
+    : row && typeof row === "object" ? row : {};
+  const read = (keys) => {
+    const value = courseOutlineFirstValue(raw, keys);
+    return value === undefined ? "" : courseOutlineText(value).trim();
+  };
+  return {
+    key: courseOutlineKey(raw, index),
+    row: raw,
+    code: normalizeCourseOutlineCourseCode(read(["KCH", "KCHM", "KCDM", "courseCode", "courseNo", "code"])),
+    name: read(["KCM", "KCMC", "courseName", "name", "course"]),
+    unit: read(["KKDWDM_DISPLAY", "KKDWMC", "KKDWDM", "unit", "unitName"]),
+    level: read(["KCCCDM_DISPLAY", "KCCCMC", "KCCCDM", "level"]),
+    grade: read(["KCJBDM_DISPLAY", "KCJBMC", "KCJBDM", "grade"]),
+    credits: read(["XF", "XKXF", "KCBKXF", "credit", "credits"]),
+    term: read(["XNXQDM_DISPLAY", "XNXQMC", "XNXQDM", "termCode", "term"]),
+    version: read(["BBWID", "bbwid", "versionId"]),
+    recordId: read(["WID", "wid", "id"])
+  };
+}
+
+function courseOutlineCandidateStableKey(candidate, index = 0) {
+  const row = candidate?.row || candidate || {};
+  const code = normalizeCourseOutlineCourseCode(candidate?.code ?? courseOutlineFirstValue(row, ["KCH", "courseCode", "courseNo", "code"]));
+  const name = normalizeCourseOutlineCourseName(candidate?.name ?? courseOutlineFirstValue(row, ["KCM", "KCMC", "courseName", "name"]));
+  const unit = normalizeCourseOutlineCourseName(candidate?.unit ?? courseOutlineFirstValue(row, ["KKDWDM_DISPLAY", "KKDWMC", "KKDWDM", "unit"]));
+  const level = normalizeCourseOutlineCourseName(candidate?.level ?? courseOutlineFirstValue(row, ["KCCCDM_DISPLAY", "KCCCMC", "KCCCDM", "level"]));
+  const term = normalizeCourseOutlineCourseName(candidate?.term ?? courseOutlineFirstValue(row, ["XNXQDM_DISPLAY", "XNXQMC", "XNXQDM", "termCode", "term"]));
+  const version = String(candidate?.version ?? courseOutlineFirstValue(row, ["BBWID", "bbwid", "versionId"]) ?? "").trim();
+  const recordId = String(candidate?.recordId ?? courseOutlineFirstValue(row, ["WID", "wid", "id"]) ?? "").trim();
+  if (version || recordId) return `id:${code}|${version}|${term}|${recordId}`;
+  return `row:${[code, name, unit, level, term, normalizeCourseOutlineCourseName(candidate?.credits ?? courseOutlineFirstValue(row, ["XF", "credit", "credits"]))].join("|")}`;
+}
+
+function dedupeCourseOutlineCandidates(rows = []) {
+  const result = [];
+  const seen = new Set();
+  (Array.isArray(rows) ? rows : []).forEach((row, index) => {
+    const candidate = row && row.row && row.code !== undefined
+      ? row
+      : courseOutlineCandidateFromRow(row, index);
+    const key = courseOutlineCandidateStableKey(candidate, index);
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push(candidate);
+  });
+  return result;
+}
+
+function courseOutlineExactCodeCandidates(rows, course) {
+  const expected = normalizeCourseOutlineCourseCode(course?.code ?? courseOutlineFirstValue(course, ["KCH", "courseCode", "courseNo", "code"]));
+  if (!expected) return [];
+  return dedupeCourseOutlineCandidates(rows).filter((candidate) => normalizeCourseOutlineCourseCode(candidate.code) === expected);
+}
+
+function courseOutlineExactNameCandidates(rows, course) {
+  const expected = normalizeCourseOutlineCourseName(course?.name ?? courseOutlineFirstValue(course, ["KCM", "KCMC", "courseName", "name"]));
+  if (!expected) return [];
+  return dedupeCourseOutlineCandidates(rows).filter((candidate) => normalizeCourseOutlineCourseName(candidate.name) === expected);
+}
+
+function rankCourseOutlineCodeCandidates(rows, course, plan = {}) {
+  const expectedName = normalizeCourseOutlineCourseName(course?.name);
+  const expectedTerm = normalizeCourseOutlineCourseName(course?.semester || plan?.term || plan?.semester);
+  return dedupeCourseOutlineCandidates(rows)
+    .map((candidate, index) => {
+      const row = candidate.row || {};
+      const completeness = [candidate.recordId, candidate.version, candidate.term].filter(Boolean).length;
+      const nameMatch = expectedName && normalizeCourseOutlineCourseName(candidate.name) === expectedName ? 1 : 0;
+      const termMatch = expectedTerm && normalizeCourseOutlineCourseName(candidate.term) === expectedTerm ? 1 : 0;
+      return { candidate, index, score: nameMatch * 1000 + termMatch * 100 + completeness * 10 + (row.KCH ? 1 : 0) };
+    })
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map((entry) => entry.candidate);
+}
+
+const CURRICULUM_TEXTBOOK_EXPLICIT_KEYS = new Set([
+  "CKSJXZY", "CKSJXZYDISPLAY", "CKSJXZYTEXT", "CKSJXZYNAME", "CKSJXZYMC",
+  "COURSETEXTBOOK", "COURSETEXTBOOKS", "TEXTBOOK", "TEXTBOOKS", "COURSEBOOK",
+  "COURSEBOOKS", "TEACHINGMATERIAL", "TEACHINGMATERIALS", "JCSJ", "JCSJZY",
+  "JCSJXZY"
+]);
+
+const CURRICULUM_TEXTBOOK_EXCLUDED_KEYS = new Set([
+  "CKSJJXZY", "CKSJJXZYDISPLAY", "CKSJJXZYTEXT", "CKSJJXZYNAME", "CKSJJXZYMC",
+  "XXKC", "XXKCDISPLAY", "XXKCTEXT", "XXKCNAME", "XXKCMC", "XKKC", "XKKCDISPLAY",
+  "XKKCTEXT", "XKKCNAME", "XXK", "XXKDISPLAY", "XXKTEXT", "SYZY", "SYZYDISPLAY",
+  "SYZYTEXT", "SYZYNAME", "QTSM", "QTSMDISPLAY", "QTSMTEXT", "WID", "BBWID",
+  "XNXQDM", "KCH", "KCHM", "KCDM", "KCM", "KCMC", "KKDWDM", "KCCCDM", "KCJBDM",
+  "KCLBDM", "KCXZDM", "KSLXDM", "SFXYJC", "SFXYJCDISPLAY", "JXBID", "KCFDM"
+]);
+const CURRICULUM_TEXTBOOK_CACHE_STATUSES = new Set(["success", "empty", "not-found"]);
+
+function courseOutlineCompactFieldKey(key) {
+  return String(key || "").trim().toUpperCase().replace(/[\s_-]+/g, "");
+}
+
+function courseOutlineTextbookFieldRole(key, value, index = 0) {
+  const compactKey = courseOutlineCompactFieldKey(key);
+  const readableLabel = courseOutlineFieldLabel(key);
+  if (CURRICULUM_TEXTBOOK_EXCLUDED_KEYS.has(compactKey)
+    || /^(?:CKSJJXZY|XXKC|XKKC|XXK|SYZY|QTSM|SFXYJC)(?:DISPLAY|TEXT|LABEL|NAME|MC)?$/.test(compactKey)
+    || /(?:DM|ID|UUID|WID|CODE|FLAG|STATUS|TYPE|INDEX)$/.test(compactKey)
+    || ["适用专业", "是否需要先修课程", "先修课程", "课外参考书及资料", "其他说明"].includes(readableLabel)) return "";
+  if (CURRICULUM_TEXTBOOK_EXPLICIT_KEYS.has(compactKey)) return "textbook";
+  if (courseOutlineFieldLabel(key) === "课程使用的教材") return "textbook";
+  if (courseOutlineValueIsEmpty(value)) return "";
+  if (/\|\||ISBN|出版社|出版(?:社)?|主编|编著|著[者作]?|作者|版(?:次|本)|edition|书名|教材|教学用书|参考书/i.test(courseOutlineText(value))) return "textbook";
+  // 接口的无名字段在不同部署中会变化，但不能只按字段顺序猜测：
+  // cxkcdgxx.do 还可能返回课程简介、考核说明等普通文本。只有字段名
+  // 本身带有教材/书目语义时，才把没有 ISBN 或分隔符的纯书名作为教材。
+  return /(?:TEXTBOOK|COURSEBOOK|TEACHINGMATERIAL|BOOKLIST|JCSJ|CKSJXZY|教材|教科)/i.test(compactKey)
+    ? "textbook"
+    : "";
+}
+
+function normalizeCourseOutlineTextbookItem(value, sourceKey = "") {
+  const rawText = courseOutlineText(value).trim();
+  if (!rawText) return null;
+  const parts = rawText.split("||").map((part) => part.trim());
+  const displayParts = parts.length > 1 ? parts.filter(Boolean) : [];
+  return {
+    text: rawText,
+    rawText,
+    displayText: displayParts.length > 1 ? displayParts.join(" · ") : rawText,
+    parts,
+    sourceKey: String(sourceKey || "")
+  };
+}
+
+function courseOutlineTextbookAtomicValues(value) {
+  if (Array.isArray(value)) return value.flatMap((item) => courseOutlineTextbookAtomicValues(item));
+  return [value];
+}
+
+function extractCourseOutlineTextbookItems(records = []) {
+  const values = [];
+  const sourceRecords = Array.isArray(records) ? records : [records];
+  sourceRecords.forEach((record, recordIndex) => {
+    if (!record || typeof record !== "object" || Array.isArray(record)) {
+      if (courseOutlineTextbookFieldRole("教材", record, recordIndex)) values.push(["教材", record]);
+      return;
+    }
+    Object.entries(record).forEach(([key, value], index) => {
+      if (courseOutlineTextbookFieldRole(key, value, index) !== "textbook") return;
+      courseOutlineTextbookAtomicValues(value).forEach((atomicValue) => values.push([key, atomicValue]));
+    });
+  });
+  const seen = new Set();
+  return values.map(([sourceKey, value]) => normalizeCourseOutlineTextbookItem(value, sourceKey)).filter((item) => {
+    if (!item) return false;
+    let key = item.rawText;
+    if (typeof key.normalize === "function") key = key.normalize("NFKC");
+    key = key.replace(/\s+/g, "").toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function curriculumTextbookState(row = {}) {
+  const code = normalizeCourseOutlineCourseCode(row?.code);
+  return {
+    status: code ? "loading-code" : "loading-name",
+    requestId: 0,
+    cacheKey: curriculumCourseKey(row),
+    lookupMode: code ? "code" : "name",
+    candidates: [],
+    selectedCandidate: null,
+    items: [],
+    error: "",
+    codeSearchDone: false,
+    nameSearchDone: false
+  };
+}
+
+function curriculumTextbookCacheSnapshot(textbook) {
+  return {
+    status: textbook.status,
+    lookupMode: textbook.lookupMode,
+    candidates: Array.isArray(textbook.candidates) ? textbook.candidates.slice() : [],
+    selectedCandidate: textbook.selectedCandidate || null,
+    items: Array.isArray(textbook.items) ? textbook.items.slice() : [],
+    error: "",
+    codeSearchDone: Boolean(textbook.codeSearchDone),
+    nameSearchDone: Boolean(textbook.nameSearchDone)
+  };
+}
+
+function applyCurriculumTextbookCache(textbook, entry) {
+  if (!entry) return false;
+  Object.assign(textbook, {
+    ...entry,
+    candidates: Array.isArray(entry.candidates) ? entry.candidates.slice() : [],
+    items: Array.isArray(entry.items) ? entry.items.slice() : [],
+    selectedCandidate: entry.selectedCandidate || null,
+    error: ""
+  });
+  return true;
+}
+
+function cacheCurriculumTextbookResult(textbook) {
+  if (!CURRICULUM_TEXTBOOK_CACHE_STATUSES.has(textbook.status)) return;
+  curriculumTextbookCache.set(textbook.cacheKey, curriculumTextbookCacheSnapshot(textbook));
+}
+
+function curriculumTextbookRequestIsCurrent(detail, requestId) {
+  return state.curriculum.courseDetail === detail
+    && Number(curriculumTextbookRequestSequence) === Number(requestId)
+    && Number(detail?.textbook?.requestId) === Number(requestId);
+}
+
+async function queryCourseOutlineCandidates(filters = {}, options = {}) {
+  if (IS_ANDROID_APP) throw new ApiError("Android 端不提供课程大纲查询");
+  const pageSize = Math.max(1, Math.min(100, Number(options.pageSize) || 100));
+  const response = await readCourseOutlineDirect(
+    COURSE_OUTLINE_LIST_PATH,
+    courseOutlineListBody(filters, 1, pageSize),
+    { timeoutMs: options.timeoutMs || COURSE_OUTLINE_REQUEST_TIMEOUT }
+  );
+  const normalized = normalizeCourseOutlineEndpointPayload(response.payload, COURSE_OUTLINE_LIST_PATH);
+  if (normalized.shape === "unknown") throw new ApiError("课程大纲目录返回格式无法识别");
+  return { ...normalized, rawResponse: response.rawResponse };
+}
+
+async function loadCurriculumTextbookCandidate(detail, candidate, options = {}) {
+  const row = candidate?.row || candidate || {};
+  const response = await readCourseOutlineDirect(
+    "cxkcdgxx.do",
+    courseOutlineDetailBody(row),
+    { timeoutMs: options.timeoutMs || COURSE_OUTLINE_REQUEST_TIMEOUT }
+  );
+  const normalized = normalizeCourseOutlineEndpointPayload(response.payload, "cxkcdgxx.do");
+  if (normalized.shape === "unknown") throw new ApiError("课程大纲教材接口返回格式无法识别");
+  return {
+    candidate,
+    records: normalized.records,
+    items: extractCourseOutlineTextbookItems(normalized.records),
+    rawResponse: response.rawResponse,
+    normalized
+  };
+}
+
+function curriculumTextbookStatusLabel(status) {
+  return ({
+    idle: "待查询",
+    "loading-code": "按课程代码查询",
+    "loading-name": "按课程名称查询",
+    "loading-detail": "读取课程大纲",
+    choosing: "请选择课程",
+    success: "已找到教材",
+    empty: "暂无教材信息",
+    "not-found": "暂未收录",
+    error: "查询失败"
+  })[String(status || "")] || "课程大纲";
+}
+
+function curriculumTextbookCandidateMeta(candidate = {}) {
+  return [
+    candidate.code ? `课程号：${candidate.code}` : "课程号：—",
+    candidate.unit ? `开课单位：${candidate.unit}` : "开课单位：—",
+    candidate.level ? `层次：${candidate.level}` : "层次：—",
+    candidate.credits ? `学分：${candidate.credits}` : "学分：—",
+    candidate.term ? `大纲学期：${candidate.term}` : "大纲学期：—"
+  ];
+}
+
+function renderCurriculumTextbookCandidates(candidates = []) {
+  return `<div class="curriculum-textbook-candidates" role="list">${(Array.isArray(candidates) ? candidates : []).map((candidate, index) => `<article class="curriculum-textbook-candidate" role="listitem"><div class="curriculum-textbook-candidate-copy"><strong>${escapeHtml(candidate.name || "未命名课程")}</strong><span>${escapeHtml(curriculumTextbookCandidateMeta(candidate).join(" · "))}</span></div><button class="button button-primary button-small" type="button" data-action="select-curriculum-textbook-candidate" data-curriculum-textbook-key="${escapeHtml(candidate.key || `candidate-${index}`)}">选择此课程</button></article>`).join("")}</div>`;
+}
+
+function renderCurriculumTextbookSection(textbookState = {}) {
+  const textbook = textbookState || {};
+  const status = String(textbook.status || "idle");
+  const candidates = Array.isArray(textbook.candidates) ? textbook.candidates : [];
+  const items = Array.isArray(textbook.items) ? textbook.items : [];
+  const loading = ["loading-code", "loading-name", "loading-detail"].includes(status);
+  const statusClass = loading ? "is-loading" : status === "success" ? "is-success" : ["error", "not-found"].includes(status) ? "is-error" : "";
+  const candidateChoiceHint = textbook.lookupMode === "code"
+    ? `按课程代码找到 ${candidates.length} 条课程大纲记录，请确认开课单位、层次、学分或大纲学期后选择。`
+    : `按课程名称找到 ${candidates.length} 条同名课程大纲，请确认开课单位、层次或学分后选择。`;
+  let content = "";
+  if (status === "choosing") {
+    content = `<div class="curriculum-textbook-choice"><p>${escapeHtml(candidateChoiceHint)}</p>${renderCurriculumTextbookCandidates(candidates)}</div>`;
+  } else if (status === "success" && items.length) {
+    content = `<div class="curriculum-textbook-items" role="list">${items.map((item, index) => `<article class="curriculum-textbook-item" role="listitem"><strong>教材 ${index + 1}</strong><div class="curriculum-textbook-item-text">${escapeHtml(item.displayText || item.rawText || item.text || "未提供")}</div>${item.sourceKey ? `<small>来源字段：${escapeHtml(item.sourceKey)}</small>` : ""}${item.displayText && item.rawText && item.displayText !== item.rawText ? `<div class="curriculum-textbook-item-raw"><span>原始教材文本</span><div>${escapeHtml(item.rawText)}</div></div>` : ""}</article>`).join("")}</div>`;
+  } else if (status === "empty") {
+    content = `<div class="curriculum-textbook-empty"><strong>课程大纲已收录此课程，但暂未提供教材信息</strong><span>可以重新读取，或${candidates.length > 1 ? "换一条课程大纲记录。" : "稍后再试。"}</span></div>`;
+  } else if (status === "not-found") {
+    content = `<div class="curriculum-textbook-empty is-not-found"><strong>课程大纲暂未收录此课程</strong><span>已按课程代码和课程名称完成精确匹配，没有找到可用的大纲记录。</span></div>`;
+  } else if (status === "error") {
+    const loginError = isCourseOutlineLoginError({ message: textbook.error });
+    content = `<div class="curriculum-textbook-error"><strong>${escapeHtml(loginError ? "教务系统登录已失效，请恢复登录后重试" : "课程大纲教材查询失败")}</strong><span>${escapeHtml(textbook.error || "网络或教务系统暂时没有响应，请稍后重试。")}</span></div>`;
+  } else if (loading) {
+    const copy = status === "loading-code"
+      ? "正在按课程代码查询课程大纲目录…"
+      : status === "loading-name"
+        ? "课程代码没有精确命中，正在按课程名称查询…"
+        : "正在读取匹配课程的教材信息…";
+    content = `<div class="curriculum-textbook-loading" role="status"><span class="curriculum-textbook-spinner" aria-hidden="true"></span><span>${escapeHtml(copy)}</span></div>`;
+  } else {
+    content = `<div class="curriculum-textbook-empty"><span>打开课程详情后自动查询课程使用教材。</span></div>`;
+  }
+  const actions = [];
+  if (["error", "empty", "not-found"].includes(status)) actions.push(`<button class="button button-ghost button-small" type="button" data-action="retry-curriculum-textbook">重新查询</button>`);
+  if (candidates.length > 1 && status !== "choosing" && status !== "loading-code" && status !== "loading-name") actions.push(`<button class="button button-ghost button-small" type="button" data-action="choose-another-curriculum-textbook">换一条课程大纲</button>`);
+  if (status === "success") actions.push(`<button class="button button-ghost button-small" type="button" data-action="refresh-curriculum-textbook">刷新教材</button>`);
+  return `<section class="curriculum-textbook-section" aria-labelledby="curriculum-textbook-title"><div class="curriculum-textbook-head"><div><h4 id="curriculum-textbook-title">课程使用教材</h4><p>来自课程大纲查询；课程代码优先，名称匹配需要你确认。</p></div><span class="curriculum-textbook-status ${statusClass}">${escapeHtml(curriculumTextbookStatusLabel(status))}</span></div>${content}${actions.length ? `<div class="curriculum-textbook-actions">${actions.join("")}</div>` : ""}</section>`;
+}
+
+function finishCurriculumTextbookLookup(detail, requestId, patch, shouldCache = true) {
+  if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+  Object.assign(detail.textbook, patch);
+  if (shouldCache) cacheCurriculumTextbookResult(detail.textbook);
+  render();
+  return true;
+}
+
+async function loadCurriculumTextbookCodeCandidates(detail, candidates, requestId, options = {}) {
+  if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+  const textbook = detail.textbook;
+  textbook.candidates = candidates;
+  let emptyCandidate = null;
+  let lastError = null;
+  for (const candidate of candidates) {
+    if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+    textbook.status = "loading-detail";
+    textbook.selectedCandidate = candidate;
+    textbook.error = "";
+    render();
+    try {
+      const result = await loadCurriculumTextbookCandidate(detail, candidate, options);
+      if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+      if (result.items.length) {
+        return finishCurriculumTextbookLookup(detail, requestId, {
+          status: "success",
+          lookupMode: "code",
+          items: result.items,
+          error: ""
+        });
+      }
+      emptyCandidate ||= candidate;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastError) {
+    return finishCurriculumTextbookLookup(detail, requestId, {
+      status: "error",
+      lookupMode: "code",
+      error: lastError?.message || "课程大纲教材接口读取失败"
+    }, false);
+  }
+  return finishCurriculumTextbookLookup(detail, requestId, {
+    status: "empty",
+    lookupMode: "code",
+    selectedCandidate: emptyCandidate || candidates[0] || null,
+    items: [],
+    error: ""
+  });
+}
+
+async function loadCurriculumCourseTextbook(detail = state.curriculum.courseDetail, options = {}) {
+  if (IS_ANDROID_APP || !detail?.row || state.curriculum.courseDetail !== detail) return false;
+  const row = detail.row;
+  const textbook = detail.textbook || (detail.textbook = curriculumTextbookState(row));
+  const requestId = ++curriculumTextbookRequestSequence;
+  textbook.requestId = requestId;
+  textbook.cacheKey ||= curriculumCourseKey(row);
+  if (options.force) curriculumTextbookCache.delete(textbook.cacheKey);
+  if (!options.force && applyCurriculumTextbookCache(textbook, curriculumTextbookCache.get(textbook.cacheKey))) {
+    render();
+    return true;
+  }
+
+  const code = normalizeCourseOutlineCourseCode(row.code);
+  const name = String(row.name || "").trim();
+  textbook.lookupMode = code ? "code" : "name";
+  textbook.status = code ? "loading-code" : "loading-name";
+  textbook.candidates = [];
+  textbook.selectedCandidate = null;
+  textbook.items = [];
+  textbook.error = "";
+  textbook.codeSearchDone = false;
+  textbook.nameSearchDone = false;
+  render();
+  try {
+    if (code) {
+      const codeResult = await queryCourseOutlineCandidates({ code }, options);
+      if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+      textbook.codeSearchDone = true;
+      const codeCandidates = rankCourseOutlineCodeCandidates(
+        courseOutlineExactCodeCandidates(codeResult.records, row),
+        row,
+        state.curriculum.selectedPlan || {}
+      );
+      if (codeCandidates.length) return loadCurriculumTextbookCodeCandidates(detail, codeCandidates, requestId, options);
+    }
+
+    if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+    textbook.lookupMode = "name";
+    textbook.status = "loading-name";
+    render();
+    if (!name) {
+      textbook.nameSearchDone = true;
+      return finishCurriculumTextbookLookup(detail, requestId, { status: "not-found", candidates: [], items: [], error: "" });
+    }
+    const nameResult = await queryCourseOutlineCandidates({ name }, options);
+    if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+    textbook.nameSearchDone = true;
+    const nameCandidates = courseOutlineExactNameCandidates(nameResult.records, row);
+    textbook.candidates = nameCandidates;
+    if (!nameCandidates.length) {
+      return finishCurriculumTextbookLookup(detail, requestId, { status: "not-found", items: [], error: "" });
+    }
+    textbook.status = "choosing";
+    textbook.error = "";
+    render();
+    return true;
+  } catch (error) {
+    return finishCurriculumTextbookLookup(detail, requestId, {
+      status: "error",
+      error: error?.message || "课程大纲教材查询失败"
+    }, false);
+  }
+}
+
+async function selectCurriculumTextbookCandidate(candidateKey) {
+  const detail = state.curriculum.courseDetail;
+  const textbook = detail?.textbook;
+  if (!detail || !textbook || !candidateKey) return false;
+  const candidate = (textbook.candidates || []).find((item) => item.key === candidateKey);
+  if (!candidate) return false;
+  const requestId = ++curriculumTextbookRequestSequence;
+  textbook.requestId = requestId;
+  textbook.status = "loading-detail";
+  textbook.lookupMode = "manual";
+  textbook.selectedCandidate = candidate;
+  textbook.items = [];
+  textbook.error = "";
+  render();
+  try {
+    const result = await loadCurriculumTextbookCandidate(detail, candidate);
+    if (!curriculumTextbookRequestIsCurrent(detail, requestId)) return false;
+    if (result.items.length) {
+      return finishCurriculumTextbookLookup(detail, requestId, { status: "success", items: result.items, error: "" });
+    }
+    return finishCurriculumTextbookLookup(detail, requestId, { status: "empty", items: [], error: "" });
+  } catch (error) {
+    return finishCurriculumTextbookLookup(detail, requestId, {
+      status: "error",
+      error: error?.message || "课程大纲教材接口读取失败"
+    }, false);
+  }
+}
+
+function retryCurriculumTextbookLookup(force = true) {
+  const detail = state.curriculum.courseDetail;
+  if (!detail) return false;
+  return loadCurriculumCourseTextbook(detail, { force });
+}
+
+function chooseAnotherCurriculumTextbook() {
+  const detail = state.curriculum.courseDetail;
+  const textbook = detail?.textbook;
+  if (!detail || !textbook || !textbook.candidates?.length) return false;
+  curriculumTextbookRequestSequence += 1;
+  textbook.requestId = curriculumTextbookRequestSequence;
+  textbook.status = "choosing";
+  textbook.error = "";
+  render();
+  return true;
+}
+
 async function courseOutlineMapWithConcurrency(items, limit, mapper) {
   const values = Array.isArray(items) ? items : [];
   const results = new Array(values.length);
@@ -12662,6 +13176,7 @@ elements.content.addEventListener("click", async (event) => {
     return openScoreDetail(index);
   }
   if (action === "close-curriculum-course") {
+    curriculumTextbookRequestSequence += 1;
     state.curriculum.courseDetail = null;
     render();
     return;
@@ -12673,9 +13188,23 @@ elements.content.addEventListener("click", async (event) => {
     const key = button.dataset.courseKey || "";
     const row = state.curriculum.courses.find((course) => curriculumCourseKey(course) === key);
     if (!row) return;
-    state.curriculum.courseDetail = { row, loading: false, error: "" };
+    curriculumTextbookRequestSequence += 1;
+    const detail = { row, loading: false, error: "", textbook: curriculumTextbookState(row) };
+    const cached = curriculumTextbookCache.get(detail.textbook.cacheKey);
+    if (cached) applyCurriculumTextbookCache(detail.textbook, cached);
+    state.curriculum.courseDetail = detail;
     render();
+    if (!cached) loadCurriculumCourseTextbook(detail).catch(() => undefined);
     return;
+  }
+  if (action === "select-curriculum-textbook-candidate") {
+    return selectCurriculumTextbookCandidate(button.dataset.curriculumTextbookKey || "");
+  }
+  if (action === "retry-curriculum-textbook" || action === "refresh-curriculum-textbook") {
+    return retryCurriculumTextbookLookup(true);
+  }
+  if (action === "choose-another-curriculum-textbook") {
+    return chooseAnotherCurriculumTextbook();
   }
   if (action === "retry-curriculum") {
     return IS_ANDROID_APP ? loadCurriculumPlans() : startCurriculumBootstrap();

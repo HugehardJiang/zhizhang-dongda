@@ -75,6 +75,11 @@ globalThis.__auditTest = {
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
   isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
   courseOutlineFieldLabel, courseOutlineTeachingReferenceSupplementalLabel, courseOutlineShapeLabel, renderCourseOutlineRecord, renderCourseOutlineBasicRecord, renderCourseOutlineSection,
+  normalizeCourseOutlineCourseCode, normalizeCourseOutlineCourseName, courseOutlineCandidateFromRow, dedupeCourseOutlineCandidates,
+  courseOutlineExactCodeCandidates, courseOutlineExactNameCandidates, rankCourseOutlineCodeCandidates,
+  courseOutlineTextbookFieldRole, normalizeCourseOutlineTextbookItem, extractCourseOutlineTextbookItems,
+  curriculumTextbookState, renderCurriculumTextbookCandidates, renderCurriculumTextbookSection, curriculumCourseDetailMarkup,
+  loadCurriculumCourseTextbook, selectCurriculumTextbookCandidate,
   COURSE_OUTLINE_SECTION_DEFINITIONS,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
@@ -290,6 +295,108 @@ const t = global.__auditTest;
   assert.match(realTeachingReferenceShape, /课外参考书及资料/);
   assert.match(realTeachingReferenceShape, /课程使用的教材/);
   assert.doesNotMatch(realTeachingReferenceShape, /教材参考信息 [12]/);
+
+  // Curriculum-plan textbook lookup uses strict normalized matching, keeps
+  // the original textbook text, and excludes prerequisites, extra references,
+  // applicable-major metadata, and other system fields.
+  assert.strictEqual(t.normalizeCourseOutlineCourseCode(' a - 001 '), 'A-001');
+  assert.strictEqual(t.normalizeCourseOutlineCourseName('复变函数与积分变换（双语）'), '复变函数与积分变换(双语)');
+  const curriculumCourseFixture = { code: 'A-001', name: '测试课程', credit: '2', semester: '1' };
+  const codeCandidates = t.courseOutlineExactCodeCandidates([
+    { KCH: ' a - 001 ', KCM: '测试课程', WID: 'one' },
+    { KCH: 'A-0010', KCM: '测试课程', WID: 'two' },
+    { KCH: 'A-001', KCM: '测试课程', WID: 'one' }
+  ], curriculumCourseFixture);
+  assert.strictEqual(codeCandidates.length, 1);
+  assert.strictEqual(codeCandidates[0].code, 'A-001');
+  const nameCandidates = t.courseOutlineExactNameCandidates([
+    { KCH: 'A-001', KCM: '测试课程', WID: 'one' },
+    { KCH: 'A-002', KCM: '测试课程（双语）', WID: 'two' },
+    { KCH: 'A-003', KCM: '其他测试课程', WID: 'three' }
+  ], curriculumCourseFixture);
+  assert.strictEqual(nameCandidates.length, 1);
+  assert.strictEqual(nameCandidates[0].name, '测试课程');
+  const textbookItems = t.extractCourseOutlineTextbookItems([{
+    KCH: 'A-001', KCM: '测试课程', WID: 'record',
+    CKSJXZY: '教材名称||2||ISBN 978-7-03-000000-0||出版社||作者',
+    CKSJJXZY: '课外参考书||出版社',
+    XXKC: '高等数学',
+    SYZY: '自动化',
+    SFXYJC: '否',
+    UNKNOWN_BOOK: '另一本教材（第二版）||出版社'
+  }]);
+  assert.strictEqual(textbookItems.length, 2);
+  assert.ok(textbookItems.some((item) => item.rawText.includes('教材名称||2||ISBN')));
+  assert.ok(textbookItems.some((item) => item.rawText.includes('另一本教材')));
+  assert.ok(textbookItems.every((item) => !item.rawText.includes('课外参考书')));
+  assert.strictEqual(t.courseOutlineTextbookFieldRole('ARBITRARY_FIELD', '普通课程说明', 1), '');
+  const nestedTextbook = t.normalizeCourseOutlineEndpointPayload({
+    code: '0',
+    datas: { cxkcdgxx: JSON.stringify({ rows: [{ CKSJXZY: 'JSON书目||ISBN 1' }] }) }
+  }, 'cxkcdgxx.do');
+  assert.strictEqual(nestedTextbook.records.length, 1);
+  assert.strictEqual(t.extractCourseOutlineTextbookItems(nestedTextbook.records)[0].rawText, 'JSON书目||ISBN 1');
+  assert.match(t.renderCurriculumTextbookSection({ status: 'loading-code', candidates: [], items: [] }), /正在按课程代码查询/);
+  assert.match(t.renderCurriculumTextbookSection({ status: 'choosing', candidates: [{ key: 'A|1', name: '测试课程', code: 'A-001' }], items: [] }), /选择此课程/);
+  assert.match(t.renderCurriculumTextbookSection({ status: 'not-found', candidates: [], items: [] }), /课程大纲暂未收录此课程/);
+  assert.match(t.renderCurriculumTextbookSection({ status: 'error', error: '教务系统登录已失效', candidates: [], items: [] }), /登录已失效/);
+  assert.match(t.curriculumCourseDetailMarkup({ row: curriculumCourseFixture, textbook: { status: 'empty', candidates: [], items: [] } }), /课程使用教材/);
+
+  // Exercise the real code-first request chain and the name-search fallback,
+  // including the manual candidate selection path. The fake transport keeps
+  // the test independent from the user's current WebVPN session.
+  const savedTextbookDetail = t.state.curriculum.courseDetail;
+  const savedTextbookView = t.state.view;
+  const savedTextbookFetch = global.fetch;
+  const textbookCalls = [];
+  const textbookResponse = (payload) => ({
+    ok: true, status: 200, url: 'https://webvpn.neu.edu.cn/test', redirected: false,
+    headers: { get() { return 'application/json'; } },
+    text: async () => JSON.stringify(payload)
+  });
+  global.fetch = async (url, options = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const form = new URLSearchParams(options.body?.toString() || '');
+    const query = form.get('querySetting') ? JSON.parse(form.get('querySetting')) : [];
+    const code = query.find((item) => item.name === 'KCH')?.value || '';
+    textbookCalls.push({ pathname, code });
+    if (pathname.endsWith('/cxlb.do')) {
+      if (code) return textbookResponse({ code: '0', datas: { cxlb: { rows: [{ KCH: 'A-001', KCM: '测试课程', WID: 'outline-code' }] } } });
+      return textbookResponse({ code: '0', datas: { cxlb: { rows: [
+        { KCH: 'A-001', KCM: '测试课程', WID: 'outline-name-1' },
+        { KCH: 'A-002', KCM: '测试课程', WID: 'outline-name-2' }
+      ] } } });
+    }
+    if (pathname.endsWith('/cxkcdgxx.do')) {
+      return textbookResponse({ code: '0', datas: { cxkcdgxx: { CKSJXZY: '教材名称||2||ISBN 1||出版社||作者' } } });
+    }
+    throw new Error(`unexpected textbook path: ${pathname}`);
+  };
+  try {
+    t.state.view = 'curriculum';
+    const codeDetail = { row: curriculumCourseFixture, textbook: t.curriculumTextbookState(curriculumCourseFixture) };
+    t.state.curriculum.courseDetail = codeDetail;
+    await t.loadCurriculumCourseTextbook(codeDetail, { force: true, timeoutMs: 1000 });
+    assert.strictEqual(codeDetail.textbook.status, 'success');
+    assert.strictEqual(codeDetail.textbook.lookupMode, 'code');
+    assert.strictEqual(codeDetail.textbook.items[0].rawText, '教材名称||2||ISBN 1||出版社||作者');
+    assert.deepStrictEqual(textbookCalls.map((call) => call.pathname.split('/').pop()), ['cxlb.do', 'cxkcdgxx.do']);
+
+    textbookCalls.length = 0;
+    const fallbackCourse = { code: 'A-404', name: '测试课程', credit: '2', semester: '1' };
+    const fallbackDetail = { row: fallbackCourse, textbook: t.curriculumTextbookState(fallbackCourse) };
+    t.state.curriculum.courseDetail = fallbackDetail;
+    await t.loadCurriculumCourseTextbook(fallbackDetail, { force: true, timeoutMs: 1000 });
+    assert.strictEqual(fallbackDetail.textbook.status, 'choosing');
+    assert.strictEqual(fallbackDetail.textbook.candidates.length, 2);
+    await t.selectCurriculumTextbookCandidate(fallbackDetail.textbook.candidates[1].key);
+    assert.strictEqual(fallbackDetail.textbook.status, 'success');
+    assert.strictEqual(fallbackDetail.textbook.lookupMode, 'manual');
+  } finally {
+    global.fetch = savedTextbookFetch;
+    t.state.curriculum.courseDetail = savedTextbookDetail;
+    t.state.view = savedTextbookView;
+  }
 
   const gradingMethod = t.renderCourseOutlineRecord({ KCCJPDFF: '平时成绩30%＋期末成绩70%', KSLXDM: '02' }, { forceReadable: true, keepTechnicalCollapsed: false });
   assert.match(gradingMethod, /课程成绩评定方法/);
