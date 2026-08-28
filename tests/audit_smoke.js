@@ -75,6 +75,7 @@ globalThis.__auditTest = {
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
   isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
   courseOutlineFieldLabel, courseOutlineShapeLabel, renderCourseOutlineRecord,
+  COURSE_OUTLINE_SECTION_DEFINITIONS,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
   setPostAllScheduleList(fn) { postAllScheduleList = fn; }
@@ -228,6 +229,7 @@ const t = global.__auditTest;
   assert.strictEqual(t.courseOutlineFieldLabel('KCM'), '课程名称');
   assert.strictEqual(t.courseOutlineFieldLabel('KCFL1_DISPLAY'), '课程分类');
   assert.strictEqual(t.courseOutlineShapeLabel('paged'), '分页列表');
+  assert.strictEqual(t.COURSE_OUTLINE_SECTION_DEFINITIONS[1].endpoint, 'cxkcdgxx.do');
   const readableOutline = t.renderCourseOutlineRecord({
     KCH: 'A1304000001', KCM: 'MATLAB语言与应用', XF: 1.75, XS: 32,
     KCCCDM: '02', KCCCDM_DISPLAY: '本科', KSLXDM: '02',
@@ -241,18 +243,20 @@ const t = global.__auditTest;
   assert.doesNotMatch(readableOutline, /class="course-outline-field"><span>KCM<\/span>/);
 
   const teachingReferences = t.renderCourseOutlineRecord({
-    KCH: 'A1308000022', KCM: '人工智能导论', SYZY: '自动化2025级、电气工程2025级',
+    KCH: 'A1308000022', KCM: '人工智能导论', WID: 'record-1', BBWID: 'version-1',
+    SYZY: '自动化2025级、电气工程2025级',
     SFXYJC_DISPLAY: '否', SFXYJC: '0', XKKC: '人工智能数学基础',
     CKSJJXZY: '《机器学习》参考资料', QTSM: '无'
   }, { forceReadable: true, supplementalLabel: '教材参考信息' });
   assert.match(teachingReferences, /适用专业/);
   assert.match(teachingReferences, /是否需要先修课程/);
   assert.match(teachingReferences, /先修课程/);
-  assert.match(teachingReferences, /参考书籍及资料/);
+  assert.match(teachingReferences, /课程使用的教材/);
   assert.match(teachingReferences, /其他说明/);
+  assert.match(teachingReferences, /系统信息（2 项）/);
   assert.doesNotMatch(teachingReferences, /补充信息（/);
 
-  const gradingMethod = t.renderCourseOutlineRecord({ KCCJPDFF: '平时成绩30%＋期末成绩70%', KSLXDM: '02' }, { forceReadable: true });
+  const gradingMethod = t.renderCourseOutlineRecord({ KCCJPDFF: '平时成绩30%＋期末成绩70%', KSLXDM: '02' }, { forceReadable: true, keepTechnicalCollapsed: false });
   assert.match(gradingMethod, /课程成绩评定方法/);
   assert.doesNotMatch(gradingMethod, /系统信息（/);
 

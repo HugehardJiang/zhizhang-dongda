@@ -11262,16 +11262,16 @@ function courseDataAttributes(course, scope = "personal") {
 
 const COURSE_OUTLINE_SECTION_DEFINITIONS = Object.freeze([
   { title: "基本信息", endpoint: "cxkcxxx.do", hint: "课程编号、名称、学分、学时及原系统课程属性" },
+  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "适用专业、先修课程、参考资料和其他课程信息", forceReadable: true, supplementalLabel: "教材参考信息" },
   { title: "课程简介", endpoint: "cxkcjcxx.do", hint: "课程中文简介与英文简介" },
   { title: "课程目标", endpoint: "cxkcmbxx.do", hint: "课程目标与目标文本" },
   { title: "毕业要求支撑", endpoint: "kcmbybyzccx.do", hint: "毕业要求、支撑程度和权重" },
   { title: "教学安排", endpoint: "cxkcmbhnrdgx.do", hint: "章节、教学内容、学时与教学方法" },
-  { title: "课程成绩评定方法", endpoint: "cxkccjpdff.do", hint: "课程总评成绩的组成、评定方法及各环节比例", forceReadable: true, supplementalLabel: "成绩评定信息" },
+  { title: "课程成绩评定方法", endpoint: "cxkccjpdff.do", hint: "课程总评成绩的组成、评定方法及各环节比例", forceReadable: true, keepTechnicalCollapsed: false, supplementalLabel: "成绩评定信息" },
   { title: "考核形式", endpoint: "cxkhxs.do", hint: "考核形式字典与顺序" },
   { title: "目标考核关系", endpoint: "cxkhxscjzb.do", hint: "课程目标与考核环节的对应关系" },
   { title: "达成标准", endpoint: "cxkcmbdcbz.do", hint: "课程目标达成标准与评价标准" },
   { title: "成绩评定", endpoint: "cxkhhjsz.do", hint: "考核环节、目标权重和成绩计算信息" },
-  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "适用专业、先修课程、参考资料和其他课程信息", forceReadable: true, supplementalLabel: "教材参考信息" },
   { title: "质量改进", endpoint: "cxkczlpjhgjjz.do", hint: "课程质量评价与持续改进记录" },
   { title: "编制信息", endpoint: "cxzbrxgxx.do", hint: "制订、审核、批准与日期" },
   { title: "附件", endpoint: "cxkcdgfj.do", hint: "原系统返回的附件字段；不猜测下载地址" }
@@ -11312,8 +11312,8 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
   SFXYJC: "是否需要先修课程（代码）",
   XKKC: "先修课程",
   XXK: "先修课程",
-  CKSJJXZY: "参考书籍及资料",
-  CKSJXZY: "参考书籍及资料",
+  CKSJJXZY: "课程使用的教材",
+  CKSJXZY: "课程使用的教材",
   QTSM: "其他说明",
   KSLXDM: "考核方式（代码）",
   KSLXDM_DISPLAY: "考核方式",
@@ -11820,7 +11820,7 @@ function renderCourseOutlineRecord(record, options = {}) {
       empty.push([key, value]);
       return;
     }
-    if (!forceReadable && courseOutlineIsTechnicalField(key, record)) {
+    if ((!forceReadable || options.keepTechnicalCollapsed !== false) && courseOutlineIsTechnicalField(key, record)) {
       technical.push([key, value]);
       return;
     }
