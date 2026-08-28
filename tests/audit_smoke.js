@@ -74,7 +74,7 @@ globalThis.__auditTest = {
   courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
   isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
-  courseOutlineFieldLabel, courseOutlineShapeLabel, renderCourseOutlineRecord, renderCourseOutlineBasicRecord, renderCourseOutlineSection,
+  courseOutlineFieldLabel, courseOutlineTeachingReferenceSupplementalLabel, courseOutlineShapeLabel, renderCourseOutlineRecord, renderCourseOutlineBasicRecord, renderCourseOutlineSection,
   COURSE_OUTLINE_SECTION_DEFINITIONS,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
@@ -228,6 +228,7 @@ const t = global.__auditTest;
   // and in the untouched raw response/export.
   assert.strictEqual(t.courseOutlineFieldLabel('KCM'), '课程名称');
   assert.strictEqual(t.courseOutlineFieldLabel('KCFL1_DISPLAY'), '课程分类');
+  assert.strictEqual(t.courseOutlineFieldLabel('XXKC'), '先修课程');
   assert.strictEqual(t.courseOutlineShapeLabel('paged'), '分页列表');
   assert.strictEqual(t.COURSE_OUTLINE_SECTION_DEFINITIONS[1].endpoint, 'cxkcdgxx.do');
   const readableOutline = t.renderCourseOutlineRecord({
@@ -274,10 +275,21 @@ const t = global.__auditTest;
   assert.match(teachingReferences, /适用专业/);
   assert.match(teachingReferences, /是否需要先修课程/);
   assert.match(teachingReferences, /先修课程/);
-  assert.match(teachingReferences, /课程使用的教材/);
+  assert.match(teachingReferences, /课外参考书及资料/);
   assert.match(teachingReferences, /其他说明/);
-  assert.match(teachingReferences, /系统信息（2 项）/);
+  assert.match(teachingReferences, /系统信息（3 项）/);
   assert.doesNotMatch(teachingReferences, /补充信息（/);
+
+  const realTeachingReferenceShape = t.renderCourseOutlineRecord({
+    XXKC: '高等数学（一）、高等数学（二）',
+    CKSJJXZY: '1.复变函数（第四版）\n2.积分变换',
+    UNKNOWN_REFERENCE_FIELD: '课程先修信息',
+    UNKNOWN_TEXTBOOK_FIELD: '复变函数与积分变换||2||978-7-03-054365-3||科学出版社||宋叔尼 张国伟 孙涛'
+  }, { forceReadable: true, supplementalLabel: '教材参考信息', supplementalLabelResolver: t.courseOutlineTeachingReferenceSupplementalLabel });
+  assert.match(realTeachingReferenceShape, /先修课程/);
+  assert.match(realTeachingReferenceShape, /课外参考书及资料/);
+  assert.match(realTeachingReferenceShape, /课程使用的教材/);
+  assert.doesNotMatch(realTeachingReferenceShape, /教材参考信息 [12]/);
 
   const gradingMethod = t.renderCourseOutlineRecord({ KCCJPDFF: '平时成绩30%＋期末成绩70%', KSLXDM: '02' }, { forceReadable: true, keepTechnicalCollapsed: false });
   assert.match(gradingMethod, /课程成绩评定方法/);

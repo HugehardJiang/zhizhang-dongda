@@ -11262,7 +11262,7 @@ function courseDataAttributes(course, scope = "personal") {
 
 const COURSE_OUTLINE_SECTION_DEFINITIONS = Object.freeze([
   { title: "基本信息", endpoint: "cxkcxxx.do", hint: "课程编号、名称、学分、学时及原系统课程属性" },
-  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "适用专业、先修课程、参考资料和其他课程信息", forceReadable: true, supplementalLabel: "教材参考信息" },
+  { title: "教材参考 / 先修", endpoint: "cxkcdgxx.do", hint: "适用专业、先修课程、课外参考书和课程使用教材", forceReadable: true, supplementalLabel: "教材参考信息", supplementalLabelResolver: courseOutlineTeachingReferenceSupplementalLabel },
   { title: "课程简介", endpoint: "cxkcjcxx.do", hint: "课程中文简介与英文简介" },
   { title: "课程目标", endpoint: "cxkcmbxx.do", hint: "课程目标与目标文本" },
   { title: "毕业要求支撑", endpoint: "kcmbybyzccx.do", hint: "毕业要求、支撑程度和权重" },
@@ -11314,9 +11314,10 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
   SYZY: "适用专业",
   SFXYJC_DISPLAY: "是否需要先修课程",
   SFXYJC: "是否需要先修课程（代码）",
+  XXKC: "先修课程",
   XKKC: "先修课程",
   XXK: "先修课程",
-  CKSJJXZY: "课程使用的教材",
+  CKSJJXZY: "课外参考书及资料",
   CKSJXZY: "课程使用的教材",
   QTSM: "其他说明",
   KSLXDM: "考核方式（代码）",
@@ -11369,7 +11370,7 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
 
 const COURSE_OUTLINE_TECHNICAL_FIELD_KEYS = new Set([
   "WID", "BBWID", "XNXQDM", "KKDWDM", "KCCCDM", "KCJBDM", "KCLBDM", "KCXZDM",
-  "KSLXDM", "JXBID", "KCFDM"
+  "KSLXDM", "SFXYJC", "JXBID", "KCFDM"
 ]);
 
 function courseOutlineValueIsEmpty(value) {
@@ -11401,6 +11402,17 @@ function courseOutlineFieldLabel(key) {
   // 少数部署会直接返回中文字段名；这种情况无需再翻译。
   if (/[\u3400-\u9fff]/.test(normalizedKey)) return normalizedKey;
   return "补充信息";
+}
+
+function courseOutlineTeachingReferenceSupplementalLabel(key, value, index) {
+  const text = courseOutlineText(value).trim();
+  // cxkcdgxx.do 的不同部署会给这两项使用不同的内部字段名。教材记录
+  // 通常包含 || 分隔的书目信息，先修课程则是课程名称列表；优先按内容
+  // 识别，只有遇到完全未知的值时才使用原始返回顺序兜底。
+  if (/\|\||ISBN|出版社|主编|著[者作]?|版\)/i.test(text)) return "课程使用的教材";
+  if (index === 0 || /(?:先修|高等数学|大学英语|大学物理|线性代数|概率论|程序设计)/.test(text)) return "先修课程";
+  if (index === 1) return "课程使用的教材";
+  return `教材参考信息 ${index + 1}`;
 }
 
 function courseOutlineIsTechnicalField(key, record) {
@@ -11921,10 +11933,17 @@ function renderCourseOutlineAuxiliaryFields(groups = {}, options = {}) {
   const empty = Array.isArray(groups.empty) ? groups.empty : [];
   const supplementalLabel = String(options.supplementalLabel || "补充信息");
   const forceReadable = options.forceReadable === true;
+  const supplementalFieldLabel = (key, value, index) => {
+    if (typeof options.supplementalLabelResolver === "function") {
+      const resolved = options.supplementalLabelResolver(key, value, index);
+      if (resolved) return String(resolved);
+    }
+    return `${supplementalLabel} ${index + 1}`;
+  };
   const supplementalMarkup = supplemental.length
     ? forceReadable
-      ? `<div class="course-outline-record course-outline-readable-supplemental">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`${supplementalLabel} ${index + 1}`, value, { source: key, showSource: false, className: "is-supplemental" })).join("")}</div>`
-      : `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`补充信息 ${index + 1}`, value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
+      ? `<div class="course-outline-record course-outline-readable-supplemental">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(supplementalFieldLabel(key, value, index), value, { source: key, showSource: false, className: "is-supplemental" })).join("")}</div>`
+      : `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(supplementalFieldLabel(key, value, index), value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
     : "";
   const technicalMarkup = technical.length
     ? `<details class="course-outline-more-fields course-outline-technical-fields"><summary>系统信息（${technical.length} 项）</summary><p class="course-outline-more-fields-hint">这些是教务系统内部编码，通常不影响阅读；需要核对原系统数据时可展开查看。</p><div class="course-outline-record">${technical.map(([key, value]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), value, { source: key, showSource: true, className: "is-technical" })).join("")}</div></details>`
@@ -11960,7 +11979,10 @@ function renderCourseOutlineRecord(record, options = {}) {
   });
 
   const readableMarkup = readable.map(([label, value]) => courseOutlineFieldMarkup(label, value)).join("");
-  const auxiliary = renderCourseOutlineAuxiliaryFields({ technical, supplemental, empty }, { forceReadable, supplementalLabel });
+  const auxiliary = renderCourseOutlineAuxiliaryFields(
+    { technical, supplemental, empty },
+    { forceReadable, supplementalLabel, supplementalLabelResolver: options.supplementalLabelResolver }
+  );
   return `<div class="course-outline-record course-outline-readable-record">${readableMarkup || (!supplemental.length && !technical.length ? `<div class="course-outline-empty">原系统没有提供可显示的课程信息。</div>` : "")}</div>${auxiliary}`;
 }
 
