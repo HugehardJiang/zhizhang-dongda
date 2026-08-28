@@ -11299,6 +11299,10 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
   KCJBDM_DISPLAY: "课程级别",
   KCJBMC: "课程级别",
   KCLBDM: "课程类别（代码）",
+  KCFL1: "课程分类（代码）",
+  KCF1: "课程分类（代码）",
+  KCFDL: "课程分类（代码）",
+  KCFDM: "课程分类（代码）",
   KCLBDM_DISPLAY: "课程类别",
   KCLBMC: "课程类别",
   KCXZDM: "课程性质（代码）",
@@ -11350,6 +11354,7 @@ const COURSE_OUTLINE_FIELD_LABELS = Object.freeze({
   CJPDFF: "成绩评定方法",
   CJPDFF_DISPLAY: "成绩评定方法",
   SFWHCJGC: "文化基础课程",
+  JYKKXQDM: "建议开课学期（代码）",
   KSSJ: "考试时间",
   KSSJ_DISPLAY: "考试时间",
   FZR: "课程负责人",
@@ -11400,10 +11405,15 @@ function courseOutlineFieldLabel(key) {
 
 function courseOutlineIsTechnicalField(key, record) {
   const normalizedKey = String(key || "").trim();
-  if (courseOutlineHasReadableAlias(record, normalizedKey)) return false;
+  const codeLike = COURSE_OUTLINE_TECHNICAL_FIELD_KEYS.has(normalizedKey)
+    || /(?:DM|ID|UUID|WID)$/i.test(normalizedKey);
+  // When the same value has both a code field and a *_DISPLAY/name field,
+  // keep only the readable value in the primary view. The code is still
+  // available under “系统信息” and in the raw response.
+  if (codeLike && courseOutlineHasReadableAlias(record, normalizedKey)) return true;
   if (COURSE_OUTLINE_TECHNICAL_FIELD_KEYS.has(normalizedKey)) return true;
   // 不认识的新字段也不要把类似 XXXXXXDM / XXXXXXID 的内部代码直接铺在主界面。
-  return /(?:DM|ID|UUID|WID)$/i.test(normalizedKey) && !["KCH", "KCHM", "KCDM"].includes(normalizedKey);
+  return codeLike && !["KCH", "KCHM", "KCDM"].includes(normalizedKey);
 }
 
 function courseOutlineShapeLabel(shape) {
@@ -11415,6 +11425,106 @@ function courseOutlineShapeLabel(shape) {
     empty: "暂无内容",
     unknown: "原始响应"
   })[shape] || "已读取";
+}
+
+const COURSE_OUTLINE_BASIC_GROUP_DEFINITIONS = Object.freeze([
+  {
+    id: "overview",
+    title: "课程概况",
+    fields: [
+      { label: "课程名称", valueKeys: ["KCM", "KCMC", "courseName", "name"], wide: true },
+      { label: "课程号", valueKeys: ["KCH", "KCHM", "KCDM", "courseCode", "courseNo", "code"] },
+      { label: "开课单位", valueKeys: ["KKDWDM_DISPLAY", "KKDWMC", "unit", "unitName"], codeKeys: ["KKDWDM"] },
+      { label: "建议开课学期", valueKeys: ["JYKKXQ_DISPLAY", "JYKKXQ", "recommendedTerm"] }
+    ]
+  },
+  {
+    id: "attributes",
+    title: "课程属性",
+    fields: [
+      { label: "课程分类", valueKeys: ["KCFL1_DISPLAY", "KCF1_DISPLAY", "KCFDL_DISPLAY", "KCLBDM_DISPLAY", "KCLBMC", "category"], codeKeys: ["KCFL1", "KCF1", "KCFDL", "KCLBDM"] },
+      { label: "课程性质", valueKeys: ["KCXZDM_DISPLAY", "KCXZMC", "courseNature", "nature"], codeKeys: ["KCXZDM"] },
+      { label: "课程层次", valueKeys: ["KCCCDM_DISPLAY", "KCCCMC", "level"], codeKeys: ["KCCCDM"] },
+      { label: "课程级别", valueKeys: ["KCJBDM_DISPLAY", "KCJBMC", "grade"], codeKeys: ["KCJBDM"] },
+      { label: "考核方式", valueKeys: ["KSLXDM_DISPLAY", "KSLXMC", "KSFS_DISPLAY", "KSFSMC", "assessment", "examType"], codeKeys: ["KSLXDM"] },
+      { id: "culturalFoundation", label: "文化基础课程", valueKeys: ["SFWHCJGC_DISPLAY", "culturalFoundation"], fallbackKeys: ["SFWHCJGC"], codeKeys: ["SFWHCJGC"] }
+    ]
+  },
+  {
+    id: "hours",
+    title: "学分与学时",
+    fields: [
+      { label: "学分", valueKeys: ["XF", "credit", "credits"] },
+      { label: "总学时", valueKeys: ["XS", "totalHours"] },
+      { label: "课堂教学学时", valueKeys: ["KTJSXS", "classHours"] },
+      { label: "实验学时", valueKeys: ["SYXS", "labHours"] },
+      { label: "实践学时", valueKeys: ["SJIXS", "SJXS", "practiceHours"] },
+      { label: "讨论学时", valueKeys: ["TLXS", "discussionHours"] }
+    ]
+  }
+]);
+
+function courseOutlineBasicFieldValue(record, field, usedKeys) {
+  const values = [];
+  const collect = (keys, transform = (value) => value) => (keys || []).forEach((key) => {
+    if (!Object.prototype.hasOwnProperty.call(record || {}, key)) return;
+    const value = record[key];
+    if (courseOutlineValueIsEmpty(value)) return;
+    const displayValue = transform(value);
+    const text = courseOutlineText(displayValue);
+    if (!values.some((item) => item.text === text)) values.push({ key, value: displayValue, text });
+  });
+  collect(field?.valueKeys);
+  if (!values.length) {
+    collect(field?.fallbackKeys, (value) => {
+      if (field?.id === "culturalFoundation") {
+        const normalized = String(value).trim().toLowerCase();
+        if (["0", "否", "no", "false"].includes(normalized)) return "否";
+        if (["1", "是", "yes", "true"].includes(normalized)) return "是";
+      }
+      return value;
+    });
+  }
+  values.forEach(({ key }) => usedKeys?.add(key));
+  if (!values.length) return undefined;
+  return values.length === 1 ? values[0].value : values.map((item) => item.text).join("、");
+}
+
+function courseOutlineBasicFieldMarkup(field, value) {
+  return `<div class="course-outline-basic-field${field.wide ? " is-wide" : ""}"><span>${escapeHtml(field.label)}</span><div class="course-outline-basic-value">${courseOutlineValueMarkup(value)}</div></div>`;
+}
+
+function renderCourseOutlineBasicRecord(record) {
+  if (!record || typeof record !== "object") return `<div class="course-outline-value"><pre>${escapeHtml(courseOutlineText(record))}</pre></div>`;
+  const usedKeys = new Set();
+  const knownTechnicalKeys = new Set(["WID", "BBWID", "XNXQDM"]);
+  const groups = COURSE_OUTLINE_BASIC_GROUP_DEFINITIONS.map((group) => {
+    const fields = group.fields.map((field) => {
+      const value = courseOutlineBasicFieldValue(record, field, usedKeys);
+      (field.codeKeys || []).forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(record, key)) knownTechnicalKeys.add(key);
+      });
+      return value === undefined ? "" : courseOutlineBasicFieldMarkup(field, value);
+    }).filter(Boolean).join("");
+    return fields
+      ? `<section class="course-outline-basic-group course-outline-basic-group-${escapeHtml(group.id)}"><h4>${escapeHtml(group.title)}</h4><div class="course-outline-basic-fields">${fields}</div></section>`
+      : "";
+  }).filter(Boolean).join("");
+
+  const technical = [];
+  const supplemental = [];
+  const empty = [];
+  Object.entries(record).forEach(([key, value]) => {
+    if (usedKeys.has(key)) return;
+    if (courseOutlineValueIsEmpty(value)) {
+      empty.push([key, value]);
+      return;
+    }
+    if (knownTechnicalKeys.has(key) || courseOutlineIsTechnicalField(key, record)) technical.push([key, value]);
+    else supplemental.push([key, value]);
+  });
+  const auxiliary = renderCourseOutlineAuxiliaryFields({ technical, supplemental, empty });
+  return `<div class="course-outline-basic-record">${groups || `<div class="course-outline-empty">原系统没有提供可显示的基本信息。</div>`}</div>${auxiliary}`;
 }
 
 function courseOutlinePayloadFromResponse(response) {
@@ -11805,6 +11915,26 @@ function courseOutlineFieldMarkup(label, value, options = {}) {
   return `<div class="course-outline-field${options.className ? ` ${options.className}` : ""}"><span>${escapeHtml(label)}</span><div class="course-outline-field-content">${courseOutlineValueMarkup(value)}${source}</div></div>`;
 }
 
+function renderCourseOutlineAuxiliaryFields(groups = {}, options = {}) {
+  const technical = Array.isArray(groups.technical) ? groups.technical : [];
+  const supplemental = Array.isArray(groups.supplemental) ? groups.supplemental : [];
+  const empty = Array.isArray(groups.empty) ? groups.empty : [];
+  const supplementalLabel = String(options.supplementalLabel || "补充信息");
+  const forceReadable = options.forceReadable === true;
+  const supplementalMarkup = supplemental.length
+    ? forceReadable
+      ? `<div class="course-outline-record course-outline-readable-supplemental">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`${supplementalLabel} ${index + 1}`, value, { source: key, showSource: false, className: "is-supplemental" })).join("")}</div>`
+      : `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`补充信息 ${index + 1}`, value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
+    : "";
+  const technicalMarkup = technical.length
+    ? `<details class="course-outline-more-fields course-outline-technical-fields"><summary>系统信息（${technical.length} 项）</summary><p class="course-outline-more-fields-hint">这些是教务系统内部编码，通常不影响阅读；需要核对原系统数据时可展开查看。</p><div class="course-outline-record">${technical.map(([key, value]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), value, { source: key, showSource: true, className: "is-technical" })).join("")}</div></details>`
+    : "";
+  const emptyMarkup = empty.length
+    ? `<details class="course-outline-more-fields course-outline-empty-fields"><summary>未填写信息（${empty.length} 项）</summary><div class="course-outline-record">${empty.map(([key]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), "未提供", { source: key, showSource: true, className: "is-empty" })).join("")}</div></details>`
+    : "";
+  return `${supplementalMarkup}${technicalMarkup}${emptyMarkup}`;
+}
+
 function renderCourseOutlineRecord(record, options = {}) {
   if (!record || typeof record !== "object") return `<div class="course-outline-value"><pre>${escapeHtml(courseOutlineText(record))}</pre></div>`;
   const entries = Object.entries(record);
@@ -11830,18 +11960,8 @@ function renderCourseOutlineRecord(record, options = {}) {
   });
 
   const readableMarkup = readable.map(([label, value]) => courseOutlineFieldMarkup(label, value)).join("");
-  const supplementalMarkup = supplemental.length
-    ? forceReadable
-      ? `<div class="course-outline-record course-outline-readable-supplemental">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`${supplementalLabel} ${index + 1}`, value, { source: key, showSource: false, className: "is-supplemental" })).join("")}</div>`
-      : `<details class="course-outline-more-fields"><summary>补充信息（${supplemental.length} 项）</summary><div class="course-outline-record">${supplemental.map(([key, value], index) => courseOutlineFieldMarkup(`补充信息 ${index + 1}`, value, { source: key, showSource: true, className: "is-supplemental" })).join("")}</div></details>`
-    : "";
-  const technicalMarkup = technical.length
-    ? `<details class="course-outline-more-fields course-outline-technical-fields"><summary>系统信息（${technical.length} 项）</summary><p class="course-outline-more-fields-hint">这些是教务系统内部编码，通常不影响阅读；需要核对原系统数据时可展开查看。</p><div class="course-outline-record">${technical.map(([key, value]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), value, { source: key, showSource: true, className: "is-technical" })).join("")}</div></details>`
-    : "";
-  const emptyMarkup = empty.length
-    ? `<details class="course-outline-more-fields course-outline-empty-fields"><summary>未填写信息（${empty.length} 项）</summary><div class="course-outline-record">${empty.map(([key]) => courseOutlineFieldMarkup(courseOutlineFieldLabel(key), "未提供", { source: key, showSource: true, className: "is-empty" })).join("")}</div></details>`
-    : "";
-  return `<div class="course-outline-record course-outline-readable-record">${readableMarkup || (!supplemental.length && !technical.length ? `<div class="course-outline-empty">原系统没有提供可显示的课程信息。</div>` : "")}</div>${supplementalMarkup}${technicalMarkup}${emptyMarkup}`;
+  const auxiliary = renderCourseOutlineAuxiliaryFields({ technical, supplemental, empty }, { forceReadable, supplementalLabel });
+  return `<div class="course-outline-record course-outline-readable-record">${readableMarkup || (!supplemental.length && !technical.length ? `<div class="course-outline-empty">原系统没有提供可显示的课程信息。</div>` : "")}</div>${auxiliary}`;
 }
 
 function renderCourseOutlineSection(definition, detail) {
@@ -11850,8 +11970,11 @@ function renderCourseOutlineSection(definition, detail) {
   if (result.status === "failed") {
     return `<section class="course-outline-section panel is-failed"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status is-failed">读取失败</span></div><div class="course-outline-error"><strong>${escapeHtml(result.error || "原系统未返回此章节")}</strong><button class="button button-ghost button-small" type="button" data-action="retry-course-outline-endpoint" data-outline-endpoint="${escapeHtml(definition.endpoint)}">重试此章节</button></div>${result.raw !== null && result.raw !== undefined ? renderCourseOutlineRecord(result.raw) : ""}</section>`;
   }
+  const renderRecord = definition.endpoint === "cxkcxxx.do"
+    ? renderCourseOutlineBasicRecord
+    : (record) => renderCourseOutlineRecord(record, definition);
   const content = result.records?.length
-    ? result.records.map((record) => renderCourseOutlineRecord(record, definition)).join("")
+    ? result.records.map((record) => renderRecord(record)).join("")
     : `<div class="course-outline-placeholder">原系统未提供此项</div>`;
   return `<section class="course-outline-section panel"><div class="course-outline-section-head"><div><h3>${escapeHtml(definition.title)}</h3><small>${escapeHtml(definition.hint)}</small></div><span class="course-outline-section-status">${escapeHtml(`${courseOutlineShapeLabel(result.shape)} · ${result.records?.length || 0} 项`)}</span></div>${content}</section>`;
 }

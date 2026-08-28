@@ -74,7 +74,7 @@ globalThis.__auditTest = {
   courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
   isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
-  courseOutlineFieldLabel, courseOutlineShapeLabel, renderCourseOutlineRecord,
+  courseOutlineFieldLabel, courseOutlineShapeLabel, renderCourseOutlineRecord, renderCourseOutlineBasicRecord, renderCourseOutlineSection,
   COURSE_OUTLINE_SECTION_DEFINITIONS,
   state,
   setLoadAllSchedulePages(fn) { loadAllSchedulePages = fn; },
@@ -237,10 +237,33 @@ const t = global.__auditTest;
   });
   assert.match(readableOutline, /课程名称/);
   assert.match(readableOutline, /课程层次/);
-  assert.match(readableOutline, /系统信息（1 项）/);
+  assert.match(readableOutline, /系统信息（2 项）/);
   assert.match(readableOutline, /补充信息（1 项）/);
   assert.match(readableOutline, /未填写信息（1 项）/);
   assert.doesNotMatch(readableOutline, /class="course-outline-field"><span>KCM<\/span>/);
+
+  const compactBasicOutline = t.renderCourseOutlineBasicRecord({
+    KCM: '模拟电子技术基础', KCH: 'A1307000063',
+    KKDWDM: '13', KKDWDM_DISPLAY: '信息科学与工程学院',
+    KSLXDM: '01', KSLXDM_DISPLAY: '考试', JYKKXQ: '3',
+    KCFL1_DISPLAY: '理论课程', KCXZDM_DISPLAY: '专业核心',
+    KCCCDM_DISPLAY: '本科', KCJBMC: '核心', SFWHCJGC: '否',
+    XF: 3, XS: 48, KTJSXS: 48, SYXS: 0, SJIXS: 0, TLXS: 0,
+    WID: 'record-1', BBWID: 'version-1'
+  });
+  assert.match(compactBasicOutline, /课程概况/);
+  assert.match(compactBasicOutline, /课程属性/);
+  assert.match(compactBasicOutline, /学分与学时/);
+  assert.match(compactBasicOutline, /信息科学与工程学院/);
+  assert.match(compactBasicOutline, /文化基础课程/);
+  assert.match(compactBasicOutline, /系统信息（/);
+  assert.doesNotMatch(compactBasicOutline, /class="course-outline-basic-value">13<\/div>/);
+  assert.doesNotMatch(compactBasicOutline, /class="course-outline-basic-value">01<\/div>/);
+  const compactBasicSection = t.renderCourseOutlineSection(
+    { title: '基本信息', endpoint: 'cxkcxxx.do', hint: '课程基础字段' },
+    { endpoints: { 'cxkcxxx.do': { status: 'success', shape: 'object', records: [{ KCM: '测试课程', XF: 2 }] } } }
+  );
+  assert.match(compactBasicSection, /course-outline-basic-record/);
 
   const teachingReferences = t.renderCourseOutlineRecord({
     KCH: 'A1308000022', KCM: '人工智能导论', WID: 'record-1', BBWID: 'version-1',

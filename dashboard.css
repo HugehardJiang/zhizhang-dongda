@@ -1981,6 +1981,15 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .course-outline-section-status.is-loading { color: #39749d; }
 .course-outline-section-status.is-failed { color: #a24f50; }
 .course-outline-section.is-failed { border-color: #efd6d6; }
+.course-outline-basic-record { display: grid; gap: 10px; margin-top: 12px; }
+.course-outline-basic-group { padding: 12px; background: #fbfdfe; border: 1px solid #e5ecef; border-radius: 9px; }
+.course-outline-basic-group h4 { margin: 0 0 9px; color: var(--text-primary, #263b49); font-size: 12px; line-height: 1.4; }
+.course-outline-basic-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.course-outline-basic-field { min-width: 0; padding: 9px 10px; background: #fff; border: 1px solid #edf1f3; border-radius: 7px; }
+.course-outline-basic-field.is-wide { grid-column: 1 / -1; }
+.course-outline-basic-field > span { display: block; margin-bottom: 4px; color: #758691; font-size: 10px; line-height: 1.35; }
+.course-outline-basic-value { min-width: 0; color: #263b49; font-size: 12px; font-weight: 600; line-height: 1.45; }
+.course-outline-basic-value .course-outline-value-text { color: inherit; font-size: inherit; font-weight: inherit; line-height: inherit; }
 .course-outline-record { display: grid; gap: 0; margin-top: 12px; border: 1px solid #e5ecef; border-radius: 8px; overflow: hidden; }
 .course-outline-field { display: grid; grid-template-columns: minmax(120px, 24%) minmax(0, 1fr); gap: 12px; padding: 10px 12px; background: #fff; border-bottom: 1px solid #edf1f3; }
 .course-outline-field:last-child { border-bottom: 0; }
@@ -2024,7 +2033,12 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .course-outline-list-row > .button { width: 100%; }
   .course-outline-pagination { align-items: flex-start; flex-direction: column; }
   .course-outline-pagination > div { justify-content: flex-start; }
+  .course-outline-basic-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .course-outline-field { grid-template-columns: 1fr; gap: 4px; }
+}
+
+@media (max-width: 480px) {
+  .course-outline-basic-fields { grid-template-columns: 1fr; }
 }
 
 @media print {
