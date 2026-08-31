@@ -58,6 +58,7 @@ globalThis.__auditTest = {
   curriculumCategoryFallbackRecords, curriculumPdfCompletion,
   scoreRowDeduplicationKey, dedupeGpaRows, mergeScoreRows,
   normalizeLocalScheduleItem, localScheduleItemToCourseRow, mergedPersonalScheduleRows,
+  cacheScheduleDetailRows, cacheTermSnapshot, applyCachedTermSnapshot, schoolPersonalScheduleRows,
   compareScheduleItemsOverlap, SCHEDULE_COLLISION_STATUS, filterCoursesForDate, overviewTodayCourses, overviewNextCourse, schoolScheduleOccurrenceKey,
   findLocalScheduleConflicts, localScheduleDraftFromItem, localScheduleEditorMarkup, localScheduleSectionOptions,
   localScheduleModalMarkup, hasActiveModalState, clearActiveModalState,
@@ -760,6 +761,30 @@ const t = global.__auditTest;
   const imageRows = t.scheduleExportRows('personal');
   assert.strictEqual(imageRows.length, 9);
   assert.deepStrictEqual(imageRows.filter((course) => course.name === '模拟电子技术基础').map((course) => course.location).sort(), ['大成313', '大成313', '教307', '逸405']);
+
+  // Offline snapshots must retain every parsed arrangement even though raw
+  // interface rows are intentionally excluded from persistent storage. This
+  // covers the live-grid/compound-list mismatch that previously reduced a
+  // cached timetable from 35 rows to only the 25 grid rows.
+  const partialScheduleSnapshot = t.cacheTermSnapshot({
+    scores: [], exams: [], courses: completePersonal.courses,
+    scheduleDetail: completePersonal.scheduleDetail.slice(0, 1),
+    scheduleSource: '网格', gpa: '—', gpaMeta: {}
+  });
+  assert.strictEqual(partialScheduleSnapshot.scheduleDetail.length, completePersonal.scheduleDetail.length);
+  assert.ok(partialScheduleSnapshot.scheduleDetail.every((row) => !Object.prototype.hasOwnProperty.call(row, 'raw')));
+  assert.ok(partialScheduleSnapshot.courses.every((course) => !Object.prototype.hasOwnProperty.call(course, 'raw')));
+  const previousCacheState = t.state.personalCache;
+  const previousTermCode = t.state.termCode;
+  const previousData = t.state.data;
+  t.state.termCode = 'CACHE-TERM';
+  t.state.personalCache = { ...previousCacheState, termSnapshots: { 'CACHE-TERM': partialScheduleSnapshot } };
+  assert.strictEqual(t.applyCachedTermSnapshot('CACHE-TERM'), true);
+  assert.strictEqual(t.schoolPersonalScheduleRows(t.state.data.courses).length, completePersonal.scheduleDetail.length);
+  t.state.personalCache = previousCacheState;
+  t.state.termCode = previousTermCode;
+  t.state.data = previousData;
+
   const completeCsvEntries = t.scheduleCsvEntries('personal');
   assert.strictEqual(completeCsvEntries.length, 9);
   assert.deepStrictEqual(completeCsvEntries.filter((entry) => entry.courseName === '大学物理㈡').map((entry) => [entry.weekday, entry.startSection, entry.endSection, entry.location]), [

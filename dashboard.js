@@ -641,12 +641,62 @@ function emptyPersonalData() {
   };
 }
 
+function cacheScheduleDetailRows(data = state.data) {
+  const courses = Array.isArray(data?.courses) ? data.courses : [];
+  const details = Array.isArray(data?.scheduleDetail) ? data.scheduleDetail : [];
+  const rows = [];
+
+  const append = (candidate, sourceCourseIndex = -1) => {
+    if (!candidate || candidate.source === "local" || !hasSchedulePlacement(candidate)) return;
+    const normalized = Number.isInteger(candidate.sourceCourseIndex)
+      ? candidate
+      : sourceCourseIndex >= 0
+        ? { ...candidate, sourceCourseIndex }
+        : candidate;
+    const existingIndex = rows.findIndex((row) => sameCourse(row, normalized));
+    if (existingIndex >= 0) {
+      mergeCourseFields(rows[existingIndex], normalized);
+      if (!Number.isInteger(rows[existingIndex].sourceCourseIndex) && Number.isInteger(normalized.sourceCourseIndex)) {
+        rows[existingIndex].sourceCourseIndex = normalized.sourceCourseIndex;
+      }
+      return;
+    }
+    rows.push(normalized);
+  };
+
+  // Keep the already authoritative grid/list merge first. It preserves the
+  // sourceCourseIndex used to connect every arrangement back to its compact
+  // course row after the snapshot is hydrated.
+  details.forEach((detail) => {
+    const sourceCourseIndex = Number.isInteger(detail?.sourceCourseIndex)
+      ? detail.sourceCourseIndex
+      : courses.findIndex((course) => courseIdentityMatches(course, detail));
+    append(detail, sourceCourseIndex);
+  });
+
+  // A live course row can contain additional meetings in a compound
+  // schedule string that the grid endpoint did not return. Expand those
+  // meetings before removing raw fields from the cache. The mapped fields are
+  // sufficient for offline display, so no account data or raw response is
+  // persisted.
+  courses.forEach((course, sourceCourseIndex) => {
+    if (!course || course.source === "local") return;
+    const mapped = course.raw ? course : mapCourse(course);
+    expandMappedCourse(mapped).forEach((detail) => append(detail, sourceCourseIndex));
+  });
+
+  return rows;
+}
+
 function cacheTermSnapshot(data = state.data) {
   return cacheSafeValue({
     scores: data.scores,
     exams: data.exams,
     courses: data.courses,
-    scheduleDetail: data.scheduleDetail,
+    // Cache the complete parsed arrangement set, not only the grid response.
+    // raw is intentionally removed by cacheSafeValue, so this projection is
+    // what lets compound multi-day/multi-location courses work offline.
+    scheduleDetail: cacheScheduleDetailRows(data),
     scheduleSource: data.scheduleSource,
     gpa: data.gpa,
     gpaMeta: data.gpaMeta
