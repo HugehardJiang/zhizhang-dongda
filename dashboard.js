@@ -646,6 +646,13 @@ function cacheScheduleDetailRows(data = state.data) {
   const details = Array.isArray(data?.scheduleDetail) ? data.scheduleDetail : [];
   const rows = [];
 
+  // Persist exactly the same school-only occurrence set that the online
+  // timetable renders. Keeping this path identical prevents a future change
+  // in the display merge logic from making the cache silently diverge again.
+  // The fallback below is retained for callers that pass a detached snapshot
+  // object (including tests and migrations).
+  if (data === state.data) return schoolPersonalScheduleRows(courses);
+
   const append = (candidate, sourceCourseIndex = -1) => {
     if (!candidate || candidate.source === "local" || !hasSchedulePlacement(candidate)) return;
     const normalized = Number.isInteger(candidate.sourceCourseIndex)
@@ -4514,7 +4521,7 @@ function rawScheduleText(raw) {
 
 const SCHEDULE_DETAIL_KEYS = [
   "YPSJDD", "KCSJDD", "SKSJDD", "classDateAndPlace", "classInfo", "scheduleInfo", "timePlace", "schedule",
-  "cellDetail", "titleWeekTeacherClassroomDetail", "titleDetail", "cellWeekTeacherClassroomDetail", "cellDetailText"
+  "cellDetail", "titleWeekTeacherClassroomDetail", "titleDetail", "cellWeekTeacherClassroomDetail", "cellDetailText", "detail"
 ];
 
 const SCHEDULE_LOCATION_ALIASES = ["JASMC", "SKDD", "JAS", "roomName", "classroomName", "room", "place", "placeName", "location", "locationName", "address"];

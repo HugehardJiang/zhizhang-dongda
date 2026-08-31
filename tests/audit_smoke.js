@@ -774,6 +774,11 @@ const t = global.__auditTest;
   assert.strictEqual(partialScheduleSnapshot.scheduleDetail.length, completePersonal.scheduleDetail.length);
   assert.ok(partialScheduleSnapshot.scheduleDetail.every((row) => !Object.prototype.hasOwnProperty.call(row, 'raw')));
   assert.ok(partialScheduleSnapshot.courses.every((course) => !Object.prototype.hasOwnProperty.call(course, 'raw')));
+  const liveDataReference = t.state.data;
+  t.state.data = { ...liveDataReference, courses: completePersonal.courses, scheduleDetail: completePersonal.scheduleDetail.slice(0, 1) };
+  const liveScheduleSnapshot = t.cacheTermSnapshot();
+  assert.strictEqual(liveScheduleSnapshot.scheduleDetail.length, completePersonal.scheduleDetail.length);
+  t.state.data = liveDataReference;
   const previousCacheState = t.state.personalCache;
   const previousTermCode = t.state.termCode;
   const previousData = t.state.data;
@@ -782,6 +787,26 @@ const t = global.__auditTest;
   assert.strictEqual(t.applyCachedTermSnapshot('CACHE-TERM'), true);
   assert.strictEqual(t.schoolPersonalScheduleRows(t.state.data.courses).length, completePersonal.scheduleDetail.length);
   t.state.personalCache = previousCacheState;
+  t.state.termCode = previousTermCode;
+  t.state.data = previousData;
+
+  // Older v2 snapshots may still contain only a subset of scheduleDetail.
+  // Their mapped course.detail retains the compound schedule text, so the
+  // offline path must be able to rebuild the missing arrangements without a
+  // network request.
+  const legacyCourses = completePersonal.courses.map((course) => {
+    const copy = { ...course };
+    delete copy.raw;
+    return copy;
+  });
+  const legacyDetails = completePersonal.scheduleDetail.slice(0, 1).map((detail) => {
+    const copy = { ...detail };
+    delete copy.raw;
+    return copy;
+  });
+  t.state.termCode = 'LEGACY-CACHE-TERM';
+  t.state.data = { ...previousData, courses: legacyCourses, scheduleDetail: legacyDetails };
+  assert.strictEqual(t.schoolPersonalScheduleRows(legacyCourses).length, completePersonal.scheduleDetail.length);
   t.state.termCode = previousTermCode;
   t.state.data = previousData;
 
