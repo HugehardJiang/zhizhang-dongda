@@ -10,6 +10,12 @@ const source = fs.readFileSync(
 // SMS challenge, session cookies and redirects stay in one authenticated WebView.
 assert.match(source, /LOGIN_METHOD_MOBILE = "mobile"/);
 assert.match(source, /activatePortalMobileLogin/);
+const methodBar = source.match(/private LinearLayout createLoginMethodBar\(\)[\s\S]*?private FrameLayout\.LayoutParams loginMethodBarParams/);
+assert.ok(methodBar, "login method bar source should be present");
+assert.doesNotMatch(methodBar[0], /LOGIN_METHOD_MOBILE/);
+assert.match(source, /builtInMobileLoginButton\.setText\("使用手机验证码登录"\)/);
+assert.match(source, /startBuiltInMobileLogin\(\)/);
+assert.match(source, /builtInMobileLoginMode/);
 assert.match(source, /mobile_template/);
 assert.match(source, /window\.initPassWordEvent\(\)/);
 assert.match(source, /mobileTab\.click\(\)/);

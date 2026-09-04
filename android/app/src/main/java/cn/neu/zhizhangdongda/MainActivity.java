@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.75";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.76";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -570,6 +570,7 @@ public class MainActivity extends Activity {
     private CheckBox interactiveTrustDeviceCheck;
     private TextView builtInLoginStatus;
     private Button builtInLoginButton;
+    private Button builtInMobileLoginButton;
     private Button builtInCodeSendButton;
     private FrameLayout dashboardHome;
     private FrameLayout ecodePanel;
@@ -609,6 +610,7 @@ public class MainActivity extends Activity {
     private boolean builtInLoginAwaitingPage;
     private boolean builtInLoginChallengeVisible;
     private boolean builtInInteractiveChallengeVisible;
+    private boolean builtInMobileLoginMode;
     private boolean backgroundLoginInProgress;
     private boolean backgroundLoginForEcode;
     private boolean backgroundLoginAttemptedForCurrentFailure;
@@ -761,6 +763,10 @@ public class MainActivity extends Activity {
         portalActionButton.setOnClickListener(view -> {
             if (builtInInteractiveChallengeVisible && builtInLoginSubmissionPending) {
                 completeBuiltInInteractiveChallenge();
+                return;
+            }
+            if (builtInMobileLoginMode && isPortalLoginPage(portalWebView == null ? "" : portalWebView.getUrl())) {
+                stopBuiltInMobileLoginMode();
                 return;
             }
             if (hasSavedQrImage()) {
@@ -926,7 +932,8 @@ public class MainActivity extends Activity {
                     showLoginMethodChooserIfNeeded(url);
                     if (!builtInLoginSubmissionPending) applyPortalLoginMethodUi();
                     if (!builtInLoginSubmissionPending
-                            && LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
+                            && (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
+                            || builtInMobileLoginMode)
                             && isPortalLoginPage(url)) {
                         // 学校目前把手机登录入口留在 mobile_template 中但注释掉了；
                         // 仍调用学校自己的 loginByMobile/initPassWordEvent，让图形
@@ -1048,7 +1055,6 @@ public class MainActivity extends Activity {
         String[][] methods = {
                 {LOGIN_METHOD_BUILT_IN, "内置登录"},
                 {LOGIN_METHOD_PASSWORD, "原网页账密"},
-                {LOGIN_METHOD_MOBILE, "手机验证码"},
                 {LOGIN_METHOD_WECHAT, "二维码登录"}
         };
         for (String[] item : methods) {
@@ -1147,6 +1153,19 @@ public class MainActivity extends Activity {
         content.addView(builtInLoginButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
 
+        builtInMobileLoginButton = new Button(this);
+        builtInMobileLoginButton.setText("使用手机验证码登录");
+        builtInMobileLoginButton.setAllCaps(false);
+        builtInMobileLoginButton.setTextSize(13);
+        builtInMobileLoginButton.setTextColor(Color.rgb(43, 101, 153));
+        builtInMobileLoginButton.setBackground(roundBackground(Color.WHITE, 14));
+        builtInMobileLoginButton.setContentDescription("在内置登录流程中使用手机验证码登录");
+        builtInMobileLoginButton.setOnClickListener(view -> startBuiltInMobileLogin());
+        LinearLayout.LayoutParams mobileLoginParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+        mobileLoginParams.setMargins(0, dp(8), 0, 0);
+        content.addView(builtInMobileLoginButton, mobileLoginParams);
+
         builtInLoginStatus = new TextView(this);
         builtInLoginStatus.setTextColor(Color.rgb(111, 121, 138));
         builtInLoginStatus.setTextSize(12);
@@ -1157,7 +1176,7 @@ public class MainActivity extends Activity {
         content.addView(builtInLoginStatus, statusParams);
 
         TextView fallback = new TextView(this);
-        fallback.setText("如果学校要求图形验证码或手机验证码，会自动切换到学校官方页面完成验证；也可随时切换到上方的原网页账密、手机验证码或二维码登录。验证码仅提交给学校页面，应用不会保存。");
+        fallback.setText("手机验证码属于内置登录的补充验证方式。需要时可点击上面的按钮；图形验证码、短信发送、Cookie 和跳转仍由学校官方页面完成，验证码仅提交给学校页面，应用不会保存。");
         fallback.setTextColor(Color.rgb(125, 135, 151));
         fallback.setTextSize(11);
         fallback.setLineSpacing(0, 1.2f);
@@ -1276,10 +1295,15 @@ public class MainActivity extends Activity {
     }
 
     private void showPortal() {
+        showPortal(false);
+    }
+
+    private void showPortal(boolean forceLoginPage) {
         runOnUiThread(() -> {
             dashboardVisible = false;
             exitBackgroundLoginMode();
-            if (portalWebView.getUrl() == null || portalWebView.getUrl().isEmpty()
+            if (forceLoginPage
+                    || portalWebView.getUrl() == null || portalWebView.getUrl().isEmpty()
                     || !isPortalPageUrl(portalWebView.getUrl())) {
                 portalWebView.loadUrl(PORTAL_URL);
             }
@@ -1294,7 +1318,7 @@ public class MainActivity extends Activity {
             }
             cookieManager.flush();
             portalWebView.postDelayed(this::installPortalQrCapture, 180);
-            if (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)) {
+            if (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal) || builtInMobileLoginMode) {
                 portalWebView.postDelayed(this::activatePortalMobileLogin, BUILT_IN_LOGIN_TAB_SETTLE_MS);
             }
         });
@@ -1345,6 +1369,7 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         builtInInteractiveChallengeVisible = false;
+        builtInMobileLoginMode = false;
         builtInLoginPortalProbeScheduled = false;
         pendingBuiltInPassword = "";
         backgroundLoginForEcode = false;
@@ -1359,6 +1384,7 @@ public class MainActivity extends Activity {
     private void showDashboard() {
         runOnUiThread(() -> {
             dashboardVisible = true;
+            builtInMobileLoginMode = false;
             exitBackgroundLoginMode();
             // 这个值只是上次成功会话的提示，不能因为展示缓存首页就把失效
             // Cookie 标成有效；真实状态由轻量 WebVPN 探测或业务响应确认。
@@ -1968,6 +1994,11 @@ public class MainActivity extends Activity {
 
     private void updatePortalActionLabel(String url) {
         if (portalActionButton == null) return;
+        if (builtInMobileLoginMode && isPortalLoginPage(url)) {
+            portalActionButton.setText("返回内置账号密码登录");
+            portalActionButton.setContentDescription("返回内置账号密码登录");
+            return;
+        }
         if (hasSavedQrImage()) {
             portalActionButton.setText("删除刚刚的二维码图片并进入主界面");
         } else {
@@ -2000,17 +2031,24 @@ public class MainActivity extends Activity {
             }
         }
         boolean builtIn = LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal);
-        boolean nativeBuiltIn = builtIn && !builtInInteractiveChallengeVisible;
+        boolean nativeBuiltIn = builtIn && !builtInInteractiveChallengeVisible && !builtInMobileLoginMode;
         boolean showInteractiveTrustDevice = builtInInteractiveChallengeVisible
                 || (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
                 && isPortalLoginPage(portalWebView == null ? "" : portalWebView.getUrl()));
         if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(nativeBuiltIn ? View.VISIBLE : View.GONE);
+        if (builtInMobileLoginButton != null) {
+            builtInMobileLoginButton.setVisibility(nativeBuiltIn ? View.VISIBLE : View.GONE);
+        }
         if (portalActionButton != null) {
             portalActionButton.setVisibility(nativeBuiltIn ? View.GONE : View.VISIBLE);
             if (builtInInteractiveChallengeVisible) {
                 portalActionButton.setEnabled(true);
                 portalActionButton.setText("验证完成，进入执掌东大");
                 portalActionButton.setContentDescription("完成学校图形验证码和短信验证后确认登录");
+            } else if (builtInMobileLoginMode) {
+                portalActionButton.setEnabled(true);
+                portalActionButton.setText("返回内置账号密码登录");
+                portalActionButton.setContentDescription("返回内置账号密码登录");
             }
         }
         if (interactiveTrustDevicePanel != null) {
@@ -2624,6 +2662,7 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         builtInInteractiveChallengeVisible = false;
+        builtInMobileLoginMode = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
         builtInLoginRetryCount = 0;
@@ -2676,6 +2715,7 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         builtInInteractiveChallengeVisible = false;
+        builtInMobileLoginMode = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
         builtInLoginRetryCount = 0;
@@ -2840,13 +2880,45 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * 内置登录页里的手机验证码入口只负责切换到同一个官方认证 WebView；
+     * 图形验证码、短信发送、Cookie 和跳转仍由学校页面自己的脚本处理。
+     */
+    private void startBuiltInMobileLogin() {
+        if (portalWebView == null || backgroundLoginInProgress) return;
+        cancelAutomaticBackgroundLogin();
+        loginMethodForCurrentPortal = LOGIN_METHOD_BUILT_IN;
+        builtInMobileLoginMode = true;
+        builtInLoginSubmissionPending = false;
+        builtInLoginAwaitingPage = false;
+        builtInLoginChallengeVisible = false;
+        builtInInteractiveChallengeVisible = false;
+        showBuiltInChallenge(false);
+        showPortal(true);
+        portalWebView.postDelayed(this::activatePortalMobileLogin, BUILT_IN_LOGIN_TAB_SETTLE_MS);
+    }
+
+    private void stopBuiltInMobileLoginMode() {
+        if (!builtInMobileLoginMode) return;
+        builtInMobileLoginMode = false;
+        loginMethodForCurrentPortal = LOGIN_METHOD_BUILT_IN;
+        builtInLoginSubmissionPending = false;
+        builtInLoginAwaitingPage = false;
+        builtInLoginChallengeVisible = false;
+        builtInInteractiveChallengeVisible = false;
+        showBuiltInChallenge(false);
+        showPortal(true);
+    }
+
+    /**
      * 学校页面目前把手机登录标签注释掉，但仍保留完整的 mobile_template
      * 和 loginByMobile()。这里仅让官方脚本渲染并处理它，不在原生层复制
      * 图形验证码、短信发送或手机登录接口。
      */
     private void activatePortalMobileLogin() {
+        boolean mobileLoginActive = LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
+                || builtInMobileLoginMode;
         if (portalWebView == null
-                || !LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
+                || !mobileLoginActive
                 || !isPortalLoginPage(portalWebView.getUrl())) return;
         String script = "(function(){"
                 + "var content=document.getElementById('login_content'),template=document.getElementById('mobile_template');"
@@ -2880,6 +2952,13 @@ public class MainActivity extends Activity {
     }
 
     private void selectPortalLoginMethod(String method) {
+        if (LOGIN_METHOD_MOBILE.equals(method)) {
+            // 兼容旧版本可能发来的内部方法值，但不再把手机验证码作为
+            // 顶部并列页面；它统一归入内置登录流程。
+            startBuiltInMobileLogin();
+            return;
+        }
+        boolean wasBuiltInMobileLoginMode = builtInMobileLoginMode;
         if (!LOGIN_METHOD_BUILT_IN.equals(method) && builtInLoginSubmissionPending && !backgroundLoginInProgress) {
             // 切换到官方页面入口时，取消尚未完成的原生提交；否则旧页面的
             // onPageFinished/轮询回调可能在新登录方式后面误报成功。
@@ -2893,19 +2972,18 @@ public class MainActivity extends Activity {
         }
         if (LOGIN_METHOD_WECHAT.equals(method)) loginMethodForCurrentPortal = LOGIN_METHOD_WECHAT;
         else if (LOGIN_METHOD_PASSWORD.equals(method)) loginMethodForCurrentPortal = LOGIN_METHOD_PASSWORD;
-        else if (LOGIN_METHOD_MOBILE.equals(method)) loginMethodForCurrentPortal = LOGIN_METHOD_MOBILE;
         else loginMethodForCurrentPortal = LOGIN_METHOD_BUILT_IN;
+        builtInMobileLoginMode = false;
         if (preferences != null && isPersistentLoginMethod(loginMethodForCurrentPortal)) {
             preferences.edit().putString(DEFAULT_LOGIN_METHOD, loginMethodForCurrentPortal).apply();
         }
         if (portalWebView == null) return;
         applyPortalLoginMethodUi();
-        if (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)) return;
-        if (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)) {
-            showPortal();
-            portalWebView.postDelayed(this::activatePortalMobileLogin, BUILT_IN_LOGIN_TAB_SETTLE_MS);
+        if (LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal)) {
+            if (wasBuiltInMobileLoginMode) showPortal(true);
             return;
         }
+        if (wasBuiltInMobileLoginMode) showPortal(true);
         showQrActionLoadingIfNeeded(portalWebView.getUrl());
         installPortalQrCapture();
         portalWebView.postDelayed(() -> {
