@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.77";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.78";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -571,6 +571,8 @@ public class MainActivity extends Activity {
     private TextView builtInLoginStatus;
     private Button builtInLoginButton;
     private Button builtInMobileLoginButton;
+    private Button builtInOpenAcademicButton;
+    private Button builtInCloseLoginButton;
     private Button builtInCodeSendButton;
     private FrameLayout dashboardHome;
     private FrameLayout ecodePanel;
@@ -775,7 +777,7 @@ public class MainActivity extends Activity {
                 return;
             }
             if (isPortalLoginPage(portalWebView == null ? "" : portalWebView.getUrl())) {
-                Toast.makeText(this, "请先在上方完成教务系统登录", Toast.LENGTH_SHORT).show();
+                closePortalLoginToDashboard();
                 return;
             }
             showDashboard();
@@ -1173,6 +1175,35 @@ public class MainActivity extends Activity {
         mobileLoginParams.setMargins(0, dp(8), 0, 0);
         content.addView(builtInMobileLoginButton, mobileLoginParams);
 
+        LinearLayout manualNavigationRow = new LinearLayout(this);
+        manualNavigationRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams manualNavigationParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
+        manualNavigationParams.setMargins(0, dp(8), 0, 0);
+
+        builtInOpenAcademicButton = new Button(this);
+        builtInOpenAcademicButton.setText("打开教务系统原网页");
+        builtInOpenAcademicButton.setAllCaps(false);
+        builtInOpenAcademicButton.setTextSize(12);
+        builtInOpenAcademicButton.setTextColor(Color.rgb(43, 101, 153));
+        builtInOpenAcademicButton.setBackground(roundBackground(Color.WHITE, 14));
+        builtInOpenAcademicButton.setContentDescription("打开教务系统原网页");
+        builtInOpenAcademicButton.setOnClickListener(view -> openOfficialAcademicPortal());
+        manualNavigationRow.addView(builtInOpenAcademicButton, new LinearLayout.LayoutParams(0, dp(44), 1f));
+
+        builtInCloseLoginButton = new Button(this);
+        builtInCloseLoginButton.setText("关闭并返回主页");
+        builtInCloseLoginButton.setAllCaps(false);
+        builtInCloseLoginButton.setTextSize(12);
+        builtInCloseLoginButton.setTextColor(Color.rgb(66, 81, 104));
+        builtInCloseLoginButton.setBackground(roundBackground(Color.rgb(232, 237, 243), 14));
+        builtInCloseLoginButton.setContentDescription("关闭认证页并返回执掌东大主页");
+        builtInCloseLoginButton.setOnClickListener(view -> closePortalLoginToDashboard());
+        LinearLayout.LayoutParams closeLoginParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        closeLoginParams.setMargins(dp(8), 0, 0, 0);
+        manualNavigationRow.addView(builtInCloseLoginButton, closeLoginParams);
+        content.addView(manualNavigationRow, manualNavigationParams);
+
         builtInLoginStatus = new TextView(this);
         builtInLoginStatus.setTextColor(Color.rgb(111, 121, 138));
         builtInLoginStatus.setTextSize(12);
@@ -1183,7 +1214,7 @@ public class MainActivity extends Activity {
         content.addView(builtInLoginStatus, statusParams);
 
         TextView fallback = new TextView(this);
-        fallback.setText("手机验证码属于内置登录的补充验证方式。需要时可点击上面的按钮；图形验证码、短信发送、Cookie 和跳转仍由学校官方页面完成，验证码仅提交给学校页面，应用不会保存。");
+        fallback.setText("手机验证码属于内置登录的补充验证方式。需要时可点击上面的按钮；图形验证码、短信发送、Cookie 和跳转仍由学校官方页面完成，验证码仅提交给学校页面，应用不会保存。如果学校已经登录但仍停在认证页，可使用上方按钮手动打开原网页或返回主页。");
         fallback.setTextColor(Color.rgb(125, 135, 151));
         fallback.setTextSize(11);
         fallback.setLineSpacing(0, 1.2f);
@@ -1341,6 +1372,46 @@ public class MainActivity extends Activity {
                 portalWebView.loadUrl(PORTAL_URL);
             }
             showPortal();
+        });
+    }
+
+    /**
+     * 用户明确选择关闭当前认证页时，回到应用主页并让主页自己重新确认
+     * 教务 Cookie。不能把“返回主页”误当成登录成功，失效时仍会显示缓存
+     * 并按现有流程提示重新登录。
+     */
+    private void closePortalLoginToDashboard() {
+        cancelAutomaticBackgroundLogin();
+        clearPendingQrUrl();
+        showDashboard();
+        if (root != null) {
+            root.post(() -> {
+                requestDashboardRefreshAfterSessionProbe(true);
+                requestAcademicSessionProbe("manual-login-close", 0L, true);
+            });
+        }
+    }
+
+    /**
+     * 从内置登录面板切换到学校官方认证页。这里不改变用户保存的默认
+     * 登录方式，只是提供一次性的原网页入口，便于处理“已经登录但页面
+     * 没有自动跳转”的状态。
+     */
+    private void openOfficialAcademicPortal() {
+        runOnUiThread(() -> {
+            cancelAutomaticBackgroundLogin();
+            clearPendingQrUrl();
+            loginMethodForCurrentPortal = LOGIN_METHOD_PASSWORD;
+            showPortal(true);
+            if (portalWebView != null) {
+                portalWebView.postDelayed(() -> {
+                    if (portalWebView == null
+                            || !LOGIN_METHOD_PASSWORD.equals(loginMethodForCurrentPortal)) return;
+                    String script = "(function(){var node=document.getElementById('password_login');"
+                            + "if(node&&typeof node.click==='function'){node.click();return true;}return false;})();";
+                    portalWebView.evaluateJavascript(script, null);
+                }, 320L);
+            }
         });
     }
 
@@ -2001,6 +2072,11 @@ public class MainActivity extends Activity {
 
     private void updatePortalActionLabel(String url) {
         if (portalActionButton == null) return;
+        if (builtInInteractiveChallengeVisible) {
+            portalActionButton.setText("验证完成，进入执掌东大");
+            portalActionButton.setContentDescription("完成学校图形验证码和短信验证后确认登录");
+            return;
+        }
         if (builtInMobileLoginMode && isPortalLoginPage(url)) {
             portalActionButton.setText("返回内置账号密码登录");
             portalActionButton.setContentDescription("返回内置账号密码登录");
@@ -2010,8 +2086,11 @@ public class MainActivity extends Activity {
             portalActionButton.setText("删除刚刚的二维码图片并进入主界面");
         } else {
             portalActionButton.setText(isPortalLoginPage(url)
-                    ? "登录完成后进入执掌东大"
+                    ? "关闭认证页，返回主页"
                     : "已登录，进入执掌东大");
+            portalActionButton.setContentDescription(isPortalLoginPage(url)
+                    ? "关闭认证页并返回执掌东大主页"
+                    : "进入执掌东大主页");
         }
     }
 

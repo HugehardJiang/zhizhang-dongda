@@ -16,6 +16,11 @@ assert.doesNotMatch(methodBar[0], /LOGIN_METHOD_MOBILE/);
 assert.match(source, /builtInMobileLoginButton\.setText\("使用手机验证码登录"\)/);
 assert.match(source, /startBuiltInMobileLogin\(\)/);
 assert.match(source, /builtInMobileLoginMode/);
+assert.match(source, /builtInOpenAcademicButton\.setText\("打开教务系统原网页"\)/);
+assert.match(source, /builtInCloseLoginButton\.setText\("关闭并返回主页"\)/);
+assert.match(source, /openOfficialAcademicPortal\(\)/);
+assert.match(source, /closePortalLoginToDashboard\(\)/);
+assert.match(source, /manual-login-close/);
 assert.match(source, /mobile_template/);
 assert.match(source, /window\.initPassWordEvent\(\)/);
 assert.match(source, /mobileTab\.click\(\)/);
@@ -56,6 +61,12 @@ assert.match(source, /private void restorePortalOverlayOrder\(\)/);
 assert.match(source, /interactiveTrustDevicePanel\.bringToFront\(\)/);
 assert.match(source, /showPortal\(\)[\s\S]*restorePortalOverlayOrder\(\)/);
 assert.match(source, /showBuiltInInteractiveChallenge\([\s\S]*restorePortalOverlayOrder\(\)/);
+
+// When the school keeps the user on an already-authenticated login page, the
+// visible action must offer an explicit way back to the app instead of
+// requiring an automatic redirect.
+assert.match(source, /isPortalLoginPage\(portalWebView == null \? "" : portalWebView\.getUrl\(\)\)\) \{\s*closePortalLoginToDashboard\(\);/);
+assert.match(source, /isPortalLoginPage\(url\)\s*\? "关闭认证页，返回主页"/);
 
 // Credentials and challenge values must not be added to diagnostic output.
 assert.match(source, /不保存密码、验证码、Cookie/);
