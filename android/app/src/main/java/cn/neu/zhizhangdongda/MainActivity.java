@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.76";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.77";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -827,6 +827,8 @@ public class MainActivity extends Activity {
             }
             if (builtInInteractiveChallengeVisible && builtInLoginSubmissionPending) {
                 syncBuiltInTrustDeviceSelection(activeLoginOperationId);
+            } else if (builtInMobileLoginMode) {
+                syncPortalTrustDeviceSelection();
             }
         });
         interactiveTrustDevicePanel.addView(interactiveTrustDeviceCheck, new FrameLayout.LayoutParams(
@@ -930,7 +932,12 @@ public class MainActivity extends Activity {
                     installPortalQrCapture();
                     showQrActionLoadingIfNeeded(url);
                     showLoginMethodChooserIfNeeded(url);
-                    if (!builtInLoginSubmissionPending) applyPortalLoginMethodUi();
+                    if (!builtInLoginSubmissionPending) {
+                        applyPortalLoginMethodUi();
+                        if (builtInMobileLoginMode) {
+                            view.postDelayed(MainActivity.this::syncPortalTrustDeviceSelection, 120L);
+                        }
+                    }
                     if (!builtInLoginSubmissionPending
                             && (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
                             || builtInMobileLoginMode)
@@ -945,11 +952,11 @@ public class MainActivity extends Activity {
                             || (backgroundLoginForEcode && isEcodeTargetReadyUrl(url)))) {
                         finishBuiltInLoginSuccess(activeLoginOperationId);
                     } else if (builtInLoginSubmissionPending && isPortalLoginPage(url)) {
-                        if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage(activeLoginOperationId);
-                        else {
-                            long operationId = activeLoginOperationId;
-                            view.postDelayed(() -> inspectBuiltInLoginPage(operationId), 120);
-                        }
+                        // 会话失效后学校可能直接返回图形/手机验证页，
+                        // 该页面没有账号密码输入框；先检查页面状态，
+                        // 不能默认把它当作普通账密页提交。
+                        long operationId = activeLoginOperationId;
+                        view.postDelayed(() -> inspectBuiltInLoginPage(operationId), 120);
                     } else if (builtInLoginSubmissionPending && isPortalPageUrl(url)) {
                         // 挑战页可能不再使用 /tpass/login 路径；先观察官方
                         // 页面本身，避免把新增验证码误判成未知中转页。
@@ -2033,6 +2040,7 @@ public class MainActivity extends Activity {
         boolean builtIn = LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal);
         boolean nativeBuiltIn = builtIn && !builtInInteractiveChallengeVisible && !builtInMobileLoginMode;
         boolean showInteractiveTrustDevice = builtInInteractiveChallengeVisible
+                || builtInMobileLoginMode
                 || (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
                 && isPortalLoginPage(portalWebView == null ? "" : portalWebView.getUrl()));
         if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(nativeBuiltIn ? View.VISIBLE : View.GONE);
@@ -2201,8 +2209,7 @@ public class MainActivity extends Activity {
                     || (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl))) {
                 finishBuiltInLoginSuccess(operationId);
             } else if (isPortalLoginPage(currentUrl)) {
-                if (builtInLoginAwaitingPage) injectBuiltInCredentialsIntoSchoolPage(operationId);
-                else inspectBuiltInLoginPage(operationId);
+                inspectBuiltInLoginPage(operationId);
             } else {
                 loadBuiltInAcademicPortalProbe(currentUrl == null ? observedUrl : currentUrl, operationId);
             }
@@ -2248,8 +2255,12 @@ public class MainActivity extends Activity {
                 + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
                 + "var button=document.getElementById('index_login_btn');"
                 + "var form=document.getElementById('loginForm')||document.getElementById('loginform');"
-                + "if(!un||!pd)return JSON.stringify({ok:false,error:'学校登录页未找到账号密码输入框'});"
-                + "if(!form)return JSON.stringify({ok:false,error:'学校登录表单不可用'});"
+                + "var visible=function(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};"
+                + "var pageText=String(document.body&&document.body.innerText||'');"
+                + "var challenge=Boolean(document.getElementById('loginMobile')||document.getElementById('codeImage')||document.getElementById('phoneCode')||document.getElementById('getMobileVerifyCode'))||/(图形验证码|图片验证码|安全验证|获取验证码|手机验证码|手机登录)/.test(pageText);"
+                + "if((!un||!pd||!visible(un)||!visible(pd))&&challenge)return JSON.stringify({ok:true,interactive:true});"
+                + "if(!un||!pd||!visible(un)||!visible(pd))return JSON.stringify({ok:true,waitForPage:true});"
+                + "if(!form)return JSON.stringify({ok:true,waitForPage:true});"
                 + "var formActionBefore=form&&form.action?String(form.action):'';"
                 + "un.disabled=false;pd.disabled=false;un.removeAttribute('disabled');pd.removeAttribute('disabled');"
                 + "un.value=u;pd.value=p;"
@@ -2272,6 +2283,19 @@ public class MainActivity extends Activity {
             if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
+                if (result.optBoolean("interactive", false)) {
+                    recordLoginDiagnostic("form-submit", "当前页面已进入人工图形/手机验证流程");
+                    showBuiltInInteractiveChallenge(
+                            operationId,
+                            "学校认证已进入手机验证页面，请完成图形验证码和短信验证码。"
+                    );
+                    return;
+                }
+                if (result.optBoolean("waitForPage", false)) {
+                    builtInLoginAwaitingPage = true;
+                    portalWebView.postDelayed(() -> inspectBuiltInLoginPage(operationId), BUILT_IN_LOGIN_TAB_SETTLE_MS);
+                    return;
+                }
                 StringBuilder detail = new StringBuilder("submitted=")
                         .append(result.optBoolean("ok", false))
                         .append(" submitter=").append(result.optString("submitter", "none"))
@@ -2340,7 +2364,9 @@ public class MainActivity extends Activity {
                 + "function visible(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;}"
                 + "function text(n){return String((n&&(n.innerText||n.textContent))||'').replace(/\\s+/g,' ').trim();}"
                 + "var m=document.getElementById('mcode'),save=document.getElementById('saveDevice'),send=document.getElementById('sendCode');"
-                + "var loginForm=document.getElementById('loginForm')||document.getElementById('loginform')||document.getElementById('un')||document.getElementById('pd');"
+                + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
+                + "var credentialInputs=visible(un)&&visible(pd);"
+                + "var loginForm=document.getElementById('loginForm')||document.getElementById('loginform')||un||pd;"
                 + "var challenge=visible(m)||visible(save)||visible(document.getElementById('second_valid_ok'));"
                 + "var mobileIds=['loginMobile','sendConfirm','codeImage','getMobileVerifyCode','phoneCode','finishloginbymobile'];"
                 + "var mobileFlow=mobileIds.some(function(id){return visible(document.getElementById(id));});"
@@ -2362,7 +2388,7 @@ public class MainActivity extends Activity {
                 + "var interactiveChallenge=mobileFlow||graphInput||graphImage||challengeText;"
                 + "var hiddenError=text(document.getElementById('errormsghide'));"
                 + "var rsa=document.getElementById('rsa'),ul=document.getElementById('ul'),pl=document.getElementById('pl'),lt=document.getElementById('lt');"
-                + "return JSON.stringify({challenge:challenge,interactiveChallenge:interactiveChallenge,mobileFlow:mobileFlow,graphInput:graphInput,graphImage:graphImage,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
+                + "return JSON.stringify({challenge:challenge,interactiveChallenge:interactiveChallenge,mobileFlow:mobileFlow,graphInput:graphInput,graphImage:graphImage,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),credentialInputs:credentialInputs,rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
             if (!isCurrentLoginOperation(operationId)) return;
@@ -2372,6 +2398,7 @@ public class MainActivity extends Activity {
                 boolean challenge = result.optBoolean("challenge", false);
                 boolean interactiveChallenge = result.optBoolean("interactiveChallenge", false);
                 boolean loginForm = result.optBoolean("loginForm", false);
+                boolean credentialInputs = result.optBoolean("credentialInputs", false);
                 recordLoginDiagnostic(
                         "inspect",
                         "url=" + sanitizeDiagnosticUrl(currentUrl)
@@ -2381,6 +2408,7 @@ public class MainActivity extends Activity {
                                 + " graphInput=" + result.optBoolean("graphInput", false)
                                 + " graphImage=" + result.optBoolean("graphImage", false)
                                 + " loginForm=" + loginForm
+                                + " credentialInputs=" + credentialInputs
                                 + " sendCode=" + result.optBoolean("sendAvailable", false)
                                 + " rsaPresent=" + result.optBoolean("rsaPresent", false)
                                 + " ulLength=" + result.optInt("ulLength", 0)
@@ -2409,6 +2437,12 @@ public class MainActivity extends Activity {
                                     ? "学校认证需要图形验证码或手机验证码，请在官方页面完成验证。"
                                     : "学校认证需要短信二次验证，请在官方页面获取并填写验证码。"
                     );
+                    return;
+                }
+                if (credentialInputs && builtInLoginAwaitingPage) {
+                    // 只有确认账号密码输入框存在时才提交；如果页面是会话
+                    // 失效后的直接手机/图形验证页，上面的分支已经把它交给用户。
+                    injectBuiltInCredentialsIntoSchoolPage(operationId);
                     return;
                 }
                 if (!errorText.isEmpty()) {
@@ -2493,6 +2527,25 @@ public class MainActivity extends Activity {
         });
     }
 
+    /**
+     * 手机验证码作为内置登录的主动入口时没有账密登录事务 ID，仍要把
+     * 原生默认选择同步到学校页面（若该页面提供 saveDevice）。
+     */
+    private void syncPortalTrustDeviceSelection() {
+        if (portalWebView == null) return;
+        boolean trustDevice = interactiveTrustDeviceCheck == null
+                ? builtInTrustDeviceCheck == null || builtInTrustDeviceCheck.isChecked()
+                : interactiveTrustDeviceCheck.isChecked();
+        String script = "(function(){"
+                + "var save=document.getElementById('saveDevice');"
+                + "if(!save)return false;"
+                + "save.checked=" + Boolean.toString(trustDevice) + ";"
+                + "save.dispatchEvent(new Event('change',{bubbles:true}));"
+                + "return true;"
+                + "})();";
+        portalWebView.evaluateJavascript(script, null);
+    }
+
     private void showBuiltInInteractiveChallenge(long operationId, String message) {
         if (!isCurrentLoginOperation(operationId) || backgroundLoginInProgress) return;
         builtInInteractiveChallengeVisible = true;
@@ -2544,8 +2597,11 @@ public class MainActivity extends Activity {
             return;
         }
         if (isPortalLoginPage(currentUrl)) {
-            Toast.makeText(this, "学校认证页面仍在等待图形验证码或短信验证码，请完成后再确认。", Toast.LENGTH_LONG).show();
+            // 首次安装时 Dashboard 尚未加载，不能依赖 Dashboard 探针。
+            // 直接用当前 WebView Cookie 探测教务接口；学校认证成功但仍
+            // 保留 /tpass/login 地址时，也能在这里确认并进入首页。
             syncBuiltInTrustDeviceSelection(operationId);
+            verifyAcademicSessionAfterInteractiveChallenge(operationId);
             return;
         }
         if (portalActionButton != null) {
@@ -2566,6 +2622,48 @@ public class MainActivity extends Activity {
                 portalActionButton.setText("验证完成，进入执掌东大");
             }
         }, BUILT_IN_LOGIN_PORTAL_PROBE_DELAY_MS * 4L);
+    }
+
+    private void verifyAcademicSessionAfterInteractiveChallenge(long operationId) {
+        if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
+        if (portalActionButton != null) {
+            portalActionButton.setEnabled(false);
+            portalActionButton.setText("正在确认学校登录…");
+        }
+        recordLoginDiagnostic("interactive-confirm", "用户请求确认图形/手机验证后的教务会话");
+        cookieManager.flush();
+        networkExecutor.execute(() -> {
+            long deadline = System.currentTimeMillis() + ACADEMIC_PROBE_TOTAL_BUDGET_MS;
+            AcademicProbeResult result = probeAcademicEndpoint(
+                    PORTAL_URL + "/jwapp/sys/homeapp/api/home/currentUser.do",
+                    Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
+            );
+            if (result.kind == AcademicProbeResult.UNKNOWN && System.currentTimeMillis() < deadline) {
+                result = probeAcademicEndpoint(
+                        PORTAL_URL + "/jwapp/sys/homeapp/api/home/kb/xnxq.do",
+                        Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
+                );
+            }
+            AcademicProbeResult finalResult = result;
+            runOnUiThread(() -> {
+                if (!isCurrentLoginOperation(operationId)) return;
+                if (finalResult.kind == AcademicProbeResult.HEALTHY) {
+                    finishBuiltInLoginSuccess(operationId);
+                    return;
+                }
+                if (portalActionButton != null) {
+                    portalActionButton.setEnabled(true);
+                    portalActionButton.setText("验证完成，进入执掌东大");
+                }
+                Toast.makeText(
+                        this,
+                        finalResult.kind == AcademicProbeResult.INVALID
+                                ? "学校会话尚未确认，请完成图形验证码和短信验证码后再试。"
+                                : "暂时无法确认学校登录状态，请检查网络后再试。",
+                        Toast.LENGTH_LONG
+                ).show();
+            });
+        });
     }
 
     private void requestBuiltInSmsCode() {
@@ -2892,6 +2990,11 @@ public class MainActivity extends Activity {
         builtInLoginAwaitingPage = false;
         builtInLoginChallengeVisible = false;
         builtInInteractiveChallengeVisible = false;
+        if (interactiveTrustDeviceCheck != null) {
+            interactiveTrustDeviceCheck.setChecked(
+                    builtInTrustDeviceCheck == null || builtInTrustDeviceCheck.isChecked()
+            );
+        }
         showBuiltInChallenge(false);
         showPortal(true);
         portalWebView.postDelayed(this::activatePortalMobileLogin, BUILT_IN_LOGIN_TAB_SETTLE_MS);
@@ -2944,6 +3047,8 @@ public class MainActivity extends Activity {
                     Toast.makeText(this,
                             result.optString("error", "学校手机验证码登录暂不可用"),
                             Toast.LENGTH_LONG).show();
+                } else if (builtInMobileLoginMode) {
+                    portalWebView.postDelayed(this::syncPortalTrustDeviceSelection, 120L);
                 }
             } catch (Exception error) {
                 Toast.makeText(this, "学校手机验证码登录页面初始化失败，请改用原网页账密或二维码登录。", Toast.LENGTH_LONG).show();

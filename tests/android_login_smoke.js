@@ -32,6 +32,11 @@ assert.match(source, /showBuiltInInteractiveChallenge/);
 assert.match(source, /completeBuiltInInteractiveChallenge/);
 assert.match(source, /后台自动登录需要人工完成图形验证码和短信验证/);
 assert.match(source, /portalWebView\.postDelayed\(\(\) -> inspectBuiltInLoginPage/);
+assert.match(source, /credentialInputs/);
+assert.match(source, /当前页面已进入人工图形\/手机验证流程/);
+assert.match(source, /waitForPage/);
+assert.match(source, /verifyAcademicSessionAfterInteractiveChallenge/);
+assert.match(source, /首次安装时 Dashboard 尚未加载/);
 
 // Trust-device remains enabled by default and is synchronized into the
 // official challenge checkbox before the user submits the SMS challenge.
@@ -42,6 +47,7 @@ assert.match(source, /LOGIN_METHOD_MOBILE\.equals\(loginMethodForCurrentPortal\)
 assert.match(source, /信任此设备（默认已勾选）/);
 assert.match(source, /save\.checked=/);
 assert.match(source, /信任此设备/);
+assert.match(source, /syncPortalTrustDeviceSelection/);
 
 // Background login temporarily brings the WebView to the front. Returning to
 // the human challenge must restore the native overlays above it, otherwise
