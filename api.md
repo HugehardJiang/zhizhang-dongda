@@ -561,10 +561,13 @@ KBBP_CONTEXT
 | 星期 | `weekday`、`weekDay`、`SKXQ_DISPLAY`、`SKXQMC`、`SKXQ`、`XQJ`、`dayOfWeek`、`dayIndex`、`colIndex`、`columnIndex`、`day` |
 | 节次 | `section`、`sectionName`、`JC`、`JCDM`、`JCS`、`JCSJ`、`period`、`lesson` |
 | 起止节次 | `beginSection`/`startSection`、`endSection`/`finishSection`、`sectionIndex`/`rowIndex` |
-| 教室 | `classroom`、`JASMC`、`SKDD`、`JAS`、`roomName`、`classroomName`、`room`、`place`、`location` |
+| 校区 | `campus`、`campusName`、`XQMC`、`XQMC_DISPLAY`、`XQDM_DISPLAY`、`XXXQDM_DISPLAY`、`XXXQDM`、`XXXQMC`、`schoolAreaName` |
+| 教室 | `classroom`、`JASMC`、`JASMC_DISPLAY`、`SKDD`、`SKDD_DISPLAY`、`JAS`、`roomName`、`classroomName`、`room`、`place`、`location` |
 | 时间 | `classTime`、`SKSJ`、`SJ`、`time`、`scheduleTime`、`beginTime`、`endTime` |
 | 教师 | `teacherName`、`SKJS`、`teacher`、`teacherNames` |
 | 学分 | `credit`、`XF`、`credits` |
+
+统一映射结果把校区和教室分开：`campus` 保存“南湖校区/浑南校区”等校区标识，`location` 只保存教室或“线上”等具体地点。两者都属于可安全持久化的已映射字段，不能依赖被缓存层剥离的 `raw` 字段恢复。课程详情页可以组合显示 `campus + location`；总览、日视图、周表、课程列表和导出默认只显示 `location`。
 
 网格记录优先使用星期、节次、周次、教师、校区和教室；列表记录只用来补充网格缺失字段。不能只按课程名合并，因为“电路原理”等课程可能在不同星期、节次或周次重复出现。应先判断课程名/课程号身份，再比较星期、节次和周次：
 
@@ -610,7 +613,8 @@ function sameCourse(a, b) {
   section: "第3-4节",
   time: "1-3周、5-9周 星期四 第3-4节",
   teacher: "李硕",
-  location: "南湖校区 教212",
+  campus: "南湖校区",
+  location: "教212",
   detail: "原始时间地点文本",
   raw: {}
 }
@@ -621,7 +625,7 @@ function sameCourse(a, b) {
 - 周次：识别 `3-18周`、`1~9周`、`第3-18周`，也兼容以逗号/顿号分隔的数字列表；`1-3周(单)` 只展开第 1、3 周，`1-4周(双)` 只展开第 2、4 周，不能按连续区间处理；
 - 星期：识别 `星期一`、`周一` 和数字星期，数字 `1–6` 对应周一至周六，`0/7` 对应周日；
 - 节次：识别 `第1-2节`、`1-2节`、`JC/JCDM/JCS`，单节次统一为 `第N节`；
-- 地点：优先使用结构化教室字段，文本中再识别 `校区`、`楼`、`室`、`实验室`、`机211`、`大成113`、`逸209`、`线上`、`网络平台` 等片段；
+- 地点：优先使用结构化校区和教室字段，文本中再识别 `校区`、`楼`、`室`、`实验室`、`机211`、`大成113`、`逸209`、`线上`、`网络平台` 等片段；映射后校区进入 `campus`，教室/线上进入 `location`。
 - 教师：优先使用教师字段；若网格的周次字段中包含教师串，再从斜杠后的文本清理 `[主讲]`；
 - 原始字段必须保留，便于解析失败时在详情弹窗中核对。
 
@@ -938,7 +942,7 @@ querySetting=[{"name":"JXBID","value":",A106183,A106193,","linkOpt":"and","build
 1. 全校班级详情优先用 `KCH` 查询，再按当前班级/上课对象二次筛选；个人课表卡片已经对应一个具体教学班，应直接用该卡片的 `JXBID` 查询，避免个人页面退回全校项目集合。只有缺少课程号/教学班号时才使用另一种方式兜底。
 2. 从 `TYXMDM_DISPLAY` 显示项目名称，从 `SKJSSJ` 或 `YPSJDD` 提取带 `[主讲]`/`[辅导]` 标记的教师姓名。
 3. 从 `YPSJDD` 解析周次、星期、节次。`第三节-第四节` 必须合并成 `第3-4节`，不能拆成两个单节。
-4. `SKDD`、`JASMC` 等字段存在时显示教室；没有教室字段时显示 `XXXQDM_DISPLAY` 校区，不把整段 `YPSJDD` 错当成地点。
+4. `SKDD`、`JASMC` 等字段存在时把教室写入 `location`，把 `XXXQDM_DISPLAY` 写入独立的 `campus`；课程卡片、课表网格和导出只显示 `location`，课程详情再组合显示校区与教室，不把整段 `YPSJDD` 错当成地点。
 5. 网格详情弹窗使用筛选后的每一行作为一条体育项目明细；网格卡片仍保留当前实际排课记录，二者不能相互覆盖。
 
 插件实现不需要打开或依赖教务系统网页：扩展页直接携带浏览器现有登录会话向上述接口发送请求（`credentials: include`），原系统标签页只作为用户手动核对数据的入口。
@@ -1705,7 +1709,8 @@ rows.sort((a, b) => collator.compare(a.courseName, b.courseName));
       "section": "第1-2节",
       "time": "08:00-09:40",
       "teacher": "李硕",
-      "location": "南湖校区 机211",
+      "campus": "南湖校区",
+      "location": "机211",
       "category": "专业基础课",
       "assessment": "考试课",
       "requirement": "必修",

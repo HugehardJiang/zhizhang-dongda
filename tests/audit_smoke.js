@@ -43,6 +43,7 @@ globalThis.__auditTest = {
   isSupportedAllScheduleType, allScheduleDetailIdentity, scheduleDetailTypeCodes,
   isAllSchedulePermissionError, mapCourse, parseDay, parseSectionRange, courseWeekNumbers,
   splitScheduleSegments, expandMappedCourse, expandCourseRows, mergeCourseSources,
+  splitCampusLocationText, campusTextFromValues, courseLocationText, courseDisplayDetailText,
   renderScheduleGrid,
   mergePersonalCourseSources,
   calculateAverageGpa, courseIndexForScope,
@@ -669,7 +670,46 @@ const t = global.__auditTest;
     assert.strictEqual(expandedAlias.length, 4);
     assert.deepStrictEqual(expandedAlias.map((course) => course.location).sort(), ['大成313', '大成313', '教307', '逸405']);
   }
-  assert.strictEqual(t.mapCourse({ courseName: '普通地点', JASMC: '南湖校区 教210' }).location, '南湖校区 教210');
+  const ordinaryCampusCourse = t.mapCourse({ courseName: '普通地点', JASMC: '南湖校区 教210' });
+  assert.strictEqual(ordinaryCampusCourse.location, '教210');
+  assert.strictEqual(ordinaryCampusCourse.campus, '南湖校区');
+  assert.strictEqual(t.courseLocationText(ordinaryCampusCourse), '教210');
+  assert.strictEqual(t.courseLocationText(ordinaryCampusCourse, true), '南湖校区 教210');
+  assert.strictEqual(t.courseDisplayDetailText({ detail: '1-8周 袁媛 南湖校区 教210', campus: '南湖校区' }), '1-8周 袁媛 教210');
+
+  // The real grid payload exposes placeName and campusName separately. The
+  // campus must survive mapping and the cache projection even when the room
+  // alias appears first.
+  const campusGridRaw = {
+    courseCode: 'A1307000063', courseName: '模拟电子技术基础', beginSection: 3, endSection: 4,
+    beginTime: '10:00', endTime: '11:40', placeName: '逸405', dayOfWeek: 3,
+    teachClassId: 'A117624', campusName: '南湖校区',
+    cellDetail: [
+      { text: '自动化2507-10' },
+      { text: '模拟电子技术基础 A117624' },
+      { text: '1周田亚男,沈鸿媛  南湖校区 逸405 ' },
+      { text: '2周田亚男,沈鸿媛  南湖校区 线上 ' },
+      { text: '3-8周,10-13周田亚男,沈鸿媛  南湖校区 大成313 ' },
+      { text: '考试 / 百分制' }
+    ],
+    titleWeekTeacherClassroomDetail: [
+      '1周 田亚男,沈鸿媛 南湖校区 逸405',
+      '2周 田亚男,沈鸿媛 南湖校区 线上',
+      '3-8周,10-13周 田亚男,沈鸿媛 南湖校区 大成313'
+    ]
+  };
+  const campusGridCourse = t.mapCourse(campusGridRaw);
+  assert.strictEqual(campusGridCourse.campus, '南湖校区');
+  assert.strictEqual(campusGridCourse.location, '逸405');
+  assert.strictEqual(t.courseLocationText(campusGridCourse), '逸405');
+  assert.strictEqual(t.courseLocationText(campusGridCourse, true), '南湖校区 逸405');
+  assert.deepStrictEqual(t.expandMappedCourse(campusGridCourse).map((course) => [course.campus, course.location]).sort((left, right) => left[1].localeCompare(right[1])), [
+    ['南湖校区', '大成313'], ['南湖校区', '线上'], ['南湖校区', '逸405']
+  ]);
+  const roomFirstRaw = { ...campusGridRaw, placeName: '教210', courseName: '复变函数与积分变换', courseCode: 'A1501000080' };
+  const roomFirstCourse = t.mapCourse(roomFirstRaw);
+  assert.strictEqual(roomFirstCourse.campus, '南湖校区');
+  assert.strictEqual(roomFirstCourse.location, '教210');
 
   // Section text contains Chinese numerals, but it is not a weekday.  parseDay
   // only accepts an explicit weekday token or a standalone numeric 1-7.
@@ -707,8 +747,8 @@ const t = global.__auditTest;
   };
   const arrayDetailExpanded = t.expandMappedCourse(t.mapCourse(arrayDetailRaw));
   assert.strictEqual(arrayDetailExpanded.length, 2);
-  assert.deepStrictEqual(arrayDetailExpanded.map((course) => [course.weeks, course.location]), [
-    ['1-2周', '南湖校区 机211'], ['3-4周', '浑南校区 线上']
+  assert.deepStrictEqual(arrayDetailExpanded.map((course) => [course.weeks, course.campus, course.location]), [
+    ['1-2周', '南湖校区', '机211'], ['3-4周', '浑南校区', '线上']
   ]);
 
   // If the grid endpoint only returns the current placement while the list
@@ -774,6 +814,20 @@ const t = global.__auditTest;
   assert.strictEqual(partialScheduleSnapshot.scheduleDetail.length, completePersonal.scheduleDetail.length);
   assert.ok(partialScheduleSnapshot.scheduleDetail.every((row) => !Object.prototype.hasOwnProperty.call(row, 'raw')));
   assert.ok(partialScheduleSnapshot.courses.every((course) => !Object.prototype.hasOwnProperty.call(course, 'raw')));
+
+  const campusSnapshot = t.cacheTermSnapshot({
+    scores: [], exams: [], courses: [campusGridCourse],
+    scheduleDetail: t.expandMappedCourse(campusGridCourse),
+    scheduleSource: '网格', gpa: '—', gpaMeta: {}
+  });
+  assert.strictEqual(campusSnapshot.courses[0].campus, '南湖校区');
+  assert.strictEqual(campusSnapshot.courses[0].location, '逸405');
+  assert.deepStrictEqual(campusSnapshot.scheduleDetail.map((row) => [row.campus, row.location]).sort((left, right) => left[1].localeCompare(right[1])), [
+    ['南湖校区', '大成313'], ['南湖校区', '线上'], ['南湖校区', '逸405']
+  ]);
+  assert.ok(campusSnapshot.scheduleDetail.every((row) => row.sourceCourseIndex === 0));
+  assert.ok(campusSnapshot.scheduleDetail.every((row) => !Object.prototype.hasOwnProperty.call(row, 'raw')));
+
   const liveDataReference = t.state.data;
   t.state.data = { ...liveDataReference, courses: completePersonal.courses, scheduleDetail: completePersonal.scheduleDetail.slice(0, 1) };
   const liveScheduleSnapshot = t.cacheTermSnapshot();
@@ -789,6 +843,44 @@ const t = global.__auditTest;
   t.state.personalCache = previousCacheState;
   t.state.termCode = previousTermCode;
   t.state.data = previousData;
+
+  // A legacy snapshot may have retained the campus only inside the location
+  // string. Hydration normalizes it before any offline renderer reads it.
+  const legacyCampusCourse = { ...campusGridCourse, location: '南湖校区 逸405', campus: undefined };
+  delete legacyCampusCourse.raw;
+  const legacyCampusDetail = { ...legacyCampusCourse, detail: '1周 田亚男,沈鸿媛 南湖校区 逸405', sourceCourseIndex: 0 };
+  const legacyCacheState = t.state.personalCache;
+  const legacyTermCode = t.state.termCode;
+  const legacyData = t.state.data;
+  t.state.termCode = 'LEGACY-CAMPUS-TERM';
+  t.state.personalCache = { ...legacyCacheState, termSnapshots: {
+    'LEGACY-CAMPUS-TERM': {
+      courses: [legacyCampusCourse], scheduleDetail: [legacyCampusDetail], scores: [], exams: [], gpa: '—', gpaMeta: {}
+    }
+  } };
+  assert.strictEqual(t.applyCachedTermSnapshot('LEGACY-CAMPUS-TERM'), true);
+  assert.strictEqual(t.state.data.courses[0].campus, '南湖校区');
+  assert.strictEqual(t.state.data.courses[0].location, '逸405');
+  assert.strictEqual(t.state.data.scheduleDetail[0].campus, '南湖校区');
+  assert.strictEqual(t.state.data.scheduleDetail[0].location, '逸405');
+  const cachedDetailCourse = { ...t.state.data.courses[0] };
+  delete cachedDetailCourse.raw;
+  t.state.data.courses = [cachedDetailCourse];
+  t.state.data.scheduleDetail = [{ ...cachedDetailCourse, sourceCourseIndex: 0 }];
+  t.state.selectedCourse = cachedDetailCourse;
+  t.state.selectedCourseScope = 'personal';
+  const offlineDetailMarkup = t.renderCourseDetailModal();
+  assert.ok(offlineDetailMarkup.includes('南湖校区 逸405'));
+  const offlineTableMarkup = t.renderCourseRowsTable([cachedDetailCourse], false, 'personal');
+  assert.ok(offlineTableMarkup.includes('逸405'));
+  assert.ok(!offlineTableMarkup.includes('南湖校区'));
+  const offlineRawTableMarkup = t.renderCourseRowsTable([cachedDetailCourse], true, 'personal');
+  assert.ok(offlineRawTableMarkup.includes('1周 田亚男,沈鸿媛 逸405'));
+  assert.ok(!offlineRawTableMarkup.includes('南湖校区'));
+  t.state.selectedCourse = null;
+  t.state.personalCache = legacyCacheState;
+  t.state.termCode = legacyTermCode;
+  t.state.data = legacyData;
 
   // Older v2 snapshots may still contain only a subset of scheduleDetail.
   // Their mapped course.detail retains the compound schedule text, so the

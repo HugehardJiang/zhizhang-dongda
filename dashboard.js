@@ -642,8 +642,8 @@ function emptyPersonalData() {
 }
 
 function cacheScheduleDetailRows(data = state.data) {
-  const courses = Array.isArray(data?.courses) ? data.courses : [];
-  const details = Array.isArray(data?.scheduleDetail) ? data.scheduleDetail : [];
+  const courses = normalizeCachedCourseRows(Array.isArray(data?.courses) ? data.courses : []);
+  const details = normalizeCachedCourseRows(Array.isArray(data?.scheduleDetail) ? data.scheduleDetail : []);
   const rows = [];
 
   // Persist exactly the same school-only occurrence set that the online
@@ -651,7 +651,16 @@ function cacheScheduleDetailRows(data = state.data) {
   // in the display merge logic from making the cache silently diverge again.
   // The fallback below is retained for callers that pass a detached snapshot
   // object (including tests and migrations).
-  if (data === state.data) return schoolPersonalScheduleRows(courses);
+  if (data === state.data) {
+    // normalizeCachedCourseRows intentionally returns new objects. Restore the
+    // compact-row index on this detached projection so courseArrangementRows
+    // can still associate every cached arrangement with the right course when
+    // the live grid and the list contain identical course names.
+    const indexedCourses = courses.map((course, sourceCourseIndex) => (
+      course && course.source !== "local" ? { ...course, sourceCourseIndex } : course
+    ));
+    return schoolPersonalScheduleRows(indexedCourses, details);
+  }
 
   const append = (candidate, sourceCourseIndex = -1) => {
     if (!candidate || candidate.source === "local" || !hasSchedulePlacement(candidate)) return;
@@ -699,7 +708,7 @@ function cacheTermSnapshot(data = state.data) {
   return cacheSafeValue({
     scores: data.scores,
     exams: data.exams,
-    courses: data.courses,
+    courses: normalizeCachedCourseRows(data.courses),
     // Cache the complete parsed arrangement set, not only the grid response.
     // raw is intentionally removed by cacheSafeValue, so this projection is
     // what lets compound multi-day/multi-location courses work offline.
@@ -861,8 +870,8 @@ function applyCachedTermSnapshot(termCode, fallback = null) {
     ...snapshot,
     scores: Array.isArray(snapshot.scores) ? snapshot.scores : [],
     exams: Array.isArray(snapshot.exams) ? snapshot.exams : [],
-    courses: Array.isArray(snapshot.courses) ? snapshot.courses : [],
-    scheduleDetail: Array.isArray(snapshot.scheduleDetail) ? snapshot.scheduleDetail : [],
+    courses: normalizeCachedCourseRows(Array.isArray(snapshot.courses) ? snapshot.courses : []),
+    scheduleDetail: normalizeCachedCourseRows(Array.isArray(snapshot.scheduleDetail) ? snapshot.scheduleDetail : []),
     allScores: Array.isArray(state.personalCache.allScores)
       ? state.personalCache.allScores
       : Array.isArray(snapshot.allScores) ? snapshot.allScores : [],
@@ -4408,12 +4417,12 @@ function mapExam(raw) {
 
 function parseCourseText(value) {
   const text = displayValue(value, "");
-  if (!text) return { weeks: "", weekday: "", section: "", time: "", location: "", teacher: "" };
+  if (!text) return { weeks: "", weekday: "", section: "", time: "", location: "", campus: "", teacher: "" };
   const normalized = text.replace(/[０-９]/g, (char) => String.fromCharCode(char.charCodeAt(0) - 0xfee0));
   const dayMatch = normalized.match(/(?:星期|周)(日|天|一|二|三|四|五|六|七|[0-7])/);
   const sectionMatches = [...normalized.matchAll(/第?\s*([0-9一二三四五六七八九十]+)(?:\s*[-~至]\s*([0-9一二三四五六七八九十]+))?\s*节/g)];
   const weekMatches = [...normalized.matchAll(/(?:第\s*)?([0-9一二三四五六七八九十]+(?:\s*[-~至]\s*[0-9一二三四五六七八九十]+)?)\s*周/g)];
-  const locationMatch = normalized.match(/((?:[\u4e00-\u9fffA-Za-z0-9（）()\-]+校区)(?:\s+[^\n；;|]+)?|(?:线上|网络平台|网络教学平台)(?:\s+[^\n；;|]+)?)/);
+  const locationMatch = normalized.match(/((?:[\u4e00-\u9fffA-Za-z0-9（）()\-]+校区)(?:\s*[^\n；;|,，、/]+)?|(?:线上|网络平台|网络教学平台)(?:\s*[^\n；;|,，、/]+)?)/);
   const locationPart = locationMatch?.[1]?.trim() || normalized
     .split(/[\n；;|]/)
     .map((part) => part.trim())
@@ -4423,7 +4432,8 @@ function parseCourseText(value) {
   const section = [...new Set(sectionMatches.map((match) => `第${match[1]}${match[2] ? `-${match[2]}` : ""}节`))].join("、");
   const teacherMatch = normalized.match(/周\s*([^\n；;|]*?)\s+(?=(?:[^\s,，;；|]+校区|线上|网络平台))/);
   const teacher = teacherMatch?.[1]?.trim() || "";
-  return { weeks, weekday, section, time: [weeks, weekday ? `星期${weekday}` : "", section].filter(Boolean).join(" "), location: locationPart, teacher };
+  const locationParts = splitCampusLocationText(locationPart);
+  return { weeks, weekday, section, time: [weeks, weekday ? `星期${weekday}` : "", section].filter(Boolean).join(" "), location: locationParts.location, campus: locationParts.campus, teacher };
 }
 
 function formatWeeksValue(value) {
@@ -4524,7 +4534,48 @@ const SCHEDULE_DETAIL_KEYS = [
   "cellDetail", "titleWeekTeacherClassroomDetail", "titleDetail", "cellWeekTeacherClassroomDetail", "cellDetailText", "detail"
 ];
 
-const SCHEDULE_LOCATION_ALIASES = ["JASMC", "SKDD", "JAS", "roomName", "classroomName", "room", "place", "placeName", "location", "locationName", "address"];
+const SCHEDULE_LOCATION_ALIASES = ["classroom", "JASMC", "JASMC_DISPLAY", "SKDD", "SKDD_DISPLAY", "JAS", "roomName", "classroomName", "room", "place", "placeName", "location", "locationName", "address"];
+const SCHEDULE_CAMPUS_ALIASES = ["campus", "campusName", "campusLabel", "campusText", "XQMC", "XQMC_DISPLAY", "XQDM_DISPLAY", "XQDM", "XXXQDM_DISPLAY", "XXXQDM", "XXXQMC", "XXXQ", "schoolArea", "schoolAreaName", "areaName"];
+const CAMPUS_LABEL_PATTERN = /(?:南湖校区|浑南校区|[\u4e00-\u9fffA-Za-z0-9（）()\-]{1,20}校区)/g;
+
+function campusLabelsFromValue(value) {
+  const text = displayValue(value, "").replace(/\s+/g, " ").trim();
+  if (!text) return [];
+  const labels = [];
+  const add = (label) => {
+    if (label && !labels.includes(label)) labels.push(label);
+  };
+  if (/南湖(?:校区)?/i.test(text) || /^nanhu$/i.test(text)) add("南湖校区");
+  if (/浑南(?:校区)?/i.test(text) || /^hunnan$/i.test(text)) add("浑南校区");
+  (text.match(CAMPUS_LABEL_PATTERN) || []).forEach((label) => add(label));
+  return labels;
+}
+
+function campusTextFromValues(...values) {
+  const labels = [];
+  values.flat(Infinity).forEach((value) => {
+    campusLabelsFromValue(value).forEach((label) => {
+      if (!labels.includes(label)) labels.push(label);
+    });
+  });
+  return labels.join("、");
+}
+
+function splitCampusLocationText(value) {
+  const text = displayValue(value, "").replace(/\s+/g, " ").trim();
+  if (!text) return { campus: "", location: "" };
+  const campus = campusTextFromValues(text);
+  if (!campus) return { campus: "", location: text };
+  const escapeRegExp = (item) => String(item).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const aliases = campus.split("、").flatMap((label) => [label, label.replace(/校区$/, "")]);
+  const campusPattern = new RegExp(aliases.sort((left, right) => right.length - left.length).map(escapeRegExp).join("|"), "g");
+  const location = text
+    .replace(campusPattern, " ")
+    .replace(/[\/|,，、;；]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { campus, location };
+}
 
 function isCompoundScheduleSource(value) {
   const text = String(value ?? "").trim();
@@ -4547,6 +4598,18 @@ function scheduleDetailValueTexts(value, depth = 0) {
   }
   const text = String(value).replace(/\r/g, "").trim();
   return text ? [text] : [];
+}
+
+function textValuesFromKeys(object, keys) {
+  if (!object || typeof object !== "object") return [];
+  const values = [];
+  keys.forEach((key) => {
+    scheduleDetailValueTexts(object[key]).forEach((text) => {
+      const normalized = displayValue(text, "").replace(/\s+/g, " ").trim();
+      if (normalized && !values.includes(normalized)) values.push(normalized);
+    });
+  });
+  return values;
 }
 
 function scheduleDetailTexts(raw) {
@@ -4645,6 +4708,7 @@ function courseIncludedEntries(course) {
     teachingCode: displayValue(course?.code, ""),
     teacher: displayValue(course?.teacher, ""),
     location: displayValue(course?.location, ""),
+    campus: displayValue(course?.campus, ""),
     weeks: displayValue(course?.weeks, ""),
     weekday: displayValue(course?.weekday, ""),
     section: courseSectionLabel(course),
@@ -4735,13 +4799,21 @@ function normalizeIncludedCourseEntry(value, depth = 0) {
   const sectionRaw = valueOf(value, ["section", "sectionName", "JC", "JCDM", "JCS", "period", "lesson"], "");
   const detailText = displayValue(valueOf(value, ["text", "detail", "titleDetail", "description", "label"], ""), "");
   const teacher = cleanTeacherText(valueOf(value, ["teacherName", "SKJS", "teacher", "teacherNames", "授课教师"], ""));
-  const location = displayValue(valueOf(value, ["classroom", "JASMC", "SKDD", "roomName", "place", "location", "locationName"], ""), "");
+  const locationValue = displayValue(valueOf(value, SCHEDULE_LOCATION_ALIASES), "");
+  const detailParts = splitCampusLocationText(detailText);
+  const locationParts = splitCampusLocationText(locationValue);
+  const campus = campusTextFromValues(
+    textValuesFromKeys(value, SCHEDULE_CAMPUS_ALIASES),
+    detailParts.campus,
+    locationParts.campus
+  );
+  const location = locationParts.location || detailParts.location;
   const weeks = canonicalWeeksText(weeksRaw) || displayValue(weeksRaw, "");
   const weekday = normalizeWeekday(displayValue(weekdayRaw, ""));
   const section = normalizeSection(displayValue(sectionRaw, ""));
-  const hasStructuredFields = [name, catalogCode, teachingCode, teacher, location, weeks, weekday, section].some(Boolean);
+  const hasStructuredFields = [name, catalogCode, teachingCode, teacher, location, campus, weeks, weekday, section].some(Boolean);
   if (hasStructuredFields || detailText) {
-    return [{ name, catalogCode, teachingCode, teacher, location, weeks, weekday, section, text: detailText }];
+    return [{ name, catalogCode, teachingCode, teacher, location, campus, weeks, weekday, section, text: detailText }];
   }
 
   return Object.values(value).flatMap((child) => normalizeIncludedCourseEntry(child, depth + 1));
@@ -4766,6 +4838,7 @@ function rawIncludedCourseDetails(raw) {
       entry.teachingCode,
       entry.teacher,
       entry.location,
+      entry.campus,
       entry.weeks,
       entry.weekday,
       entry.section,
@@ -4803,8 +4876,11 @@ function mapSportProject(raw) {
   const weeksRaw = valueOf(raw, ["SKZC", "ZC", "weeks", "week", "classWeek", "weekRange"], "");
   const weekdayRaw = valueOf(raw, ["SKXQ_DISPLAY", "SKXQMC", "SKXQ", "XQJ", "weekday", "weekDay"], "");
   const sectionRaw = valueOf(raw, ["JC", "JCDM", "JCS", "section", "period", "lesson"], "");
-  const location = displayValue(valueOf(raw, ["SKDD", "JASMC", "JASMC_DISPLAY", "room", "classroom", "place", "location"], ""), "") || parsed.location;
-  const campus = displayValue(valueOf(raw, ["XXXQDM_DISPLAY", "XXXQDM", "campusName", "campus"], ""), "");
+  const rawLocationValues = textValuesFromKeys(raw, SCHEDULE_LOCATION_ALIASES);
+  const rawCampusValues = textValuesFromKeys(raw, SCHEDULE_CAMPUS_ALIASES);
+  const rawLocationParts = rawLocationValues.map((value) => splitCampusLocationText(value));
+  const location = rawLocationParts.find((parts) => parts.location)?.location || parsed.location;
+  const campus = campusTextFromValues(rawCampusValues, rawLocationValues, parsed.campus);
   // 体育“列表”里的周次/教师串比单独的周次字段更完整；优先使用它，
   // 同时由 parseCourseText 去重，避免同一条排课在两个字段中出现两次。
   const weeks = canonicalWeeksText(parsed.weeks) || canonicalWeeksText(displayValue(weeksRaw, ""));
@@ -4825,7 +4901,7 @@ function mapSportProject(raw) {
   const requirement = normalizeCourseRequirement(valueOf(raw, ["KCXZDM_DISPLAY", "KCXZMC", "KCXZDM", "KCXZ", "requirement"], ""));
   const category = displayValue(valueOf(raw, ["KCLBDM_DISPLAY", "KCLBMC", "KCLB", "category"], ""), "");
   const teacher = sportTeacherText(raw) || parsed.teacher;
-  const place = [location, campus].filter((value, index, values) => value && values.indexOf(value) === index).join(" ");
+  const place = [campus, location].filter((value, index, values) => value && values.indexOf(value) === index).join(" ");
   return {
     name,
     project,
@@ -4836,7 +4912,7 @@ function mapSportProject(raw) {
     teacher,
     teacherSchedule,
     scheduleResult,
-    location: place,
+    location,
     campus,
     weeks,
     weekday,
@@ -4954,12 +5030,14 @@ function applySportProjectMetadata(course, entries) {
   const firstCategory = entries.map((entry) => entry.category).find(Boolean);
   const firstTeacher = entries.length === 1 ? entries[0].teacher : "";
   const firstPlace = entries.length === 1 ? entries[0].location : "";
+  const firstCampus = entries.length === 1 ? entries[0].campus : "";
   if (!course.assessment && firstAssessment) course.assessment = course.examType = firstAssessment;
   if (!course.requirement && firstRequirement) course.requirement = course.nature = firstRequirement;
   if (!course.category && firstCategory) course.category = firstCategory;
   if (!course.catalogCode && first?.catalogCode) course.catalogCode = first.catalogCode;
   if (!course.teacher && firstTeacher) course.teacher = firstTeacher;
   if (!course.location && firstPlace) course.location = firstPlace;
+  if (!course.campus && firstCampus) course.campus = firstCampus;
 }
 
 async function loadSportProjectsForCourse(course, scope = "personal") {
@@ -5051,7 +5129,19 @@ function mapCourse(raw) {
   const rawSection = rawSectionStart && rawSectionEnd
     ? `${rawSectionStart}-${rawSectionEnd}`
     : rawSectionValue || rawSectionStart;
-  const rawLocation = valueOf(raw, ["classroom", "JASMC", "SKDD", "JAS", "roomName", "classroomName", "room", "place", "placeName", "location", "locationName", "address", "campusName"]);
+  // 教务网格同时返回“教室字段”和“校区字段”。以前只用 valueOf 取第一个
+  // 地点别名，像 placeName=“逸405”时就会把后面的 campusName 丢掉；
+  // 这里先收集所有别名，再把校区和教室分成两个稳定字段。
+  const rawLocationValues = textValuesFromKeys(raw, SCHEDULE_LOCATION_ALIASES);
+  const rawCampusValues = textValuesFromKeys(raw, SCHEDULE_CAMPUS_ALIASES);
+  const rawLocation = rawLocationValues.find((value) => isCompoundScheduleSource(value))
+    || rawLocationValues.find((value) => {
+      const parts = splitCampusLocationText(value);
+      return parts.location && parts.campus;
+    })
+    || rawLocationValues.find((value) => splitCampusLocationText(value).location)
+    || rawLocationValues[0]
+    || "";
   const rawTimeStart = valueOf(raw, ["beginTime", "startTime"], "");
   const rawTimeEnd = valueOf(raw, ["endTime", "finishTime"], "");
   const rawTime = valueOf(raw, ["classTime", "SKSJ", "SJ", "time", "scheduleTime"], "")
@@ -5067,7 +5157,7 @@ function mapCourse(raw) {
   // KCLB 等类别字段单独保留，由全校课表页面按“课程类别”展示。
   const normalizedNature = normalizeCourseRequirement(rawNature) || detailRequirement;
   const normalizedAssessment = normalizeCourseAssessment(rawAssessment) || normalizeCourseAssessment(scheduleAssessment) || normalizeCourseAssessment(detailAssessment);
-  const parsed = parseCourseText([detail, rawWeeks, rawWeekday, rawSection, rawLocation].filter(Boolean).join(" "));
+  const parsed = parseCourseText([detail, rawWeeks, rawWeekday, rawSection, rawLocation, ...rawCampusValues].filter(Boolean).join(" "));
   const rawWeeksText = displayValue(rawWeeks, "");
   const weeksFromRaw = canonicalWeeksText(rawWeeksText) || formatWeeksValue(rawWeeks);
   const weeks = weeksFromRaw || parsed.weeks || rawWeeksText;
@@ -5093,21 +5183,29 @@ function mapCourse(raw) {
       : `第${sectionRange.start}-${sectionRange.end}节`
     : normalizeSection(displayValue(sectionCandidate, ""));
   const rawLocationText = displayValue(rawLocation, "");
-  const compoundLocationSource = isCompoundScheduleSource(rawLocationText);
+  const compoundLocationSource = rawLocationValues.find((value) => isCompoundScheduleSource(value)) || "";
   const firstCompoundSegment = compoundLocationSource
-    ? splitScheduleSegments(rawLocationText)[0]
+    ? splitScheduleSegments(compoundLocationSource)[0]
     : "";
   const firstCompoundParsed = firstCompoundSegment
-    ? parseScheduleSegment(firstCompoundSegment, { ...parsed, teacher: parsed.teacher || "", location: "" })
+    ? parseScheduleSegment(firstCompoundSegment, { ...parsed, teacher: parsed.teacher || "", location: "", campus: parsed.campus || "" })
     : null;
   // JASMC/SKDD/location 在部分接口中不是教室字段，而是完整复合排课串。
   // 不能把整串写进课程地点；先取首段作为基础值，expandMappedCourse 会
   // 再为每个独立 scheduleDetail 覆盖成各自教室。
+  const rawLocationParts = rawLocationValues.map((value) => splitCampusLocationText(value));
+  const directLocation = rawLocationParts.find((parts) => parts.location)?.location || "";
   const location = compoundLocationSource
-    ? displayValue(firstCompoundParsed?.location, "")
-    : displayValue(rawLocation, parsed.location || "");
+    ? displayValue(firstCompoundParsed?.location, directLocation || parsed.location || "")
+    : directLocation || parsed.location || "";
+  const campus = campusTextFromValues(
+    rawCampusValues,
+    rawLocationValues,
+    parsed.campus,
+    firstCompoundParsed?.campus
+  );
   const time = displayValue(rawTime, [weeks, weekday, section].filter(Boolean).join(" ") || parsed.time || "");
-  const fullDetail = displayValue(detail, [weeks, weekday, section, location].filter(Boolean).join(" "));
+  const fullDetail = displayValue(detail, [weeks, weekday, section, campus, location].filter(Boolean).join(" "));
   const rawName = displayValue(valueOf(raw, ["courseName", "KCM", "KCMC", "course", "name"]), "");
   const rawCode = displayValue(valueOf(raw, ["teachClassId", "courseSerialNo", "teachClassCode", "classCode", "courseNo", "KCH", "KCHM", "courseCode", "code"]), "");
   const gridTeacher = rawWeeksText.includes("/")
@@ -5125,6 +5223,7 @@ function mapCourse(raw) {
     catalogCode: displayValue(rawCatalogCode, ""),
     teacher: explicitTeacher || inferredTeacher,
     location,
+    campus,
     time,
     weeks,
     weekday,
@@ -5226,7 +5325,10 @@ function canonicalSectionText(value) {
 
 function parseScheduleSegment(segment, baseCourse) {
   const text = String(segment ?? "").replace(/[／]/g, "/").replace(/[，]/g, ",").trim();
-  const weeks = canonicalWeeksText(text) || canonicalWeeksText(baseCourse?.weeks) || displayValue(baseCourse?.weeks, "");
+  const explicitWeeks = canonicalWeeksText(text);
+  const hasExplicitPlacementAnchor = explicitWeeks || /(?:星期|周)(?:日|天|一|二|三|四|五|六|七|[0-7])/.test(text) || parseSectionRange(text);
+  if (!hasExplicitPlacementAnchor) return null;
+  const weeks = explicitWeeks || canonicalWeeksText(baseCourse?.weeks) || displayValue(baseCourse?.weeks, "");
   if (!weeks) return null;
 
   const parts = text.split(/\s*\/\s*/).map((part) => part.trim()).filter(Boolean);
@@ -5236,6 +5338,7 @@ function parseScheduleSegment(segment, baseCourse) {
   const section = canonicalSectionText(sectionPart);
   let teacher = "";
   let location = "";
+  let campus = "";
 
   // 后续片段可能省略周次或星期，只剩“节次/教师/地点”；只要有明确
   // 的星期或节次锚点，也应按斜杠字段读取教师和教室。
@@ -5244,7 +5347,11 @@ function parseScheduleSegment(segment, baseCourse) {
     const sectionIndex = parts.findIndex((part) => part === sectionPart);
     const tail = sectionIndex >= 0 ? parts.slice(sectionIndex + 1) : [];
     if (tail.length) teacher = cleanTeacherText(tail[0]);
-    if (tail.length > 1) location = tail.slice(1).join(" / ").replace(/\[[^\]]*\]/g, "").trim();
+    if (tail.length > 1) {
+      const place = splitCampusLocationText(tail.slice(1).join(" / ").replace(/\[[^\]]*\]/g, "").trim());
+      campus = place.campus;
+      location = place.location;
+    }
   }
 
   const compact = parseCourseText(text);
@@ -5252,12 +5359,14 @@ function parseScheduleSegment(segment, baseCourse) {
   // 当成教师前缀；只要基础行已有教师，优先使用结构化教师字段。
   teacher = cleanTeacherText(teacher || baseCourse.teacher || (structuredSegment ? compact.teacher : ""));
   location = location || compact.location || baseCourse.location || "";
+  campus = campus || compact.campus || baseCourse.campus || "";
   return {
     weeks,
     weekday: weekday || baseCourse.weekday || "",
     section: section || baseCourse.section || "",
     teacher,
-    location
+    location,
+    campus
   };
 }
 
@@ -5287,6 +5396,7 @@ function expandMappedCourse(course) {
         section: parsed.section || course.section,
         teacher: parsed.teacher || course.teacher,
         location: parsed.location || course.location,
+        campus: parsed.campus || course.campus,
         time: [parsed.weeks, parsed.weekday, parsed.section, extractClockText(course.time)].filter(Boolean).join(" "),
         detail: segment,
         scheduleSegment: segment
@@ -5671,7 +5781,7 @@ function hasCourseScheduleConflict(left, right) {
     // 只要一方完整包含另一方，仍视为同一排课的补充字段。
     return !leftValue.includes(rightValue) && !rightValue.includes(leftValue);
   };
-  return fieldsConflict("location") || fieldsConflict("teacher");
+  return fieldsConflict("campus") || fieldsConflict("location") || fieldsConflict("teacher");
 }
 
 // 课程名相同不代表是同一条排课记录。一个课程可能在不同星期、节次或周次重复出现，
@@ -5681,7 +5791,7 @@ function sameCourse(left, right) {
 }
 
 function mergeCourseFields(target, source) {
-  ["name", "code", "catalogCode", "teacher", "location", "time", "weeks", "weekday", "section", "detail", "credit", "category", "nature", "requirement", "assessment", "examType"].forEach((key) => {
+  ["name", "code", "catalogCode", "teacher", "location", "campus", "time", "weeks", "weekday", "section", "detail", "credit", "category", "nature", "requirement", "assessment", "examType"].forEach((key) => {
     if (!hasDisplayValue(target[key]) && hasDisplayValue(source[key])) target[key] = source[key];
   });
   const included = [...(Array.isArray(target.includedCourses) ? target.includedCourses : []), ...(Array.isArray(source.includedCourses) ? source.includedCourses : [])];
@@ -5693,6 +5803,7 @@ function mergeCourseFields(target, source) {
       entry?.teachingCode,
       entry?.teacher,
       entry?.location,
+      entry?.campus,
       entry?.weeks,
       entry?.weekday,
       entry?.section,
@@ -5708,8 +5819,91 @@ function courseScheduleText(course) {
   const raw = course?.raw;
   return [
     course?.detail,
+    course?.campus,
     ...scheduleDetailCandidates(raw)
   ].filter(Boolean).join(" ");
+}
+
+function scheduleLocationParts(value) {
+  const text = displayValue(value, "").replace(/\s+/g, " ").trim();
+  if (!text || /^[-—]$/.test(text)) return { campus: "", location: "" };
+  // 旧缓存里可能把“周次 教师 校区 教室”整体写进 location；先按课程文本
+  // 解析，避免迁移时把周次和教师错误地当成教室。
+  if (/(?:第\s*)?[0-9一二两三四五六七八九十百]+(?:\s*[-~至—–－]\s*[0-9一二两三四五六七八九十百]+)?\s*周/.test(text)
+    && /校区|线上|网络平台/.test(text)) {
+    const parsed = parseCourseText(text);
+    if (parsed.campus || parsed.location) return { campus: parsed.campus, location: parsed.location };
+  }
+  return splitCampusLocationText(text);
+}
+
+function courseLocationParts(course) {
+  if (course?.source === "local") return { campus: "", location: displayValue(course?.location, "") };
+  const direct = scheduleLocationParts(course?.location);
+  const rawLocationValues = textValuesFromKeys(course?.raw, SCHEDULE_LOCATION_ALIASES);
+  const rawLocationParts = rawLocationValues
+    .filter((value) => !isCompoundScheduleSource(value))
+    .map(scheduleLocationParts);
+  const detailParts = parseCourseText(course?.detail || "");
+  const campus = campusTextFromValues(
+    course?.campus,
+    direct.campus,
+    textValuesFromKeys(course?.raw, SCHEDULE_CAMPUS_ALIASES),
+    rawLocationValues,
+    detailParts.campus
+  );
+  const location = direct.location
+    || rawLocationParts.find((parts) => parts.location)?.location
+    || detailParts.location
+    || "";
+  return { campus, location };
+}
+
+function courseLocationText(course, includeCampus = false) {
+  if (course?.source === "local") return displayValue(course?.location, "");
+  const parts = courseLocationParts(course);
+  return includeCampus
+    ? [parts.campus, parts.location].filter(Boolean).join(" ")
+    : parts.location;
+}
+
+function stripCampusLabels(value, ...knownValues) {
+  const text = displayValue(value, "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  const campus = campusTextFromValues(text, ...knownValues);
+  if (!campus) return text;
+  const escapeRegExp = (item) => String(item).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const aliases = campus.split("、").flatMap((label) => [label, label.replace(/校区$/, "")]);
+  const campusPattern = new RegExp(aliases.sort((left, right) => right.length - left.length).map(escapeRegExp).join("|"), "g");
+  return text
+    .replace(campusPattern, " ")
+    .replace(/\s+([,，、;；|/])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function courseDisplayDetailText(course) {
+  const detail = displayValue(course?.detail || course?.time, "");
+  if (!detail || course?.source === "local") return detail;
+  return stripCampusLabels(
+    detail,
+    course?.campus,
+    textValuesFromKeys(course?.raw, SCHEDULE_CAMPUS_ALIASES)
+  );
+}
+
+function normalizeCachedCourseLocation(course) {
+  if (!course || typeof course !== "object" || course.source === "local") return course;
+  const parts = courseLocationParts(course);
+  return {
+    ...course,
+    location: parts.location,
+    campus: parts.campus
+  };
+}
+
+function normalizeCachedCourseRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((course) => normalizeCachedCourseLocation(course));
 }
 
 function hasSchedulePlacement(course) {
@@ -6375,7 +6569,7 @@ function overviewCourseTime(course) {
 }
 
 function overviewCoursePlace(course) {
-  return [course?.location, course?.teacher].filter(Boolean).join(" · ") || course?.detail || "地点待识别";
+  return [courseLocationText(course), course?.teacher].filter(Boolean).join(" · ") || "地点待识别";
 }
 
 function overviewCourseMeta(course) {
@@ -6718,7 +6912,7 @@ function localScheduleSourceBadge(itemOrRow) {
 function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
   const clockText = extractClockText(course.time) || localScheduleClockText(course);
   const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
-  const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
+  const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
   const className = ["course-chip", extraClass, course.source === "local" ? "local-schedule-chip" : ""].filter(Boolean).join(" ");
   const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
   return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
@@ -6892,7 +7086,7 @@ function renderDailyScheduleWithLocalOverlay(rows, scope = "personal") {
     const courseMarkup = courses.length
       ? courses.map((course) => {
         const sectionText = [courseSectionLabel(course) === "节次待识别" ? "" : courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" · ") || (course.localAllDay ? "全天" : "时间待识别");
-        const placeText = course.location || course.detail || "地点待识别";
+        const placeText = courseLocationText(course) || "地点待识别";
         const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
         const conflict = localScheduleRowHasConflict(course, rows);
         return `<button class="daily-course-card ${course.source === "local" ? `local-schedule-card local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><div class="daily-course-title"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(sectionText)}</span></div><div class="daily-course-tags">${badge}${courseTagsMarkup(course, availability)}</div><p class="daily-course-teacher">${escapeHtml(course.teacher || (course.localType === "event" ? "自定义日程" : "教师待识别"))}</p><p class="daily-course-location">${escapeHtml(placeText)}</p><small class="daily-course-meta">${escapeHtml(course.localDate ? `${course.localDate}${course.localAllDay ? " · 全天" : ""}` : `${course.weeks || "周次待识别"} · ${course.code || "无课程号"}`)}${conflict ? " · ⚠ 时间冲突" : ""}</small></button>`;
@@ -6988,14 +7182,15 @@ function renderCourseDetailWithLocalOverlay() {
   const sport = courseIsSport(course);
   const catalogCode = courseCatalogCodeValue(course);
   const sportEntries = sport && !course.sportProjectLoading ? courseIncludedEntries(course) : [];
+  const coursePlaceText = courseLocationText(course, true);
   const catalogField = sport && catalogCode ? `<div><span>课程代码</span><strong>${escapeHtml(catalogCode)}</strong></div>` : "";
   const assessmentField = availability.assessment ? `<div><span>考核方式</span><strong>${escapeHtml(courseAssessmentValue(course) || "—")}</strong></div>` : "";
   const requirementField = availability.requirement ? `<div><span>课程性质</span><strong>${escapeHtml(courseRequirementValue(course) || "—")}</strong></div>` : "";
   const categoryField = availability.category ? `<div><span>课程类别</span><strong>${escapeHtml(courseCategoryValue(course) || "—")}</strong></div>` : "";
   const sportDetails = sport
-    ? `<div class="course-included-panel sport-project-panel"><div class="sport-project-head"><span>原系统体育课“列表”</span>${sportEntries.length ? `<em>${escapeHtml(`${sportEntries.length} 个项目/教学班`)}</em>` : ""}</div>${course.sportProjectLoading ? `<p class="sport-project-status">正在读取原系统弹窗中的项目名称、教师和排课信息…</p>` : ""}${course.sportProjectError ? `<p class="sport-project-status sport-project-error">${escapeHtml(course.sportProjectError)}</p>` : ""}${sportEntries.length ? `<ul>${sportEntries.map((entry) => `<li><strong>${escapeHtml(entry.project || entry.name || entry.text || "体育课程")}</strong><span>${escapeHtml([entry.name !== entry.project && entry.name ? `课程：${entry.name}` : "", entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`, entry.weeks, entry.weekday, entry.section, entry.teacher && `教师：${entry.teacher}`, entry.location && `地点：${entry.location}`].filter(Boolean).join(" ｜ "))}</span></li>`).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统项目列表；原系统没有提供的字段会自动留空。</small></div>`
+    ? `<div class="course-included-panel sport-project-panel"><div class="sport-project-head"><span>原系统体育课“列表”</span>${sportEntries.length ? `<em>${escapeHtml(`${sportEntries.length} 个项目/教学班`)}</em>` : ""}</div>${course.sportProjectLoading ? `<p class="sport-project-status">正在读取原系统弹窗中的项目名称、教师和排课信息…</p>` : ""}${course.sportProjectError ? `<p class="sport-project-status sport-project-error">${escapeHtml(course.sportProjectError)}</p>` : ""}${sportEntries.length ? `<ul>${sportEntries.map((entry) => { const entryPlace = courseLocationText(entry, true); return `<li><strong>${escapeHtml(entry.project || entry.name || entry.text || "体育课程")}</strong><span>${escapeHtml([entry.name !== entry.project && entry.name ? `课程：${entry.name}` : "", entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`, entry.weeks, entry.weekday, entry.section, entry.teacher && `教师：${entry.teacher}`, entryPlace && `地点：${entryPlace}`].filter(Boolean).join(" ｜ "))}</span></li>`; }).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统项目列表；原系统没有提供的字段会自动留空。</small></div>`
     : "";
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(course.location || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(coursePlaceText || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
 }
 
 function personalScheduleActions() {
@@ -7270,7 +7465,7 @@ function scheduleExportRows(scope = "personal") {
   const seen = new Set();
   return expanded.filter((course) => {
     const range = courseSectionRange(course);
-    const key = [course.source || "school", course.localId || course.code, course.name, courseDayIndex(course), range ? `${range.start}-${range.end}` : course.section, [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","), course.localDate, course.teacher, course.location].map((value) => String(value ?? "").trim()).join("|");
+    const key = [course.source || "school", course.localId || course.code, course.name, courseDayIndex(course), range ? `${range.start}-${range.end}` : course.section, [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","), course.localDate, course.teacher, course.campus, course.location].map((value) => String(value ?? "").trim()).join("|");
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -7304,7 +7499,7 @@ function localScheduleCsvEntries(scope = "personal") {
     const seen = new Set();
     return expandedScheduleOccurrenceRows(source).map((course) => {
       const range = courseSectionRange(course);
-      return { courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: course.location || "", weekText: scheduleCsvWeekText(course) };
+      return { courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: courseLocationText(course) || "", weekText: scheduleCsvWeekText(course) };
     }).filter((entry) => entry.courseName).filter((entry) => {
       const key = Object.values(entry).join("\u001f");
       if (seen.has(key)) return false;
@@ -7326,7 +7521,7 @@ function localScheduleCsvEntries(scope = "personal") {
   };
   mapped.forEach((course) => {
     const range = courseSectionRange(course);
-    add({ courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: course.location || "", weekText: scheduleCsvWeekText(course) });
+    add({ courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: courseLocationText(course) || "", weekText: scheduleCsvWeekText(course) });
   });
   localItems.forEach((item) => {
     const row = localScheduleItemToCourseRow(item);
@@ -7379,7 +7574,7 @@ function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
     title: course.name || "未命名安排",
     schedule: [weekText, course.weekday || (course.localDate ? localScheduleDateText(course.localDate) : "星期待识别"), section, clock || (course.localAllDay ? "全天" : "")].filter(Boolean).join(" · "),
     teacher: course.teacher || (course.source === "local" ? "自定义安排" : "教师待识别"),
-    location: course.location || course.detail || "地点待识别",
+    location: courseLocationText(course) || "地点待识别",
     code: course.source === "local" ? "本地安排" : course.code || "无课程号",
     tags: [courseAssessmentValue(course), courseRequirementValue(course), course.source === "local" ? (course.localType === "event" ? "日程" : "自定义") : scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
   };
@@ -7724,7 +7919,7 @@ elements.content.addEventListener("change", (event) => {
 function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
   const clockText = extractClockText(course.time) || localScheduleClockText(course);
   const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
-  const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
+  const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
   const className = ["course-chip", extraClass, course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""].filter(Boolean).join(" ");
   const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
   return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
@@ -7962,7 +8157,8 @@ function courseTransferEntry(course) {
     section: displayValue(course?.section, ""),
     time: displayValue(course?.time, ""),
     teacher: displayValue(course?.teacher, ""),
-    location: displayValue(course?.location, ""),
+    campus: displayValue(course?.campus, ""),
+    location: courseLocationText(course),
     detail: displayValue(course?.detail, ""),
     credit: displayValue(course?.credit, ""),
     category: displayValue(course?.category, ""),
@@ -8010,6 +8206,7 @@ function normalizeImportedCourse(value) {
   const sectionDirect = normalizeTransferDirectValue(source, ["section", "sectionName", "JC", "JCDM", "JCS", "period", "lesson", "节次"]);
   const timeDirect = normalizeTransferDirectValue(source, ["time", "classTime", "SKSJ", "scheduleTime", "上课时间"]);
   const locationDirect = normalizeTransferDirectValue(source, ["location", "classroom", "room", "place", "placeName", "SKDD", "上课地点"]);
+  const campusDirect = normalizeTransferDirectValue(source, ["campus", "campusName", "campusLabel", "XQMC", "XQMC_DISPLAY", "XXXQDM_DISPLAY", "XXXQDM", "校区"]);
   const teacherDirect = normalizeTransferDirectValue(source, ["teacher", "teacherName", "teacherNames", "SKJS", "授课教师"]);
   const detailDirect = normalizeTransferDirectValue(source, ["detail", "原始时间地点", "timePlace", "classDateAndPlace"]);
   const pseudoRaw = {
@@ -8021,6 +8218,7 @@ function normalizeImportedCourse(value) {
     section: sectionDirect,
     classTime: timeDirect,
     classroom: locationDirect,
+    campus: campusDirect,
     teacherName: teacherDirect,
     detail: detailDirect,
     KCLB: normalizeTransferDirectValue(source, ["category", "课程类别"]),
@@ -8028,7 +8226,10 @@ function normalizeImportedCourse(value) {
     KCXZMC: normalizeTransferDirectValue(source, ["requirement", "nature", "课程性质"])
   };
   const mapped = mapCourse(raw || pseudoRaw);
-  const parsed = parseCourseText([weeksDirect, weekdayDirect, sectionDirect, timeDirect, detailDirect, locationDirect].filter(Boolean).join(" "));
+  const parsed = parseCourseText([weeksDirect, weekdayDirect, sectionDirect, timeDirect, detailDirect, campusDirect, locationDirect].filter(Boolean).join(" "));
+  const locationParts = splitCampusLocationText(locationDirect);
+  const campus = campusTextFromValues(campusDirect, mapped.campus, parsed.campus, locationParts.campus);
+  const location = locationParts.location || mapped.location || parsed.location || "";
   const rawWeeks = displayValue(weeksDirect, mapped.weeks || parsed.weeks || "");
   const weeks = canonicalWeeksText(rawWeeks) || formatWeeksValue(rawWeeks) || mapped.weeks || parsed.weeks || "";
   const weekday = normalizeWeekday(displayValue(weekdayDirect, mapped.weekday || parsed.weekday || ""));
@@ -8047,8 +8248,9 @@ function normalizeImportedCourse(value) {
     section,
     time: displayValue(timeDirect, mapped.time || [weeks, weekday, section].filter(Boolean).join(" ") || parsed.time || ""),
     teacher: displayValue(teacherDirect, mapped.teacher || parsed.teacher || ""),
-    location: displayValue(locationDirect, mapped.location || parsed.location || ""),
-    detail: displayValue(detailDirect, mapped.detail || [weeks, weekday, section, locationDirect].filter(Boolean).join(" ")),
+    campus,
+    location,
+    detail: displayValue(detailDirect, mapped.detail || [weeks, weekday, section, campus, location].filter(Boolean).join(" ")),
     category: displayValue(normalizeTransferDirectValue(source, ["category", "课程类别"]), mapped.category || ""),
     nature: requirement || mapped.nature || "",
     requirement,
@@ -8133,7 +8335,7 @@ function courseTransferScheduleText(course) {
 
 function courseTransferBrief(course) {
   const identity = [course?.name || "未命名课程", course?.code || course?.catalogCode].filter(Boolean).join(" · ");
-  const place = [course?.teacher && `教师：${course.teacher}`, course?.location && `地点：${course.location}`].filter(Boolean).join(" · ");
+  const place = [course?.teacher && `教师：${course.teacher}`, courseLocationText(course) && `地点：${courseLocationText(course)}`].filter(Boolean).join(" · ");
   return [identity, courseTransferScheduleText(course), place].filter(Boolean).join(" ｜ ");
 }
 
@@ -8180,7 +8382,7 @@ function courseGroupChipMarkup(courses, scope = "personal", style = "", availabi
   const variants = courses.map((course) => {
     const clockText = extractClockText(course.time) || localScheduleClockText(course);
     const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
-    const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
+    const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
     const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
     return `<button class="course-chip course-chip-variant ${course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
   }).join("");
@@ -8290,6 +8492,7 @@ function scheduleExportRows(scope = "personal") {
       range ? `${range.start}-${range.end}` : course.section,
       [...courseWeekNumbers(course)].sort((left, right) => left - right).join(","),
       course.teacher,
+      course.campus,
       course.location
     ].map((value) => String(value ?? "").trim()).join("|");
     if (seen.has(key)) return false;
@@ -8348,7 +8551,7 @@ function scheduleCsvEntries(scope = "personal") {
       const dayIndex = courseDayIndex(course);
       const range = courseSectionRange(course);
       const teacher = hasDisplayValue(course?.teacher) ? String(course.teacher).trim() : "";
-      const location = hasDisplayValue(course?.location) ? String(course.location).trim() : "";
+      const location = courseLocationText(course);
       const entry = {
         courseName: name,
         weekday: dayIndex >= 0 ? String(dayIndex === 0 ? 7 : dayIndex) : "",
@@ -8762,7 +8965,7 @@ function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
     title: course.name || "未命名课程",
     schedule: [weekText, course.weekday || "星期待识别", section, clock].filter(Boolean).join(" · "),
     teacher: course.teacher || "教师待识别",
-    location: course.location || course.detail || "地点待识别",
+    location: courseLocationText(course) || "地点待识别",
     code: course.code || "无课程号",
     tags: [courseAssessmentValue(course), courseRequirementValue(course), scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
   };
@@ -9310,7 +9513,7 @@ function exportScheduleImage() {
 function renderCourseCards(rows, scope = "personal") {
   if (!rows.length) return emptyCard("当前学期暂无课表", "接口没有返回个人课表数据，可以先打开原系统确认当前学期是否已发布。", `<button class="button button-ghost" type="button" data-action="open-portal">打开我的课表</button>`);
   const availability = courseFieldAvailability(rows, scope);
-  return `<div class="course-list">${rows.map((row) => `<button class="course-card course-card-button" ${courseActionAttributes(row, scope)}><h4>${escapeHtml(row.name)}</h4><div class="course-meta"><span>课程号：${escapeHtml(row.code)}</span><span>教师：${escapeHtml(row.teacher)}</span><span>时间：${escapeHtml(row.time || row.section || row.weekday || "待识别")}</span><span>地点：${escapeHtml(row.location || row.detail || "待识别")}</span><span>周次：${escapeHtml(row.weeks)}</span><span>学分：${escapeHtml(row.credit)}</span>${availability.assessment && courseAssessmentValue(row) ? `<span>考核：${escapeHtml(courseAssessmentValue(row))}</span>` : ""}${availability.requirement && courseRequirementValue(row) ? `<span>性质：${escapeHtml(courseRequirementValue(row))}</span>` : ""}</div></button>`).join("")}</div>`;
+  return `<div class="course-list">${rows.map((row) => `<button class="course-card course-card-button" ${courseActionAttributes(row, scope)}><h4>${escapeHtml(row.name)}</h4><div class="course-meta"><span>课程号：${escapeHtml(row.code)}</span><span>教师：${escapeHtml(row.teacher)}</span><span>时间：${escapeHtml(row.time || row.section || row.weekday || "待识别")}</span><span>地点：${escapeHtml(courseLocationText(row) || "待识别")}</span><span>周次：${escapeHtml(row.weeks)}</span><span>学分：${escapeHtml(row.credit)}</span>${availability.assessment && courseAssessmentValue(row) ? `<span>考核：${escapeHtml(courseAssessmentValue(row))}</span>` : ""}${availability.requirement && courseRequirementValue(row) ? `<span>性质：${escapeHtml(courseRequirementValue(row))}</span>` : ""}</div></button>`).join("")}</div>`;
 }
 
 function courseMobileArrangementMarkup(arrangement, index, scope = "personal") {
@@ -9319,7 +9522,7 @@ function courseMobileArrangementMarkup(arrangement, index, scope = "personal") {
   const weekText = arrangement.weeks || "周次待识别";
   const weekdayText = arrangement.weekday || "星期待识别";
   const timingText = [weekdayText, sectionText].filter(Boolean).join(" · ") || "上课时间待识别";
-  const metaText = [arrangement.teacher || "教师待识别", arrangement.location || "地点待识别"].join(" · ");
+  const metaText = [arrangement.teacher || "教师待识别", courseLocationText(arrangement) || "地点待识别"].join(" · ");
   const unresolved = sectionText === "节次待识别" || (!arrangement.weekday && !clockText);
   const action = courseActionAttributes(arrangement, scope) || `type="button"`;
   return `<li><button class="course-arrangement-item${unresolved ? " is-unresolved" : ""}" ${action} title="查看第${index + 1}条排课详情"><span class="course-arrangement-summary"><span class="course-arrangement-week">${escapeHtml(weekText)}</span><span class="course-arrangement-slot">${escapeHtml(timingText)}</span>${clockText ? `<time class="course-arrangement-clock">${escapeHtml(clockText)}</time>` : ""}</span><small class="course-arrangement-meta">${escapeHtml(metaText)}</small></button></li>`;
@@ -9337,7 +9540,8 @@ function renderCourseRowsTable(rows, includeDetail = false, scope = "personal") 
     const arrangementList = arrangements.map((arrangement, index) => {
       const clockText = extractClockText(arrangement.time) || localScheduleClockText(arrangement);
       const scheduleText = [arrangement.weeks, arrangement.weekday, courseSectionLabel(arrangement), clockText].filter(Boolean).join(" · ") || "排课信息待识别";
-      const metaText = [arrangement.teacher && `教师：${arrangement.teacher}`, arrangement.location && `地点：${arrangement.location}`].filter(Boolean).join(" · ") || "教师、地点待识别";
+      const arrangementLocation = courseLocationText(arrangement);
+      const metaText = [arrangement.teacher && `教师：${arrangement.teacher}`, arrangementLocation && `地点：${arrangementLocation}`].filter(Boolean).join(" · ") || "教师、地点待识别";
       const action = courseActionAttributes(arrangement, scope) || `type="button"`;
       return `<li><button class="course-arrangement-item" ${action} title="查看第${index + 1}条排课详情"><span class="course-arrangement-summary">${escapeHtml(scheduleText)}</span><small class="course-arrangement-meta">${escapeHtml(metaText)}</small></button></li>`;
     }).join("");
@@ -9345,7 +9549,7 @@ function renderCourseRowsTable(rows, includeDetail = false, scope = "personal") 
     const categoryCell = availability.category ? `<td>${escapeHtml(courseCategoryValue(course) || "—")}</td>` : "";
     const assessmentCell = availability.assessment ? `<td>${escapeHtml(courseAssessmentValue(course) || "—")}</td>` : "";
     const requirementCell = availability.requirement ? `<td>${escapeHtml(courseRequirementValue(course) || "—")}</td>` : "";
-    return `<tr><td class="primary-cell"><button class="course-mobile-heading" ${courseAction} title="查看课程详情">${escapeHtml(course.name)}</button></td><td>${escapeHtml(course.code || course.catalogCode || "—")}</td><td class="course-arrangements-cell">${arrangements.length > 1 ? `<span class="course-arrangement-count">${arrangements.length} 条上课安排</span>` : ""}<ul class="course-arrangement-list">${arrangementList}</ul></td>${categoryCell}${assessmentCell}${requirementCell}${includeDetail ? `<td>${escapeHtml(course.detail || course.time || "—")}</td>` : ""}</tr>`;
+    return `<tr><td class="primary-cell"><button class="course-mobile-heading" ${courseAction} title="查看课程详情">${escapeHtml(course.name)}</button></td><td>${escapeHtml(course.code || course.catalogCode || "—")}</td><td class="course-arrangements-cell">${arrangements.length > 1 ? `<span class="course-arrangement-count">${arrangements.length} 条上课安排</span>` : ""}<ul class="course-arrangement-list">${arrangementList}</ul></td>${categoryCell}${assessmentCell}${requirementCell}${includeDetail ? `<td>${escapeHtml(courseDisplayDetailText(course) || "—")}</td>` : ""}</tr>`;
   }).join("");
   const mobile = courses.map((course) => {
     const arrangements = courseArrangementRows(course, scope);
@@ -9394,7 +9598,7 @@ function renderSelectableCourseRowsTable(rows, includeDetail = false, scope = "a
     const assessmentCell = availability.assessment ? `<td>${escapeHtml(courseAssessmentValue(course) || "—")}</td>` : "";
     const requirementCell = availability.requirement ? `<td>${escapeHtml(courseRequirementValue(course) || "—")}</td>` : "";
     const selectCell = active ? `<td class="course-select-column"><input type="checkbox" data-action="toggle-course-selection" data-course-selection="true" data-course-transfer-scope="${scope}" data-course-transfer-key="${escapeHtml(key)}" aria-label="选择${escapeHtml(course.name || "课程")}" ${checked ? "checked" : ""} /></td>` : "";
-    return `<tr class="clickable-row" ${courseDataAttributes(course, scope)} title="点击查看课程详情">${selectCell}<td class="primary-cell">${escapeHtml(course.name)}</td><td>${escapeHtml(course.code || course.catalogCode || "—")}</td><td>${escapeHtml(course.weeks || "—")}</td><td>${escapeHtml(course.weekday || "—")}</td><td>${escapeHtml(sectionText)}</td><td>${escapeHtml(course.teacher || "—")}</td><td>${escapeHtml(course.location || "—")}</td>${categoryCell}${assessmentCell}${requirementCell}${includeDetail ? `<td>${escapeHtml(course.detail || course.time || "—")}</td>` : ""}</tr>`;
+    return `<tr class="clickable-row" ${courseDataAttributes(course, scope)} title="点击查看课程详情">${selectCell}<td class="primary-cell">${escapeHtml(course.name)}</td><td>${escapeHtml(course.code || course.catalogCode || "—")}</td><td>${escapeHtml(course.weeks || "—")}</td><td>${escapeHtml(course.weekday || "—")}</td><td>${escapeHtml(sectionText)}</td><td>${escapeHtml(course.teacher || "—")}</td><td>${escapeHtml(courseLocationText(course) || "—")}</td>${categoryCell}${assessmentCell}${requirementCell}${includeDetail ? `<td>${escapeHtml(courseDisplayDetailText(course) || "—")}</td>` : ""}</tr>`;
   }).join("");
   const mobile = sortCourseTransferRecords(records, scope).map((record) => {
     const course = record.course;
@@ -9403,7 +9607,7 @@ function renderSelectableCourseRowsTable(rows, includeDetail = false, scope = "a
     const clockText = extractClockText(course.time);
     const sectionText = [courseSectionLabel(course), clockText].filter(Boolean).join(" / ");
     const scheduleText = [course.weeks, course.weekday, sectionText].filter(Boolean).join(" · ") || "排课信息待识别";
-    const placeText = [course.teacher, course.location].filter(Boolean).join(" · ") || course.detail || "地点待识别";
+    const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
     const action = courseActionAttributes(course, scope) || `type="button"`;
     const selection = active ? `<label class="course-mobile-select"><input type="checkbox" data-action="toggle-course-selection" data-course-selection="true" data-course-transfer-scope="${scope}" data-course-transfer-key="${escapeHtml(key)}" aria-label="选择${escapeHtml(course.name || "课程")}" ${checked ? "checked" : ""} /></label>` : "";
     return `<div class="course-mobile-row">${selection}<button class="course-mobile-main" ${action} title="点击查看课程详情"><strong>${escapeHtml(course.name)}</strong><span>${escapeHtml(scheduleText)}</span><small>${escapeHtml(placeText)}</small></button></div>`;
@@ -9531,6 +9735,7 @@ function renderCourseDetailModal() {
   const sport = courseIsSport(course);
   const catalogCode = courseCatalogCodeValue(course);
   const sportEntries = sport && !course.sportProjectLoading ? courseIncludedEntries(course) : [];
+  const coursePlaceText = courseLocationText(course, true);
   const catalogField = sport && catalogCode ? `<div><span>课程代码</span><strong>${escapeHtml(catalogCode)}</strong></div>` : "";
   const assessmentField = availability.assessment ? `<div><span>考核方式</span><strong>${escapeHtml(courseAssessmentValue(course) || "—")}</strong></div>` : "";
   const requirementField = availability.requirement ? `<div><span>课程性质</span><strong>${escapeHtml(courseRequirementValue(course) || "—")}</strong></div>` : "";
@@ -9541,12 +9746,13 @@ function renderCourseDetailModal() {
       const courseLabel = entry.project && entry.name && entry.name !== entry.project ? `课程：${entry.name}` : "";
       const codes = [entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`].filter(Boolean).join(" · ");
       const schedule = [entry.weeks, entry.weekday, entry.section].filter(Boolean).join(" · ");
-      const teacherPlace = [entry.teacher && `教师：${entry.teacher}`, entry.location && `地点：${entry.location}`].filter(Boolean).join(" · ");
+      const entryPlaceText = courseLocationText(entry, true);
+      const teacherPlace = [entry.teacher && `教师：${entry.teacher}`, entryPlaceText && `地点：${entryPlaceText}`].filter(Boolean).join(" · ");
       const labels = [courseLabel, codes, schedule, teacherPlace, entry.assessment, entry.requirement].filter(Boolean).join(" ｜ ");
       return `<li><strong>${escapeHtml(title)}</strong>${labels ? `<span>${escapeHtml(labels)}</span>` : ""}</li>`;
     }).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统 cxpxbxx.do 返回的项目名称、教学班、教师、周次/节次及考核方式；原系统没有提供的字段会自动留空。</small></div>`
     : "";
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(course.location || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(coursePlaceText || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
 }
 
 function renderScheduleDisplayControls() {
@@ -9572,7 +9778,7 @@ function renderDailySchedule(rows, scope = "personal") {
       : courses.length
       ? courses.map((course) => {
         const sectionText = [courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" · ") || "节次待识别";
-        const placeText = course.location || course.detail || "地点待识别";
+        const placeText = courseLocationText(course) || "地点待识别";
         return `<button class="daily-course-card" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><div class="daily-course-title"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(sectionText)}</span></div><div class="daily-course-tags">${courseTagsMarkup(course, availability)}</div><p class="daily-course-teacher">${escapeHtml(course.teacher || "教师待识别")}</p><p class="daily-course-location">${escapeHtml(placeText)}</p><small class="daily-course-meta">${escapeHtml(course.weeks || "周次待识别")} · ${escapeHtml(course.code || "无课程号")}</small></button>`;
       }).join("")
       : `<div class="daily-empty"><strong>这天没有课程</strong><span>可以安心安排自己的时间</span></div>`;
@@ -10818,10 +11024,10 @@ function localScheduleItemToCourseRow(item) {
   };
 }
 
-function schoolPersonalScheduleRows(rows = state.data.courses) {
+function schoolPersonalScheduleRows(rows = state.data.courses, detailRows = state.data.scheduleDetail) {
   const sourceRows = (Array.isArray(rows) ? rows : []).filter((row) => row?.source !== "local");
   return dedupeScheduleOccurrenceRows(sourceRows
-    .flatMap((course) => courseArrangementRows(course, "personal"))
+    .flatMap((course) => courseArrangementRows(course, "personal", detailRows))
     .filter(hasSchedulePlacement));
 }
 
@@ -10838,6 +11044,7 @@ function schoolScheduleOccurrenceKey(course) {
     range ? `${range.start}-${range.end}` : course?.section,
     [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","),
     course?.teacher,
+    course?.campus,
     course?.location
   ].map((value) => String(value ?? "").trim()).join("|");
   return `school:${localScheduleStableHash(signature)}`;
@@ -10870,6 +11077,7 @@ function dedupeScheduleOccurrenceRows(rows) {
       course.localDate,
       extractClockText(course.time) || [course.startTime, course.endTime].filter(Boolean).join("-"),
       course.teacher,
+      course.campus,
       course.location
     ].map((value) => String(value ?? "").trim()).join("|");
     if (seen.has(key)) return false;
@@ -10888,12 +11096,12 @@ function expandedScheduleOccurrenceRows(rows) {
   return dedupeScheduleOccurrenceRows(expanded);
 }
 
-function courseArrangementRows(course, scope = "personal") {
+function courseArrangementRows(course, scope = "personal", detailRows = state.data.scheduleDetail) {
   const mapped = course?.source === "local" || course?.raw ? course : mapCourse(course);
   if (mapped?.source === "local") return [mapped];
   const sourceIndex = scope === "personal" ? courseIndexForScope(mapped, scope) : -1;
   const details = scope === "personal"
-    ? (state.data.scheduleDetail || []).filter((detail) => {
+    ? (Array.isArray(detailRows) ? detailRows : []).filter((detail) => {
       if (Number.isInteger(detail?.sourceCourseIndex) && sourceIndex >= 0) return detail.sourceCourseIndex === sourceIndex;
       if (Number.isInteger(detail?.sourceCourseIndex)) return false;
       const mappedCode = comparableCourseIdentity(mapped.code || mapped.catalogCode);
@@ -10914,6 +11122,9 @@ function courseArrangementRows(course, scope = "personal") {
     if (existingIndex >= 0) {
       const combined = { ...merged[existingIndex] };
       mergeCourseFields(combined, candidate);
+      if (!Number.isInteger(combined.sourceCourseIndex) && Number.isInteger(candidate.sourceCourseIndex)) {
+        combined.sourceCourseIndex = candidate.sourceCourseIndex;
+      }
       if (!Number.isInteger(combined.sourceDetailIndex) && detailIndex >= 0) combined.sourceDetailIndex = detailIndex;
       merged[existingIndex] = combined;
     } else {
@@ -10990,7 +11201,7 @@ function campusLabel(code) {
 }
 
 function campusCodeForScheduleItem(item) {
-  const campusText = [item?.location, item?.detail, rawScheduleText(item?.raw)].filter(Boolean).join(" ");
+  const campusText = [item?.campus, courseLocationText(item, true), item?.detail, rawScheduleText(item?.raw)].filter(Boolean).join(" ");
   if (/浑南/.test(campusText)) return CAMPUS_CODES.HUNNAN;
   if (/南湖/.test(campusText)) return CAMPUS_CODES.NANHU;
   return normalizeCampusCode(state.campus.code);
@@ -12732,7 +12943,7 @@ function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
     title: course.name || "未命名安排",
     schedule: [weekText, course.weekday || (course.localDate ? localScheduleDateText(course.localDate) : "星期待识别"), section, clock || (course.localAllDay ? "全天" : "")].filter(Boolean).join(" · "),
     teacher: course.teacher || (course.source === "local" ? "自定义安排" : "教师待识别"),
-    location: course.location || course.detail || "地点待识别",
+    location: courseLocationText(course) || "地点待识别",
     code: course.source === "local" ? "本地安排" : course.code || "无课程号",
     tags: [courseAssessmentValue(course), courseRequirementValue(course), course.source === "local" ? (course.localType === "event" ? "日程" : "自定义") : scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
   };

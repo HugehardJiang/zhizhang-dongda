@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.97` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.72` / `72` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.99` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.74` / `74` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -221,7 +221,7 @@ saveImage / saveCsv
 
 APK 文件名：`执掌东大-Android-<versionName>-<buildType>.apk`。
 
-原生侧还负责：Cookie 持久化、后台不可见 WebView 重登、短信验证码出现时停自动登录、登录诊断脱敏、E 码通二维码截图、微信可见性、模态时隐藏校园码。细节以 `android/README.md` 为准。
+原生侧还负责：Cookie 持久化、后台不可见 WebView 重登、图形/手机/设备挑战检测与可见官方 WebView 交互、可信设备选项同步、登录诊断脱敏、E 码通二维码截图、微信可见性、模态时隐藏校园码。细节以 `android/README.md` 为准。
 
 ---
 

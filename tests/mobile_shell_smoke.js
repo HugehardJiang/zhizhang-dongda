@@ -328,7 +328,8 @@ const mainActivitySource = fs.readFileSync(path.join(
 assert.ok(mainActivitySource.includes('KeyStore.getInstance("AndroidKeyStore")'));
 assert.ok(mainActivitySource.includes('AES/GCM/NoPadding'));
 assert.ok(mainActivitySource.includes('submitBuiltInCredentials(true)'));
-assert.ok(mainActivitySource.includes('后台自动登录需要短信验证码'));
+assert.ok(mainActivitySource.includes('后台自动登录需要人工完成短信二次认证'));
+assert.ok(mainActivitySource.includes('后台自动登录需要人工完成图形验证码和短信验证'));
 assert.ok(mainActivitySource.includes('LOGIN_METHOD_BUILT_IN'));
 assert.ok(mainActivitySource.includes('public void openWebVpnUrl(String url)'));
 assert.ok(mainActivitySource.includes('"webvpn.neu.edu.cn".equalsIgnoreCase(parsed.getHost())'));
