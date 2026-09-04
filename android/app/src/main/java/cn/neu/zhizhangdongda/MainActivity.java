@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.74";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.75";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -1262,6 +1262,19 @@ public class MainActivity extends Activity {
         portalWebView.setAlpha(1f);
     }
 
+    /**
+     * 后台登录会把 WebView 调到最前面以承载重定向；进入人工验证时，
+     * 必须把原生控件重新放回 WebView 之上，否则复选框和确认按钮会被整页遮住。
+     */
+    private void restorePortalOverlayOrder() {
+        if (root == null) return;
+        if (loginMethodBar != null) loginMethodBar.bringToFront();
+        if (builtInLoginPanel != null) builtInLoginPanel.bringToFront();
+        if (portalActionButton != null) portalActionButton.bringToFront();
+        if (portalQrActionButton != null) portalQrActionButton.bringToFront();
+        if (interactiveTrustDevicePanel != null) interactiveTrustDevicePanel.bringToFront();
+    }
+
     private void showPortal() {
         runOnUiThread(() -> {
             dashboardVisible = false;
@@ -1274,6 +1287,7 @@ public class MainActivity extends Activity {
             dashboardHome.setVisibility(View.GONE);
             if (loginMethodBar != null) loginMethodBar.setVisibility(View.VISIBLE);
             applyPortalLoginMethodUi();
+            restorePortalOverlayOrder();
             updatePortalActionLabel(portalWebView.getUrl());
             if (portalQrActionButton != null) {
                 showQrActionLoadingIfNeeded(portalWebView.getUrl());
@@ -2467,6 +2481,7 @@ public class MainActivity extends Activity {
                 portalActionButton.setContentDescription("完成学校图形验证码和短信验证后确认登录");
             }
             if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
+            restorePortalOverlayOrder();
             Toast.makeText(
                     this,
                     message == null || message.trim().isEmpty()

@@ -37,6 +37,14 @@ assert.match(source, /信任此设备（默认已勾选）/);
 assert.match(source, /save\.checked=/);
 assert.match(source, /信任此设备/);
 
+// Background login temporarily brings the WebView to the front. Returning to
+// the human challenge must restore the native overlays above it, otherwise
+// the trust-device checkbox and confirmation button are visually unreachable.
+assert.match(source, /private void restorePortalOverlayOrder\(\)/);
+assert.match(source, /interactiveTrustDevicePanel\.bringToFront\(\)/);
+assert.match(source, /showPortal\(\)[\s\S]*restorePortalOverlayOrder\(\)/);
+assert.match(source, /showBuiltInInteractiveChallenge\([\s\S]*restorePortalOverlayOrder\(\)/);
+
 // Credentials and challenge values must not be added to diagnostic output.
 assert.match(source, /不保存密码、验证码、Cookie/);
 assert.match(source, /sanitizeDiagnosticText/);
