@@ -1325,6 +1325,11 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .schedule-export-action-row { gap: 6px; }
 .schedule-export-action-row .button { min-height: 42px; padding: 0 12px; line-height: 1; }
 .mobile-bottom-nav { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .nav-item, .mobile-nav-item, .mobile-nav-indicator {
+    transition: none;
+  }
+}
 .android-login-entry { display: flex; align-items: center; gap: 12px; margin-top: 22px; padding: 12px 0; color: var(--text-secondary); background: transparent; border: 0; border-top: 1px solid var(--border); border-radius: 0; }
 .android-login-entry-copy strong { color: var(--text-primary); font-size: 12px; }
 .android-login-entry-copy p { display: none; }
@@ -1354,12 +1359,34 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .section-heading > .button-row.schedule-export-action-row { width: auto; max-width: 100%; flex-wrap: nowrap; }
   .section-heading > .button-row.schedule-export-action-row .button { display: inline-flex !important; width: auto; min-width: 0; min-height: 42px; padding: 0 12px; font-size: 11px; line-height: 1; white-space: nowrap; }
   .mobile-bottom-nav { position: fixed; z-index: 12; right: 0; bottom: 0; left: 0; height: 64px; display: grid; grid-template-columns: repeat(5, 1fr); padding: 5px 7px max(5px, env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--border); }
-  .mobile-nav-item { flex-direction: column; justify-content: center; gap: 3px; padding: 0; color: var(--text-tertiary); text-align: center; font-size: 10px; }
-  .mobile-nav-item .nav-icon { width: 18px; height: 18px; }
+  .mobile-nav-indicator {
+    position: absolute;
+    z-index: 0;
+    top: 5px;
+    bottom: max(5px, env(safe-area-inset-bottom));
+    left: 7px;
+    width: calc((100% - 14px) / 5);
+    pointer-events: none;
+    background: transparent;
+    opacity: 0;
+    transform: translate3d(calc(var(--mobile-nav-index, 0) * 100%), 0, 0);
+    transition: transform 180ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms ease;
+  }
+  .mobile-nav-indicator::after {
+    content: "";
+    position: absolute;
+    inset: 2px 5px;
+    border-radius: 10px;
+    background: var(--brand-soft);
+  }
+  .mobile-bottom-nav.has-indicator .mobile-nav-indicator { opacity: 1; }
+  .mobile-nav-item { position: relative; z-index: 1; flex-direction: column; justify-content: center; gap: 3px; padding: 0; color: var(--text-tertiary); text-align: center; font-size: 10px; font-weight: 600; transition: color 160ms ease, opacity 140ms ease; }
+  .mobile-nav-item .nav-icon { width: 18px; height: 18px; transition: color 160ms ease, opacity 140ms ease; }
   /* Gear outlines are slightly top-heavy optically; lift only the inner
      circle in the mobile bottom bar so it sits on the gear's visual center. */
   .mobile-nav-item .settings-nav-center { transform: translateY(-0.75px); }
-  .mobile-nav-item.is-active { color: var(--brand); font-weight: 650; }
+  .mobile-nav-item.is-active { color: var(--brand); font-weight: 600; }
+  .mobile-nav-item:active { opacity: 0.72; }
   .overview-date { margin: -7px 0 18px; }
   .overview-next { grid-template-columns: 74px minmax(0, 1fr); gap: 12px; padding: 15px 0; }
   .overview-next-time { font-size: 20px; }

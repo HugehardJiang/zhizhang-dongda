@@ -10516,12 +10516,38 @@ function renderAndroidLoginEntry() {
   return `<section class="android-login-entry" aria-live="polite"><div class="android-login-entry-copy"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p>${savedAt ? `<small>缓存时间：${escapeHtml(savedAt)}</small>` : ""}</div><div class="android-login-entry-actions"><button class="button button-primary" type="button" data-action="open-portal">手动登录 / 其他方式</button>${diagnosticAction}</div></section>`;
 }
 
+const MOBILE_NAV_VIEW_ALIASES = Object.freeze({
+  all: "settings",
+  curriculum: "settings",
+  "course-outline": "settings"
+});
+
+function mobileBottomNavView() {
+  return MOBILE_NAV_VIEW_ALIASES[state.view] || state.view;
+}
+
+function syncMobileBottomNavIndicator() {
+  const nav = document.querySelector(".mobile-bottom-nav");
+  if (!nav?.style?.setProperty) return;
+  const items = Array.from(nav.querySelectorAll(".mobile-nav-item"));
+  if (!items.length) return;
+  const current = mobileBottomNavView();
+  const index = items.findIndex((item) => item.dataset.view === current);
+  nav.classList.toggle("has-indicator", index >= 0);
+  if (index >= 0) nav.style.setProperty("--mobile-nav-index", String(index));
+}
+
 function render() {
   try {
   if (IS_ANDROID_APP && ["curriculum", "course-outline"].includes(state.view)) state.view = "overview";
   try { updatePersonalTermSelect(); } catch { /* 初始化阶段元素可能尚未准备好 */ }
   const pageTitles = { overview: "总览", personal: "课表", exams: "考试", scores: "成绩", all: "全校课表", curriculum: "培养计划", "course-outline": "课程大纲", settings: "设置" };
-  document.querySelectorAll("[data-view]").forEach((tab) => tab.classList.toggle("is-active", tab.dataset.view === state.view));
+  const mobileView = mobileBottomNavView();
+  document.querySelectorAll("[data-view]").forEach((tab) => {
+    const target = tab.classList.contains("mobile-nav-item") ? mobileView : state.view;
+    tab.classList.toggle("is-active", tab.dataset.view === target);
+  });
+  syncMobileBottomNavIndicator();
   if (elements.pageTitle) elements.pageTitle.textContent = pageTitles[state.view] || "执掌东大";
   elements.content.classList.toggle("curriculum-content", state.view === "curriculum");
   elements.content.classList.toggle("course-outline-content", state.view === "course-outline");

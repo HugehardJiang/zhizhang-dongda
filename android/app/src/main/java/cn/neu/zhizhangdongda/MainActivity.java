@@ -115,7 +115,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.84";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.85";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -435,6 +435,7 @@ public class MainActivity extends Activity {
     private static final int NETWORK_FAILURES_BEFORE_PROBE = 2;
     private static final int ACADEMIC_ECODE_REDIRECT_MAX = 2;
     private static final int ACADEMIC_CAS_TICKET_BOUNCE_MAX = 2;
+    private static final int ACADEMIC_HOME_NOT_FOUND_MAX = 3;
 
     /**
      * 学校登录页 DOM 判定，供账密注入和页面检查共用。
@@ -654,6 +655,7 @@ public class MainActivity extends Activity {
     private boolean academicPortalViewerActive;
     private int academicEcodeRedirectAttempts;
     private int academicCasTicketBounceAttempts;
+    private int academicHomeNotFoundAttempts;
     private String accessNetworkMode = ACCESS_NETWORK_AUTO;
     private String accessNetworkResolved = ACCESS_NETWORK_WEBVPN;
     private boolean accessNetworkProbeDone;
@@ -994,10 +996,16 @@ public class MainActivity extends Activity {
                     if (builtInLoginSubmissionPending) {
                         recordLoginDiagnosticPage("page-finished", view, url);
                     }
+                    if (handleCampusCasTicketLanding(url)) {
+                        return;
+                    }
                     if (redirectAcademicPortalAwayFromEcode(url)) {
                         return;
                     }
                     if (redirectAcademicPortalAwayFromBareShell(url)) {
+                        return;
+                    }
+                    if (recoverCampusAcademicNotFound(view, url, -1)) {
                         return;
                     }
                     if (dashboardVisible && !academicPortalViewerActive
@@ -1029,8 +1037,6 @@ public class MainActivity extends Activity {
                             && backgroundLoginForEcode
                             && isEcodeTargetReadyUrl(url)) {
                         finishBuiltInLoginSuccess(activeLoginOperationId);
-                    } else if (builtInLoginSubmissionPending && handleCampusCasTicketLanding(url)) {
-                        return;
                     } else if (builtInLoginSubmissionPending && isAcademicPortalReadyUrl(url)) {
                         // 校园网打开 jwxt /jwapp/ 时，地址本身就含 /jwapp/，
                         // 即使尚未完成 CAS 也会误报成功。必须用 Cookie 探测确认。
@@ -1125,15 +1131,20 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceResponse response) {
                 super.onReceivedHttpError(view, request, response);
-                if (view == portalWebView && builtInLoginSubmissionPending
-                        && request != null && request.isForMainFrame()) {
+                if (view == portalWebView && request != null && request.isForMainFrame()) {
                     int status = response == null ? -1 : response.getStatusCode();
                     String errorUrl = request.getUrl() == null ? view.getUrl() : request.getUrl().toString();
-                    recordLoginDiagnostic(
-                            "http-error",
-                            "mainFrame=true status=" + status + " url=" + sanitizeDiagnosticUrl(errorUrl)
-                    );
-                    updateLoginDiagnosticHttpError(status, errorUrl);
+                    if (builtInLoginSubmissionPending) {
+                        recordLoginDiagnostic(
+                                "http-error",
+                                "mainFrame=true status=" + status + " url=" + sanitizeDiagnosticUrl(errorUrl)
+                        );
+                        updateLoginDiagnosticHttpError(status, errorUrl);
+                    }
+                    if (status == 404) {
+                        if (handleCampusCasTicketLanding(errorUrl)) return;
+                        recoverCampusAcademicNotFound(view, errorUrl, status);
+                    }
                 }
                 if (view == ecodeWebView && request != null && request.isForMainFrame()) {
                     int status = response == null ? -1 : response.getStatusCode();
@@ -1449,7 +1460,9 @@ public class MainActivity extends Activity {
                     || !isPortalPageUrl(currentUrl)
                     || isEcodeTargetReadyUrl(currentUrl)) {
                 academicEcodeRedirectAttempts = 0;
-                portalWebView.loadUrl(academicHomeUrl());
+                academicCasTicketBounceAttempts = 0;
+                academicHomeNotFoundAttempts = 0;
+                portalWebView.loadUrl(academicViewerEntryUrl());
             }
             portalWebView.setVisibility(View.VISIBLE);
             dashboardHome.setVisibility(View.GONE);
@@ -1473,12 +1486,14 @@ public class MainActivity extends Activity {
             cancelAutomaticBackgroundLogin();
             academicPortalViewerActive = true;
             academicEcodeRedirectAttempts = 0;
+            academicCasTicketBounceAttempts = 0;
+            academicHomeNotFoundAttempts = 0;
             clearPendingQrUrl();
-            // 从查询台打开原教务系统时，直接进入 /jwapp/ 并用实际页面判断
-            // 是否还要登录。不要先盖内置登录层，也不要打开 WebVPN 根地址
-            // （那个入口登录后经常落到校园门户或 E 码通）。
+            // 校园网必须先进入 /jwapp/ 换票；直接打开 /jwapp/sys/homeapp 会让
+            // CAS 把 ticket 送到 404 页。WebVPN 仍打开 homeapp。不要打开
+            // WebVPN 根地址（登录后经常落到校园门户或 E 码通）。
             if (portalWebView != null) {
-                portalWebView.loadUrl(academicHomeUrl());
+                portalWebView.loadUrl(academicViewerEntryUrl());
             }
             showPortal(false);
         });
@@ -2148,6 +2163,21 @@ public class MainActivity extends Activity {
         return academicRootFallbackUrl() + "/jwapp/sys/homeapp";
     }
 
+    private String academicHomeIndexUrl() {
+        return academicHomeUrl() + "/*default/index.do";
+    }
+
+    private String academicHomeIndexFallbackUrl() {
+        return academicHomeFallbackUrl() + "/*default/index.do";
+    }
+
+    /**
+     * 从查询台打开原教务系统：校园网先走 EMAP 换票入口，换完再进 homeapp。
+     */
+    private String academicViewerEntryUrl() {
+        return isCampusAccess() ? academicCasCallbackUrl() : academicHomeUrl();
+    }
+
     /**
      * EMAP 的 CAS 过滤器在 /jwapp/，不在 /jwapp/sys/homeapp。
      * 把 homeapp 当作 service 时，认证中心会带着 ticket 跳到 404 页，会话无法生效。
@@ -2204,7 +2234,8 @@ public class MainActivity extends Activity {
         if (!url.contains("/tpass/login") || !url.contains("pass.neu.edu.cn")) return url;
         String service = extractLoginService(url);
         if (service.isEmpty()) {
-            if (builtInLoginSubmissionPending && !backgroundLoginForEcode) {
+            if (backgroundLoginForEcode) return url;
+            if (builtInLoginSubmissionPending || academicPortalViewerActive) {
                 return campusAuthLoginUrl(academicCasCallbackUrl());
             }
             return url;
@@ -2230,11 +2261,47 @@ public class MainActivity extends Activity {
             return true;
         }
         recordLoginDiagnostic("cas-ticket-pending", "等待教务入口核销 CAS ticket");
-        long operationId = activeLoginOperationId;
-        portalWebView.postDelayed(() -> {
-            if (!isCurrentLoginOperation(operationId) || portalWebView == null) return;
-            verifyBuiltInLoginSession(operationId, "cas-ticket-confirm", false);
-        }, 450L);
+        if (builtInLoginSubmissionPending) {
+            long operationId = activeLoginOperationId;
+            portalWebView.postDelayed(() -> {
+                if (!isCurrentLoginOperation(operationId) || portalWebView == null) return;
+                verifyBuiltInLoginSession(operationId, "cas-ticket-confirm", false);
+            }, 450L);
+        }
+        return true;
+    }
+
+    private boolean recoverCampusAcademicNotFound(WebView view, String url, int status) {
+        if (!isCampusAccess() || view == null || url == null) return false;
+        if (isPortalLoginPage(url) || isAcademicCasTicketUrl(url)) return false;
+        boolean looksMissing = status == 404;
+        if (!looksMissing) {
+            String title = view.getTitle();
+            looksMissing = title != null && title.trim().equals("404");
+        }
+        if (!looksMissing) return false;
+        if (!isAcademicHomeAppUrl(url) && !isBareAcademicShellUrl(url)) return false;
+        if (academicHomeNotFoundAttempts >= ACADEMIC_HOME_NOT_FOUND_MAX) {
+            recordLoginDiagnostic("portal-viewer", "校园网教务首页连续 404，已停止改写入口");
+            return false;
+        }
+        academicHomeNotFoundAttempts += 1;
+        String target;
+        if (isBareAcademicShellUrl(url) && url.startsWith("https://")) {
+            target = academicRootFallbackUrl() + "/jwapp/";
+        } else if (isAcademicHomeAppUrl(url) && !url.contains("*default")) {
+            target = url.startsWith("https://") ? academicHomeFallbackUrl() : academicHomeIndexUrl();
+        } else {
+            target = academicHomeIndexFallbackUrl();
+        }
+        recordLoginDiagnostic(
+                "portal-viewer",
+                "campus-404-fallback attempt=" + academicHomeNotFoundAttempts
+                        + " from=" + sanitizeDiagnosticUrl(url)
+                        + " to=" + sanitizeDiagnosticUrl(target)
+        );
+        view.stopLoading();
+        view.loadUrl(target);
         return true;
     }
 
@@ -2538,18 +2605,19 @@ public class MainActivity extends Activity {
                 "redirect-ecode-to-jwapp attempt=" + academicEcodeRedirectAttempts
                         + " from=" + sanitizeDiagnosticUrl(url)
         );
-        portalWebView.loadUrl(academicHomeUrl());
+        portalWebView.loadUrl(academicViewerEntryUrl());
         return true;
     }
 
     /**
      * /jwapp/ 只是 EMAP 容器，页面往往只有 “Welcome come to EMAP.”。
      * 查看原系统时应进入 homeapp；登录换票也可以用这个真实首页。
+     * 带 ticket 的 /jwapp/ 必须先让 CAS 过滤器换票，不能立刻改去 homeapp。
      */
     private boolean redirectAcademicPortalAwayFromBareShell(String url) {
         if (portalWebView == null || backgroundLoginForEcode || backgroundLoginInProgress) return false;
         if (!academicPortalViewerActive && dashboardVisible) return false;
-        if (isPortalLoginPage(url) || isAcademicHomeAppUrl(url)) return false;
+        if (isPortalLoginPage(url) || isAcademicHomeAppUrl(url) || isAcademicCasTicketUrl(url)) return false;
         boolean bareShell = isBareAcademicShellUrl(url)
                 || (isAcademicPortalReadyUrl(url) && !url.contains("/jwapp/sys/"));
         if (!bareShell) {
@@ -2572,7 +2640,7 @@ public class MainActivity extends Activity {
 
     private void recoverAcademicPortalViewerFromEmapWelcome() {
         if (portalWebView == null || !academicPortalViewerActive || backgroundLoginInProgress) return;
-        if (isAcademicHomeAppUrl(portalWebView.getUrl())) return;
+        if (isAcademicHomeAppUrl(portalWebView.getUrl()) || isAcademicCasTicketUrl(portalWebView.getUrl())) return;
         portalWebView.evaluateJavascript(
                 "(function(){var t=String((document.body&&document.body.innerText)||document.title||'').replace(/\\s+/g,' ');"
                         + "return /Welcome come to EMAP|Welcome to EMAP/i.test(t);})();",
@@ -2694,6 +2762,7 @@ public class MainActivity extends Activity {
         builtInLoginPortalProbeAttempts = 0;
         builtInLoginRetryCount = 0;
         academicCasTicketBounceAttempts = 0;
+        academicHomeNotFoundAttempts = 0;
         builtInLoginPortalProbeScheduled = false;
         builtInLoginSessionProbeInProgress = false;
         if (!background) backgroundLoginForEcode = false;
