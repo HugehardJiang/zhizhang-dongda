@@ -99,13 +99,18 @@ public class MainActivity extends Activity {
     private static final String LOG_TAG = "ZhizhangEcode";
     private static final String PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
     private static final String PORTAL_FALLBACK_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
+    // 打开原教务系统或换取 CAS 票据时必须落到 /jwapp/。只打开 WebVPN 应用根
+    // 地址时，统一认证的 service 经常变成 webvpn 门户本身，登录后会进校园
+    // 门户或 E 码通，而不是教务首页。
+    private static final String ACADEMIC_HOME_URL = PORTAL_URL + "/jwapp/";
+    private static final String ACADEMIC_HOME_FALLBACK_URL = PORTAL_FALLBACK_URL + "/jwapp/";
     // 这是学校 E 码通对应的 WebVPN 目标地址；其中的代理标识必须与学校
     // 给出的地址完全一致，少一个字符都会被 WebVPN 解析成 PARSE_FAILED。
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.79";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.80";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -423,6 +428,34 @@ public class MainActivity extends Activity {
     private static final long ACADEMIC_PROBE_COOLDOWN_MS = 8000L;
     private static final long FOREGROUND_PROBE_INTERVAL_MS = 10000L;
     private static final int NETWORK_FAILURES_BEFORE_PROBE = 2;
+    private static final int ACADEMIC_ECODE_REDIRECT_MAX = 2;
+
+    /**
+     * 学校登录页 DOM 判定，供账密注入和页面检查共用。
+     * laidOut：当前有布局面积，表示用户正在看的控件。
+     * present：节点存在即可操作；隐藏的账号/二维码 tab、0×0 的信任设备勾选仍算可操作。
+     * 账密提交后学校会整页换成设备二次认证（#imgCode 图形码 + #scendAuthCode 短信），
+     * 不再保留 #un/#pd/#loginForm/#saveDevice。
+     */
+    private static final String SCHOOL_LOGIN_PAGE_HELPERS = """
+            function laidOut(n){
+              if(!n)return false;
+              var s=getComputedStyle(n),r=n.getBoundingClientRect();
+              return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;
+            }
+            function present(n){return Boolean(n);}
+            function isSecondAuthPage(){
+              return Boolean(
+                document.getElementById('second_auth_form')
+                || document.getElementById('imgCode')
+                || document.getElementById('scendAuthCode')
+                || document.getElementById('getScendAuthCode')
+                || document.getElementById('index_scendAuth_btn')
+                || document.getElementById('secondAuthByMobile')
+                || document.getElementById('second-qr-code')
+              );
+            }
+            """;
 
     /**
      * 原登录页的二维码脚本会把完整的 qyQrLogin 地址传给 QRCode.makeCode。
@@ -610,6 +643,10 @@ public class MainActivity extends Activity {
     private boolean loginMethodChooserShown;
     private boolean builtInLoginSubmissionPending;
     private boolean builtInLoginAwaitingPage;
+    // 用户从查询台打开原教务系统时，按实际 URL 决定是否显示登录层：
+    // 已进入 /jwapp/ 就只展示原网页；只有仍停在认证页才显示内置登录。
+    private boolean academicPortalViewerActive;
+    private int academicEcodeRedirectAttempts;
     private boolean builtInLoginChallengeVisible;
     private boolean builtInInteractiveChallengeVisible;
     private boolean builtInMobileLoginMode;
@@ -931,6 +968,9 @@ public class MainActivity extends Activity {
                     updatePortalActionLabel(url);
                     if (builtInLoginSubmissionPending) {
                         recordLoginDiagnosticPage("page-finished", view, url);
+                    }
+                    if (redirectAcademicPortalAwayFromEcode(url)) {
+                        return;
                     }
                     installPortalQrCapture();
                     showQrActionLoadingIfNeeded(url);
@@ -1341,15 +1381,18 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             dashboardVisible = false;
             exitBackgroundLoginMode();
+            String currentUrl = portalWebView == null ? "" : portalWebView.getUrl();
             if (forceLoginPage
-                    || portalWebView.getUrl() == null || portalWebView.getUrl().isEmpty()
-                    || !isPortalPageUrl(portalWebView.getUrl())) {
-                portalWebView.loadUrl(PORTAL_URL);
+                    || currentUrl == null || currentUrl.isEmpty()
+                    || !isPortalPageUrl(currentUrl)
+                    || isEcodeTargetReadyUrl(currentUrl)) {
+                academicEcodeRedirectAttempts = 0;
+                portalWebView.loadUrl(ACADEMIC_HOME_URL);
             }
             portalWebView.setVisibility(View.VISIBLE);
             dashboardHome.setVisibility(View.GONE);
-            if (loginMethodBar != null) loginMethodBar.setVisibility(View.VISIBLE);
-            applyPortalLoginMethodUi();
+            if (academicPortalViewerActive) applyAcademicPortalViewerUi();
+            else applyPortalLoginChrome();
             restorePortalOverlayOrder();
             updatePortalActionLabel(portalWebView.getUrl());
             if (portalQrActionButton != null) {
@@ -1366,13 +1409,16 @@ public class MainActivity extends Activity {
     private void openPortalForReauthentication() {
         runOnUiThread(() -> {
             cancelAutomaticBackgroundLogin();
-            if (dashboardVisible && portalWebView != null) {
-                // 从查询页点击“打开原系统”时重新走一次统一认证入口，
-                // 这样 Cookie 失效后不会停留在旧的远程页面。
-                clearPendingQrUrl();
-                portalWebView.loadUrl(PORTAL_URL);
+            academicPortalViewerActive = true;
+            academicEcodeRedirectAttempts = 0;
+            clearPendingQrUrl();
+            // 从查询台打开原教务系统时，直接进入 /jwapp/ 并用实际页面判断
+            // 是否还要登录。不要先盖内置登录层，也不要打开 WebVPN 根地址
+            // （那个入口登录后经常落到校园门户或 E 码通）。
+            if (portalWebView != null) {
+                portalWebView.loadUrl(ACADEMIC_HOME_URL);
             }
-            showPortal();
+            showPortal(false);
         });
     }
 
@@ -1412,6 +1458,8 @@ public class MainActivity extends Activity {
     private void openOfficialAcademicPortal() {
         runOnUiThread(() -> {
             cancelAutomaticBackgroundLogin();
+            academicPortalViewerActive = true;
+            academicEcodeRedirectAttempts = 0;
             clearPendingQrUrl();
             loginMethodForCurrentPortal = LOGIN_METHOD_PASSWORD;
             showPortal(true);
@@ -1419,6 +1467,7 @@ public class MainActivity extends Activity {
                 portalWebView.postDelayed(() -> {
                     if (portalWebView == null
                             || !LOGIN_METHOD_PASSWORD.equals(loginMethodForCurrentPortal)) return;
+                    if (!isPortalLoginPage(portalWebView.getUrl())) return;
                     String script = "(function(){var node=document.getElementById('password_login');"
                             + "if(node&&typeof node.click==='function'){node.click();return true;}return false;})();";
                     portalWebView.evaluateJavascript(script, null);
@@ -1476,6 +1525,8 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             dashboardVisible = true;
             builtInMobileLoginMode = false;
+            academicPortalViewerActive = false;
+            academicEcodeRedirectAttempts = 0;
             exitBackgroundLoginMode();
             // 这个值只是上次成功会话的提示，不能因为展示缓存首页就把失效
             // Cookie 标成有效；真实状态由轻量 WebVPN 探测或业务响应确认。
@@ -2097,6 +2148,9 @@ public class MainActivity extends Activity {
         }
         if (hasSavedQrImage()) {
             portalActionButton.setText("删除刚刚的二维码图片并进入主界面");
+        } else if (shouldShowAcademicPortalViewer(url)) {
+            portalActionButton.setText("返回执掌东大");
+            portalActionButton.setContentDescription("关闭原教务系统页面并返回执掌东大");
         } else {
             portalActionButton.setText(isPortalLoginPage(url)
                     ? "关闭认证页，返回主页"
@@ -2108,7 +2162,7 @@ public class MainActivity extends Activity {
     }
 
     private void installPortalQrCapture() {
-        if (portalWebView == null || !isPortalPageUrl(portalWebView.getUrl())) return;
+        if (portalWebView == null || !isPortalLoginPage(portalWebView.getUrl())) return;
         String script = QR_CAPTURE_SCRIPT.replace(
                 "__AUTO_QR__",
                 Boolean.toString(LOGIN_METHOD_WECHAT.equals(loginMethodForCurrentPortal))
@@ -2116,8 +2170,62 @@ public class MainActivity extends Activity {
         portalWebView.evaluateJavascript(script, null);
     }
 
+    private boolean shouldShowAcademicPortalViewer(String url) {
+        if (builtInLoginSubmissionPending || builtInInteractiveChallengeVisible || builtInMobileLoginMode) {
+            return false;
+        }
+        if (isPortalLoginPage(url)) return false;
+        if (isAcademicPortalReadyUrl(url)) return true;
+        return academicPortalViewerActive && !isEcodeTargetReadyUrl(url);
+    }
+
+    private void applyAcademicPortalViewerUi() {
+        academicPortalViewerActive = true;
+        if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
+        if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
+        if (interactiveTrustDevicePanel != null) interactiveTrustDevicePanel.setVisibility(View.GONE);
+        if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
+        if (portalActionButton != null) {
+            portalActionButton.setVisibility(View.VISIBLE);
+            portalActionButton.setEnabled(true);
+            updatePortalActionLabel(portalWebView == null ? "" : portalWebView.getUrl());
+        }
+    }
+
+    /**
+     * 查看原教务系统时，若 WebView 被 WebVPN 带到 E 码通，拉回教务首页。
+     * E 码通自己的后台恢复仍使用 portalWebView，那种情况不能拦截。
+     */
+    private boolean redirectAcademicPortalAwayFromEcode(String url) {
+        if (portalWebView == null || backgroundLoginForEcode || backgroundLoginInProgress) return false;
+        if (!academicPortalViewerActive && dashboardVisible) return false;
+        if (!isEcodeTargetReadyUrl(url)) return false;
+        if (academicEcodeRedirectAttempts >= ACADEMIC_ECODE_REDIRECT_MAX) {
+            recordLoginDiagnostic("portal-viewer", "原教务入口连续落到 E 码通，已停止重定向");
+            return false;
+        }
+        academicEcodeRedirectAttempts += 1;
+        recordLoginDiagnostic(
+                "portal-viewer",
+                "redirect-ecode-to-jwapp attempt=" + academicEcodeRedirectAttempts
+                        + " from=" + sanitizeDiagnosticUrl(url)
+        );
+        portalWebView.loadUrl(ACADEMIC_HOME_URL);
+        return true;
+    }
+
     private void applyPortalLoginMethodUi() {
+        String currentUrl = portalWebView == null ? "" : portalWebView.getUrl();
+        if (shouldShowAcademicPortalViewer(currentUrl)) {
+            applyAcademicPortalViewerUi();
+            return;
+        }
+        applyPortalLoginChrome();
+    }
+
+    private void applyPortalLoginChrome() {
         if (loginMethodBar != null) {
+            loginMethodBar.setVisibility(View.VISIBLE);
             for (int index = 0; index < loginMethodBar.getChildCount(); index += 1) {
                 View child = loginMethodBar.getChildAt(index);
                 if (!(child instanceof Button)) continue;
@@ -2244,7 +2352,7 @@ public class MainActivity extends Activity {
             // 后台登录不能复用上一次失败后留下的登录页。统一认证页的
             // lt/execution 与 WebVPN 代理会话是一组短时状态，必须从教务
             // 入口重新获取，避免把旧表单再次提交。
-            portalWebView.loadUrl(PORTAL_URL);
+            portalWebView.loadUrl(ACADEMIC_HOME_URL);
         }
     }
 
@@ -2279,7 +2387,7 @@ public class MainActivity extends Activity {
         cookieManager.flush();
         String target = backgroundLoginForEcode
                 ? ECODE_URL
-                : (builtInLoginPortalProbeAttempts == 1 ? PORTAL_URL : PORTAL_FALLBACK_URL);
+                : (builtInLoginPortalProbeAttempts == 1 ? ACADEMIC_HOME_URL : ACADEMIC_HOME_FALLBACK_URL);
         recordLoginDiagnostic(
                 "portal-probe",
                 "attempt=" + builtInLoginPortalProbeAttempts
@@ -2316,8 +2424,11 @@ public class MainActivity extends Activity {
         // 在后台 WebView 中可能赶在页面完成切换前执行，导致提交使用了不完整
         // 的表单状态。先只走一次页面原本的“账号登录”点击，再等待页面稳定。
         String script = "(function(){"
+                + SCHOOL_LOGIN_PAGE_HELPERS
+                + "if(isSecondAuthPage())return JSON.stringify({ok:true,interactive:true,secondAuth:true});"
                 + "var tab=document.getElementById('password_login');"
-                + "if(tab&&typeof tab.click==='function'){tab.click();return JSON.stringify({ok:true,tabClicked:true});}"
+                // 账号/二维码 tab 在 WebVPN 认证页经常是 display:none，但仍可 click。
+                + "if(present(tab)&&typeof tab.click==='function'){tab.click();return JSON.stringify({ok:true,tabClicked:true});}"
                 + "return JSON.stringify({ok:true,tabClicked:false});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
@@ -2325,7 +2436,15 @@ public class MainActivity extends Activity {
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 recordLoginDiagnostic("login-tab", "clicked=" + result.optBoolean("tabClicked", false)
+                        + " secondAuth=" + result.optBoolean("secondAuth", false)
                         + (result.has("error") ? " error=" + sanitizeDiagnosticText(result.optString("error", "")) : ""));
+                if (result.optBoolean("interactive", false) || result.optBoolean("secondAuth", false)) {
+                    handOffBuiltInInteractiveChallenge(
+                            operationId,
+                            "学校认证需要图形验证码或短信验证，请在官方页面完成验证。"
+                    );
+                    return;
+                }
                 if (!result.optBoolean("ok", false)) {
                     finishBuiltInLoginFailure("内置登录失败：" + result.optString("error", "无法切换到账号登录页面"), backgroundLoginInProgress);
                     return;
@@ -2344,13 +2463,15 @@ public class MainActivity extends Activity {
         String username = JSONObject.quote(pendingBuiltInUsername);
         String password = JSONObject.quote(pendingBuiltInPassword);
         String script = "(function(){"
+                + SCHOOL_LOGIN_PAGE_HELPERS
                 + "var u=" + username + ",p=" + password + ";"
                 + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
                 + "var button=document.getElementById('index_login_btn');"
                 + "var form=document.getElementById('loginForm')||document.getElementById('loginform');"
-                + "var visible=function(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;};"
+                + "var visible=laidOut;"
                 + "var pageText=String(document.body&&document.body.innerText||'');"
-                + "var challenge=Boolean(document.getElementById('loginMobile')||document.getElementById('codeImage')||document.getElementById('phoneCode')||document.getElementById('getMobileVerifyCode'))||/(图形验证码|图片验证码|安全验证|获取验证码|手机验证码|手机登录)/.test(pageText);"
+                + "if(isSecondAuthPage())return JSON.stringify({ok:true,interactive:true,secondAuth:true});"
+                + "var challenge=Boolean(document.getElementById('loginMobile')||document.getElementById('codeImage')||document.getElementById('phoneCode')||document.getElementById('getMobileVerifyCode'))||/(图形验证码|图片验证码|安全验证|获取验证码|手机验证码|手机登录|当前设备需进行身份验证)/.test(pageText);"
                 + "if((!un||!pd||!visible(un)||!visible(pd))&&challenge)return JSON.stringify({ok:true,interactive:true});"
                 + "if(!un||!pd||!visible(un)||!visible(pd))return JSON.stringify({ok:true,waitForPage:true});"
                 + "if(!form)return JSON.stringify({ok:true,waitForPage:true});"
@@ -2376,11 +2497,13 @@ public class MainActivity extends Activity {
             if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
-                if (result.optBoolean("interactive", false)) {
-                    recordLoginDiagnostic("form-submit", "当前页面已进入人工图形/手机验证流程");
-                    showBuiltInInteractiveChallenge(
+                if (result.optBoolean("interactive", false) || result.optBoolean("secondAuth", false)) {
+                    recordLoginDiagnostic("form-submit", result.optBoolean("secondAuth", false)
+                            ? "当前页面已进入设备二次认证（图形验证码/短信）"
+                            : "当前页面已进入人工图形/手机验证流程");
+                    handOffBuiltInInteractiveChallenge(
                             operationId,
-                            "学校认证已进入手机验证页面，请完成图形验证码和短信验证码。"
+                            "学校认证已进入身份验证页面，请完成图形验证码和短信验证码。"
                     );
                     return;
                 }
@@ -2455,22 +2578,24 @@ public class MainActivity extends Activity {
         }
         builtInLoginInspectionAttempts += 1;
         String script = "(function(){"
-                + "function visible(n){if(!n)return false;var s=getComputedStyle(n),r=n.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;}"
+                + SCHOOL_LOGIN_PAGE_HELPERS
+                + "function visible(n){return laidOut(n);}"
                 + "function text(n){return String((n&&(n.innerText||n.textContent))||'').replace(/\\s+/g,' ').trim();}"
+                + "var secondAuth=isSecondAuthPage();"
                 + "var m=document.getElementById('mcode'),save=document.getElementById('saveDevice'),send=document.getElementById('sendCode');"
                 + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
                 + "var credentialInputs=visible(un)&&visible(pd);"
                 + "var loginForm=document.getElementById('loginForm')||document.getElementById('loginform')||un||pd;"
-                // 普通账号密码页也可能预渲染“信任设备”复选框；只有短信
-                // 输入/二次认证控件本身，或没有账号密码框时的信任选项，
-                // 才能把当前页面判定为人工挑战，避免截断旧后台登录。
+                // 普通账号密码页也可能预渲染“信任设备”复选框（常为 0×0）；
+                // 只有真正铺开的短信/二次认证控件，或没有账号密码框时的
+                // 可见信任选项，才能把当前页面判定为人工挑战。
                 + "var challenge=visible(m)||visible(document.getElementById('second_valid_ok'))||(visible(save)&&!credentialInputs);"
                 + "var mobileIds=['loginMobile','sendConfirm','codeImage','getMobileVerifyCode','phoneCode','finishloginbymobile'];"
                 + "var mobileFlow=mobileIds.some(function(id){return visible(document.getElementById(id));});"
                 + "var graphInput=Array.prototype.some.call(document.querySelectorAll('input'),function(n){"
                 + "if(!visible(n)||n===m||n===document.getElementById('phoneCode'))return false;"
                 + "var identity=String(n.id||'')+' '+String(n.name||'')+' '+String(n.placeholder||'');"
-                + "return /captcha|verify|图形验证码|图片验证码|验证码/.test(identity);"
+                + "return /captcha|verify|imgCode|scendAuthCode|图形验证码|图片验证码|验证码/.test(identity);"
                 + "});"
                 + "var graphImage=Array.prototype.some.call(document.querySelectorAll('img,canvas'),function(n){"
                 + "if(!visible(n))return false;var identity=String(n.id||'')+' '+String(n.className||'')+' '+String(n.getAttribute&&n.getAttribute('alt')||'')+' '+String(n.currentSrc||n.src||'');"
@@ -2481,21 +2606,21 @@ public class MainActivity extends Activity {
                 + "Array.prototype.slice.call(document.querySelectorAll('.layui-layer-content,.layui-layer-msg,[role=alert],.alert,.error,.error-msg,.login_box_title_notice')).forEach(add);"
                 + "Array.prototype.slice.call(document.querySelectorAll('body *')).forEach(function(n){if(n.children&&n.children.length)return;if(!visible(n))return;var t=text(n);if(t&&t.length<160&&/(密码错误|账号不存在|登录失败|不正确|锁定|过期|验证码错误|认证失败|不能为空|未找到|禁止)/.test(t))add(n);});"
                 + "var visibleText=text(document.body);"
-                + "var challengeText=/(图形验证码|图片验证码|验证码图片|安全验证|获取短信验证码|短信验证码|手机验证码|手机登录)/.test(visibleText);"
+                + "var challengeText=/(图形验证码|图片验证码|验证码图片|安全验证|获取短信验证码|获取验证码|短信验证码|手机验证码|手机登录|当前设备需进行身份验证)/.test(visibleText);"
                 // 普通账密页可能同时展示“手机登录”说明或隐藏模板文字；
                 // 只要可见账号密码输入框仍在，就不能把这些提示误判成
-                // 当前必须人工完成的手机挑战。真正的图形控件仍会被
-                // graphInput/graphImage 单独识别。
-                + "var interactiveChallenge=challenge||graphInput||graphImage||(mobileFlow&&!credentialInputs)||(challengeText&&!credentialInputs);"
+                // 当前必须人工完成的手机挑战。设备二次认证页用明确 ID 识别。
+                + "var interactiveChallenge=secondAuth||challenge||graphInput||graphImage||(mobileFlow&&!credentialInputs)||(challengeText&&!credentialInputs);"
                 + "var hiddenError=text(document.getElementById('errormsghide'));"
                 + "var rsa=document.getElementById('rsa'),ul=document.getElementById('ul'),pl=document.getElementById('pl'),lt=document.getElementById('lt');"
-                + "return JSON.stringify({challenge:challenge,interactiveChallenge:interactiveChallenge,mobileFlow:mobileFlow,graphInput:graphInput,graphImage:graphImage,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),credentialInputs:credentialInputs,rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
+                + "return JSON.stringify({secondAuth:secondAuth,challenge:challenge,interactiveChallenge:interactiveChallenge,mobileFlow:mobileFlow,graphInput:graphInput,graphImage:graphImage,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),credentialInputs:credentialInputs,rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
                 + "})();";
         portalWebView.evaluateJavascript(script, value -> {
             if (!isCurrentLoginOperation(operationId)) return;
             try {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 String errorText = result.optString("error", "").trim();
+                boolean secondAuth = result.optBoolean("secondAuth", false);
                 boolean challenge = result.optBoolean("challenge", false);
                 boolean interactiveChallenge = result.optBoolean("interactiveChallenge", false);
                 boolean loginForm = result.optBoolean("loginForm", false);
@@ -2503,6 +2628,7 @@ public class MainActivity extends Activity {
                 recordLoginDiagnostic(
                         "inspect",
                         "url=" + sanitizeDiagnosticUrl(currentUrl)
+                                + " secondAuth=" + secondAuth
                                 + " challenge=" + challenge
                                 + " interactive=" + interactiveChallenge
                                 + " mobile=" + result.optBoolean("mobileFlow", false)
@@ -2518,25 +2644,27 @@ public class MainActivity extends Activity {
                                 + (errorText.isEmpty() ? "" : " schoolError=" + sanitizeDiagnosticText(errorText))
                                 + (result.optString("hiddenError", "").trim().isEmpty() ? "" : " hiddenError=" + sanitizeDiagnosticText(result.optString("hiddenError", "")))
                 );
-                if (challenge || interactiveChallenge) {
-                    // 旧版设备短信弹窗和新版图形验证码/手机登录都交给同一个
-                    // 可见官方 WebView。不要再让原生只点击旧的 device 接口，
-                    // 否则学校在发送短信前新增图形验证时会误报“已请求”。
+                if (secondAuth || challenge || interactiveChallenge) {
+                    // 账密提交后的设备二次认证、旧版短信弹窗、手机模板
+                    // 都交给同一个可见官方 WebView。后台遇到这些页立即停止，
+                    // 不自动发送或重放验证码。
                     if (builtInInteractiveChallengeVisible) return;
                     if (backgroundLoginInProgress) {
                         finishBuiltInLoginFailure(
-                                interactiveChallenge
+                                secondAuth || interactiveChallenge
                                         ? "后台自动登录需要人工完成图形验证码和短信验证。请点击手动登录完成验证，或改用原网页账密/二维码登录。"
                                         : "后台自动登录需要人工完成短信二次认证。请点击手动登录完成验证，或改用原网页账密/二维码登录。",
                                 true
                         );
                         return;
                     }
-                    showBuiltInInteractiveChallenge(
+                    handOffBuiltInInteractiveChallenge(
                             operationId,
-                            interactiveChallenge
+                            secondAuth
+                                    ? "学校认证需要图形验证码和短信验证码，请在官方页面完成验证。"
+                                    : (interactiveChallenge
                                     ? "学校认证需要图形验证码或手机验证码，请在官方页面完成验证。"
-                                    : "学校认证需要短信二次验证，请在官方页面获取并填写验证码。"
+                                    : "学校认证需要短信二次验证，请在官方页面获取并填写验证码。")
                     );
                     return;
                 }
@@ -2557,9 +2685,10 @@ public class MainActivity extends Activity {
                     finishBuiltInLoginFailure("学校统一身份认证返回：" + errorText, backgroundLoginInProgress);
                     return;
                 }
-                if (!loginForm && builtInLoginInspectionAttempts >= 3) {
+                if (!loginForm && !secondAuth && builtInLoginInspectionAttempts >= 3) {
                     // 某些成功回调仍保留 /tpass/login 地址，但登录表单已经被
                     // 中转内容替换。此时直接用新 Cookie 探测教务入口。
+                    // 设备二次认证页没有 loginForm，绝不能走这条误判成功路径。
                     loadBuiltInAcademicPortalProbe(currentUrl, operationId);
                     return;
                 }
@@ -2645,6 +2774,24 @@ public class MainActivity extends Activity {
                 + "return true;"
                 + "})();";
         portalWebView.evaluateJavascript(script, null);
+    }
+
+    /**
+     * 把当前认证页交给用户，或在后台登录时安全停止。
+     * 不改信任设备勾选和 Keystore 存凭据；官方页若有 #saveDevice 仍由
+     * 原有同步逻辑处理，没有该节点则保持 no-op。
+     */
+    private void handOffBuiltInInteractiveChallenge(long operationId, String message) {
+        if (!isCurrentLoginOperation(operationId)) return;
+        if (builtInInteractiveChallengeVisible) return;
+        if (backgroundLoginInProgress) {
+            finishBuiltInLoginFailure(
+                    "后台自动登录需要人工完成图形验证码和短信验证。请点击手动登录完成验证，或改用原网页账密/二维码登录。",
+                    true
+            );
+            return;
+        }
+        showBuiltInInteractiveChallenge(operationId, message);
     }
 
     private void showBuiltInInteractiveChallenge(long operationId, String message) {
@@ -2787,7 +2934,7 @@ public class MainActivity extends Activity {
                                 "Cookie 尚未确认有效，重新获取 WebVPN 认证页并只重试一次"
                         );
                         portalWebView.stopLoading();
-                        portalWebView.loadUrl(PORTAL_URL);
+                        portalWebView.loadUrl(ACADEMIC_HOME_URL);
                         return;
                     }
                     finishBuiltInLoginFailure(

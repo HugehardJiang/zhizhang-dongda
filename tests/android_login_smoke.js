@@ -34,6 +34,7 @@ assert.match(source, /interactiveChallenge/);
 assert.match(source, /graphInput/);
 assert.match(source, /graphImage/);
 assert.match(source, /showBuiltInInteractiveChallenge/);
+assert.match(source, /handOffBuiltInInteractiveChallenge/);
 assert.match(source, /completeBuiltInInteractiveChallenge/);
 assert.match(source, /后台自动登录需要人工完成图形验证码和短信验证/);
 assert.match(source, /portalWebView\.postDelayed\(\(\) -> inspectBuiltInLoginPage/);
@@ -44,7 +45,20 @@ assert.match(source, /verifyAcademicSessionAfterInteractiveChallenge/);
 assert.match(source, /verifyBuiltInLoginSession/);
 assert.match(source, /background-confirm/);
 assert.match(source, /background-error-confirm/);
-assert.match(source, /interactiveChallenge=challenge\|\|graphInput\|\|graphImage\|\|\(mobileFlow&&!credentialInputs\)/);
+assert.match(source, /SCHOOL_LOGIN_PAGE_HELPERS/);
+assert.match(source, /function laidOut\(n\)/);
+assert.match(source, /function present\(n\)/);
+assert.match(source, /function isSecondAuthPage\(\)/);
+assert.match(source, /second_auth_form/);
+assert.match(source, /imgCode/);
+assert.match(source, /scendAuthCode/);
+assert.match(source, /getScendAuthCode/);
+assert.match(source, /index_scendAuth_btn/);
+assert.match(source, /secondAuthByMobile/);
+assert.match(source, /当前设备需进行身份验证/);
+assert.match(source, /if\(isSecondAuthPage\(\)\)return JSON\.stringify\(\{ok:true,interactive:true,secondAuth:true\}\)/);
+assert.match(source, /interactiveChallenge=secondAuth\|\|challenge\|\|graphInput\|\|graphImage\|\|\(mobileFlow&&!credentialInputs\)/);
+assert.match(source, /!loginForm && !secondAuth && builtInLoginInspectionAttempts >= 3/);
 assert.match(source, /if \(status == 401\) return true;/);
 assert.match(source, /loginrequired/);
 assert.match(source, /authenticated.*false/);
@@ -72,6 +86,19 @@ assert.match(source, /private void restorePortalOverlayOrder\(\)/);
 assert.match(source, /interactiveTrustDevicePanel\.bringToFront\(\)/);
 assert.match(source, /showPortal\(\)[\s\S]*restorePortalOverlayOrder\(\)/);
 assert.match(source, /showBuiltInInteractiveChallenge\([\s\S]*restorePortalOverlayOrder\(\)/);
+
+// Opening the original academic system must land on /jwapp/ and hide the
+// native login overlay when the WebView is already in the academic app.
+// Loading the WebVPN root would let CAS return to the campus portal / E-code.
+assert.match(source, /ACADEMIC_HOME_URL = PORTAL_URL \+ "\/jwapp\/"/);
+assert.match(source, /academicPortalViewerActive = true/);
+assert.match(source, /shouldShowAcademicPortalViewer/);
+assert.match(source, /applyAcademicPortalViewerUi/);
+assert.match(source, /redirectAcademicPortalAwayFromEcode/);
+assert.match(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(ACADEMIC_HOME_URL\)/);
+assert.match(source, /installPortalQrCapture\(\)[\s\S]*!isPortalLoginPage\(portalWebView\.getUrl\(\)\)/);
+assert.match(source, /loadBuiltInAcademicPortalProbe[\s\S]*ACADEMIC_HOME_URL[\s\S]*ACADEMIC_HOME_FALLBACK_URL/);
+assert.doesNotMatch(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(PORTAL_URL\)/);
 
 // When the school keeps the user on an already-authenticated login page, the
 // visible action must offer an explicit way back to the app instead of
