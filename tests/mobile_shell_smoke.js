@@ -375,7 +375,7 @@ assert.ok(/showDashboard[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySou
 assert.ok(/showPortal[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
 assert.ok(/finishBuiltInLoginSuccess[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
 assert.ok(/finishBuiltInLoginFailure[\s\S]*exitBackgroundLoginMode\(\)/.test(mainActivitySource));
-assert.ok(mainActivitySource.includes('重新获取 WebVPN 认证页并只重试一次'));
+assert.ok(mainActivitySource.includes('重新打开学校认证页并只重试一次'));
 assert.ok(mainActivitySource.includes('formActionBefore'));
 assert.ok(!mainActivitySource.includes('postWebVpnLogin'));
 assert.ok(mainActivitySource.includes('setAcceptThirdPartyCookies'));

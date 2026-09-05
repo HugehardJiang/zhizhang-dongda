@@ -103,6 +103,10 @@ assert.match(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(academicH
 assert.match(source, /installPortalQrCapture\(\)[\s\S]*!isPortalLoginPage\(portalWebView\.getUrl\(\)\)/);
 assert.match(source, /loadBuiltInAcademicPortalProbe[\s\S]*academicHomeUrl\(\)[\s\S]*academicHomeFallbackUrl\(\)/);
 assert.match(source, /https:\/\/pass\.neu\.edu\.cn\//);
+assert.match(source, /academicLoginEntryUrl/);
+assert.match(source, /hidePortalOverlays/);
+assert.match(source, /url-jwapp-confirm/);
+assert.match(source, /inspect-jwapp-confirm/);
 assert.doesNotMatch(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(PORTAL_URL\)/);
 
 // When the school keeps the user on an already-authenticated login page, the

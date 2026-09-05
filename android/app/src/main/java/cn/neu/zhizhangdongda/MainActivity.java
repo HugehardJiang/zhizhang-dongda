@@ -115,7 +115,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.82";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.83";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -985,9 +985,16 @@ public class MainActivity extends Activity {
                     if (redirectAcademicPortalAwayFromBareShell(url)) {
                         return;
                     }
-                    installPortalQrCapture();
-                    showQrActionLoadingIfNeeded(url);
-                    showLoginMethodChooserIfNeeded(url);
+                    if (dashboardVisible && !academicPortalViewerActive
+                            && !builtInLoginSubmissionPending
+                            && !builtInInteractiveChallengeVisible
+                            && !builtInMobileLoginMode) {
+                        hidePortalOverlays();
+                    } else {
+                        installPortalQrCapture();
+                        showQrActionLoadingIfNeeded(url);
+                        showLoginMethodChooserIfNeeded(url);
+                    }
                     if (!builtInLoginSubmissionPending) {
                         applyPortalLoginMethodUi();
                         if (builtInMobileLoginMode) {
@@ -1004,9 +1011,13 @@ public class MainActivity extends Activity {
                         view.postDelayed(MainActivity.this::activatePortalMobileLogin, BUILT_IN_LOGIN_TAB_SETTLE_MS);
                     }
                     if (builtInLoginSubmissionPending
-                            && (isAcademicPortalReadyUrl(url)
-                            || (backgroundLoginForEcode && isEcodeTargetReadyUrl(url)))) {
+                            && backgroundLoginForEcode
+                            && isEcodeTargetReadyUrl(url)) {
                         finishBuiltInLoginSuccess(activeLoginOperationId);
+                    } else if (builtInLoginSubmissionPending && isAcademicPortalReadyUrl(url)) {
+                        // 校园网打开 jwxt /jwapp/sys/homeapp 时，地址本身就含 /jwapp/，
+                        // 即使尚未完成 CAS 也会误报成功。必须用 Cookie 探测确认。
+                        verifyBuiltInLoginSession(activeLoginOperationId, "url-jwapp-confirm", false);
                     } else if (builtInLoginSubmissionPending && isPortalLoginPage(url)) {
                         // 会话失效后学校可能直接返回图形/手机验证页，
                         // 该页面没有账号密码输入框；先检查页面状态，
@@ -1544,13 +1555,9 @@ public class MainActivity extends Activity {
             // 这个值只是上次成功会话的提示，不能因为展示缓存首页就把失效
             // Cookie 标成有效；真实状态由轻量 WebVPN 探测或业务响应确认。
             cookieManager.flush();
-            portalWebView.setVisibility(View.GONE);
-            if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
-            if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
-            if (interactiveTrustDevicePanel != null) interactiveTrustDevicePanel.setVisibility(View.GONE);
+            hidePortalOverlays();
+            if (portalWebView != null) portalWebView.setVisibility(View.GONE);
             dashboardHome.setVisibility(View.VISIBLE);
-            portalActionButton.setVisibility(View.GONE);
-            if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
             if (!dashboardLoaded) {
                 dashboardLoaded = true;
                 ecodeWebView.loadUrl(ecodeUrl());
@@ -2102,6 +2109,18 @@ public class MainActivity extends Activity {
         return academicRootFallbackUrl() + "/jwapp/sys/homeapp";
     }
 
+    private String academicLoginEntryUrl() {
+        if (isCampusAccess()) {
+            try {
+                return "https://pass.neu.edu.cn/tpass/login?service="
+                        + java.net.URLEncoder.encode(academicHomeUrl(), "UTF-8");
+            } catch (Exception ignored) {
+                return "https://pass.neu.edu.cn/tpass/login";
+            }
+        }
+        return academicHomeUrl();
+    }
+
     private String ecodeUrl() {
         return isCampusAccess() ? CAMPUS_ECODE_URL : WEBVPN_ECODE_URL;
     }
@@ -2451,7 +2470,25 @@ public class MainActivity extends Activity {
         );
     }
 
+    private void hidePortalOverlays() {
+        academicPortalViewerActive = false;
+        if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
+        if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
+        if (interactiveTrustDevicePanel != null) interactiveTrustDevicePanel.setVisibility(View.GONE);
+        if (portalActionButton != null) portalActionButton.setVisibility(View.GONE);
+        if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
+    }
+
     private void applyPortalLoginMethodUi() {
+        if (dashboardVisible
+                && !academicPortalViewerActive
+                && !builtInLoginSubmissionPending
+                && !builtInInteractiveChallengeVisible
+                && !builtInMobileLoginMode
+                && !backgroundLoginInProgress) {
+            hidePortalOverlays();
+            return;
+        }
         String currentUrl = portalWebView == null ? "" : portalWebView.getUrl();
         if (shouldShowAcademicPortalViewer(currentUrl)) {
             applyAcademicPortalViewerUi();
@@ -2589,7 +2626,7 @@ public class MainActivity extends Activity {
             // 后台登录不能复用上一次失败后留下的登录页。统一认证页的
             // lt/execution 与 WebVPN 代理会话是一组短时状态，必须从教务
             // 入口重新获取，避免把旧表单再次提交。
-            portalWebView.loadUrl(academicHomeUrl());
+            portalWebView.loadUrl(academicLoginEntryUrl());
         }
     }
 
@@ -2789,9 +2826,12 @@ public class MainActivity extends Activity {
     private void inspectBuiltInLoginPage(long operationId) {
         if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
         String currentUrl = portalWebView.getUrl();
-        if (isAcademicPortalReadyUrl(currentUrl)
-                || (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl))) {
+        if (backgroundLoginForEcode && isEcodeTargetReadyUrl(currentUrl)) {
             finishBuiltInLoginSuccess(operationId);
+            return;
+        }
+        if (isAcademicPortalReadyUrl(currentUrl)) {
+            verifyBuiltInLoginSession(operationId, "inspect-jwapp-confirm", false);
             return;
         }
         if (builtInInteractiveChallengeVisible) {
@@ -3126,10 +3166,6 @@ public class MainActivity extends Activity {
         if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
         if (builtInLoginSessionProbeInProgress) return;
         String currentUrl = portalWebView.getUrl();
-        if (isAcademicPortalReadyUrl(currentUrl)) {
-            finishBuiltInLoginSuccess(operationId);
-            return;
-        }
         builtInLoginSessionProbeInProgress = true;
         boolean background = backgroundLoginInProgress;
         if (portalActionButton != null) {
@@ -3160,6 +3196,11 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (background) {
+                    if (isPortalLoginPage(portalWebView.getUrl())) {
+                        recordLoginDiagnostic(diagnosticPhase, "会话未生效，继续在认证页提交账密");
+                        inspectBuiltInLoginPage(operationId);
+                        return;
+                    }
                     if (builtInLoginRetryCount < BUILT_IN_LOGIN_RETRY_MAX) {
                         builtInLoginRetryCount += 1;
                         builtInLoginInspectionAttempts = 0;
@@ -3168,10 +3209,10 @@ public class MainActivity extends Activity {
                         builtInLoginAwaitingPage = true;
                         recordLoginDiagnostic(
                                 "retry",
-                                "Cookie 尚未确认有效，重新获取 WebVPN 认证页并只重试一次"
+                                "Cookie 尚未确认有效，重新打开学校认证页并只重试一次"
                         );
                         portalWebView.stopLoading();
-                        portalWebView.loadUrl(academicHomeUrl());
+                        portalWebView.loadUrl(academicLoginEntryUrl());
                         return;
                     }
                     finishBuiltInLoginFailure(
@@ -3316,6 +3357,7 @@ public class MainActivity extends Activity {
             backgroundLoginAttemptedForCurrentFailure = false;
         }
         if (wasBackground) {
+            hidePortalOverlays();
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
             if (wasForEcode) {
                 reloadEcodeAfterBackgroundLogin();
@@ -3374,6 +3416,7 @@ public class MainActivity extends Activity {
             setEcodeError(fullMessage + " 请点击 E 码通区域的登录按钮手动完成登录。");
         }
         if (background) {
+            hidePortalOverlays();
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
             if (dashboardHome != null) dashboardHome.setVisibility(View.VISIBLE);
             dashboardVisible = true;
