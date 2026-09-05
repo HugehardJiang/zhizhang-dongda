@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="native_background">#101418</color>
+    <color name="native_surface">#171C22</color>
+    <color name="native_surface_subtle">#222A33</color>
+    <color name="native_text_primary">#F2F5F7</color>
+    <color name="native_text_secondary">#AEB9C5</color>
+    <color name="native_text_tertiary">#84909B</color>
+    <color name="native_border">#2D3843</color>
+    <color name="native_brand">#3B78A6</color>
+    <color name="native_brand_text">#83B9DF</color>
+    <color name="native_brand_strong">#3B78A6</color>
+    <color name="native_error">#EF9292</color>
+    <color name="native_error_surface">#3B2428</color>
+    <color name="native_warning">#E1B36C</color>
+    <color name="native_warning_surface">#3B2E1F</color>
+    <color name="native_success">#79C99E</color>
+    <color name="native_success_surface">#193126</color>
+    <color name="native_ecode_thumbnail">#24343C</color>
+</resources>

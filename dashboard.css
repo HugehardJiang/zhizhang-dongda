@@ -617,6 +617,7 @@ td.score-cell { color: #315cc9; font-size: 16px; font-weight: 800; }
   --brand-100: #e3edf3;
   --brand-600: #356d9d;
   --brand-700: #2f5f89;
+  --brand-50: var(--brand-050);
   --brand: var(--brand-600);
   --brand-hover: var(--brand-700);
   --brand-soft: var(--brand-050);
@@ -2125,4 +2126,140 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
   .curriculum-textbook-candidate { align-items: stretch; flex-direction: column; gap: 8px; }
   .curriculum-textbook-candidate .button { width: 100%; }
   .curriculum-textbook-actions .button { flex: 1 1 auto; }
+}
+
+/* System dark mode --------------------------------------------------------
+   The layout and interaction rules stay identical. Only the visual tokens
+   and the legacy component color literals that are still active below the
+   refactored shell are remapped here. PDF output intentionally remains light
+   so exported documents stay readable when printed or shared. */
+@media screen and (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg-app: #101418;
+    --surface: #171c22;
+    --surface-subtle: #1d242c;
+    --surface-hover: #242d36;
+    --text-primary: #edf2f6;
+    --text-secondary: #aeb9c5;
+    --text-tertiary: #7f8c98;
+    --border: #2d3843;
+    --border-strong: #3b4855;
+    --brand-050: #1c2d3a;
+    --brand-100: #263f52;
+    --brand-600: #7eb1d9;
+    --brand-700: #9bc6e4;
+    --brand: var(--brand-600);
+    --brand-hover: var(--brand-700);
+    --brand-soft: var(--brand-050);
+    --info: #7eb1d9;
+    --success: #79c99e;
+    --success-soft: #193126;
+    --warning: #e1b36c;
+    --warning-soft: #3b2e1f;
+    --danger: #ef9292;
+    --danger-soft: #3b2428;
+    --ink: var(--text-primary);
+    --muted: var(--text-secondary);
+    --line: var(--border);
+    --canvas: var(--bg-app);
+    --navy: var(--text-primary);
+    --blue: var(--brand);
+    --blue-soft: var(--brand-100);
+    --brand-50: var(--brand-050);
+  }
+
+  .icon-button:hover { border-color: var(--border-strong); }
+  .notice.is-error { background: var(--danger-soft); border-color: #653b42; }
+  .notice.is-success { background: var(--success-soft); border-color: #2f6249; }
+  .button-danger { border-color: #653b42; }
+  .spinner { border-color: var(--border-strong); }
+
+  .schedule-course-chip,
+  .schedule-course-group-chip,
+  .schedule-unplaced-chip { background: var(--surface-subtle); border-left-color: #6f9dbd; }
+  .course-mobile-list .course-arrangement-count { color: var(--brand); background: var(--brand-soft); border-color: var(--brand-100); }
+  .course-mobile-list .course-arrangement-list::before { background: var(--border-strong); }
+  .course-mobile-list .course-arrangement-item::before { background: var(--surface); border-color: #75a8c2; }
+  .course-mobile-list .course-arrangement-week { color: var(--brand); }
+  .course-mobile-list .course-arrangement-item.is-unresolved::before { border-color: var(--text-tertiary); }
+  .course-mobile-list .course-arrangement-item.is-unresolved .course-arrangement-week { color: var(--text-tertiary); }
+
+  .overview-timeline::before { background: linear-gradient(var(--border), var(--border-strong) 70%, var(--border)); }
+  .overview-timeline-marker { border-color: #718093; }
+  .overview-timeline-card { border-left-color: #536273; }
+  .overview-timeline-row.is-active .overview-timeline-card { border-color: #3b5c78; border-left-color: var(--brand); }
+
+  .local-source-course { color: #8bc7dc; background: #1c3640; }
+  .local-source-event { color: #e0aa79; background: #3b2c22; }
+  .local-schedule-color-blue { --local-accent: #6fb8c9; --local-surface: #182f37; }
+  .local-schedule-color-teal { --local-accent: #68c0b8; --local-surface: #18332f; }
+  .local-schedule-color-green { --local-accent: #84c68f; --local-surface: #1b3322; }
+  .local-schedule-color-violet { --local-accent: #aa96d7; --local-surface: #29243a; }
+  .local-schedule-color-orange { --local-accent: #d7a36b; --local-surface: #382c20; }
+  .local-schedule-color-rose { --local-accent: #d38b9b; --local-surface: #38252c; }
+  .local-schedule-record { background: var(--surface-subtle); border-color: var(--border); }
+  .local-schedule-record.is-disabled { border-left-color: var(--text-tertiary); }
+  .local-add-hint { color: #a7c6d0; background: #183038; border-color: #3f6875; }
+  .local-schedule-empty { color: var(--text-tertiary); background: var(--surface-subtle); border-color: var(--border-strong); }
+  .local-schedule-empty strong { color: var(--text-secondary); }
+  .local-form-field input,
+  .local-form-field select,
+  .local-form-field textarea,
+  .local-week-range input,
+  .local-week-range select,
+  .local-manager-toolbar select { color: var(--text-primary); background: var(--surface); border-color: var(--border-strong); }
+  .local-week-context { color: #8bd0ad; background: var(--success-soft); border-color: #2f6249; }
+  .local-week-context.is-warning { color: #e1b36c; background: var(--warning-soft); border-color: #70532c; }
+  .local-form-field em, .local-week-builder em { color: var(--danger); }
+  .local-week-option { color: var(--text-secondary); background: var(--surface-subtle); border-color: var(--border); }
+  .local-color-option input:checked + span { border-color: var(--text-primary); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--text-primary); }
+  .local-form-error,
+  .course-outline-error { color: var(--danger); background: var(--danger-soft); border-color: #653b42; }
+  .local-conflict-row { background: #33291f; border-color: #5d4930; border-left-color: #d49b57; }
+  .local-conflict-row strong { color: #e4bd8e; }
+  .local-conflict-row span, .local-conflict-row small { color: #c6aa86; }
+  .local-manager-danger { border-top-color: #59393e; }
+  .local-manager-danger small { color: #c49b9d; }
+  .local-hidden-school-row { border-bottom-color: var(--border); }
+  .overview-conflict-mark { color: var(--warning); }
+
+  .toast { background: rgba(23, 28, 34, .97); box-shadow: 0 8px 24px rgba(0, 0, 0, .32); }
+
+  .course-outline-filter input,
+  .course-outline-page-size select { color: var(--text-primary); background: var(--surface); border-color: var(--border-strong); }
+  .course-outline-session-state { color: #8bd0ad !important; background: var(--success-soft); border-color: #2f6249; }
+  .course-outline-list-row { border-bottom-color: var(--border); }
+  .course-outline-list-title code,
+  .course-outline-detail-title code,
+  .course-outline-raw code { color: #8fc1df; }
+  .course-outline-placeholder { color: var(--text-tertiary); background: var(--surface-subtle); border-color: var(--border-strong); }
+  .course-outline-technical-key code { color: #9ab8c8; background: var(--surface-subtle); border-color: var(--border); }
+  .course-outline-loading-note { color: #9bc6e4; background: var(--brand-soft); border-color: #36576d; }
+  .course-outline-loading-note.is-success { color: #8bd0ad; background: var(--success-soft); border-color: #2f6249; }
+  .course-outline-loading-note.is-warning { color: #e1b36c; background: var(--warning-soft); border-color: #70532c; }
+  .course-outline-section-status { color: #8bd0ad; }
+  .course-outline-section-status.is-loading { color: #9bc6e4; }
+  .course-outline-section-status.is-failed { color: var(--danger); }
+  .course-outline-section.is-failed { border-color: #653b42; }
+  .course-outline-basic-group,
+  .course-outline-record,
+  .course-outline-more-fields,
+  .course-outline-raw-item { background: var(--surface-subtle); border-color: var(--border); }
+  .course-outline-basic-field,
+  .course-outline-field { background: var(--surface); border-bottom-color: var(--border); }
+  .course-outline-field:nth-child(even),
+  .course-outline-basic-field:nth-child(even),
+  .course-outline-more-fields .course-outline-field:nth-child(even) { background: var(--surface-subtle); }
+  .course-outline-basic-field > span,
+  .course-outline-field > span,
+  .course-outline-technical-fields .course-outline-field > span,
+  .course-outline-empty-fields .course-outline-field > span { color: var(--text-secondary); }
+  .course-outline-basic-value { color: var(--text-primary); }
+  .course-outline-value-text.is-structured { color: var(--text-secondary); }
+  .course-outline-field-source { color: var(--text-tertiary); }
+  .course-outline-more-fields > summary { color: var(--text-secondary); }
+  .course-outline-raw-item pre { border-top-color: var(--border); }
+  .curriculum-textbook-error,
+  .webvpn-tool-error { border-color: #653b42; }
 }

@@ -11,6 +11,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
+import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -765,8 +766,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().setStatusBarColor(Color.rgb(246, 247, 249));
-        getWindow().setNavigationBarColor(Color.rgb(246, 247, 249));
+        getWindow().setStatusBarColor(getColor(R.color.native_background));
+        getWindow().setNavigationBarColor(getColor(R.color.native_background));
 
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         cookieManager.setAcceptCookie(true);
@@ -782,7 +783,7 @@ public class MainActivity extends Activity {
         startAccessNetworkResolve();
 
         root = new FrameLayout(this);
-        root.setBackgroundColor(Color.rgb(246, 247, 249));
+        root.setBackgroundColor(getColor(R.color.native_background));
 
         portalWebView = createPortalWebView();
         portalWebView.addJavascriptInterface(new LoginBridge(), "AndroidLoginBridge");
@@ -791,7 +792,7 @@ public class MainActivity extends Activity {
         root.addView(portalWebView, fullScreenParams());
 
         dashboardHome = new FrameLayout(this);
-        dashboardHome.setBackgroundColor(Color.rgb(246, 247, 249));
+        dashboardHome.setBackgroundColor(getColor(R.color.native_background));
         FrameLayout.LayoutParams dashboardParams = fullScreenParams();
         dashboardHome.addView(dashboardWebView, dashboardParams);
         ecodePanel = createEcodePanel();
@@ -813,7 +814,7 @@ public class MainActivity extends Activity {
         portalActionButton.setTextColor(Color.WHITE);
         portalActionButton.setTextSize(15);
         portalActionButton.setText("完成教务系统登录，进入执掌东大");
-        portalActionButton.setBackground(roundBackground(Color.rgb(47, 104, 244), 16));
+        portalActionButton.setBackground(roundBackground(getColor(R.color.native_brand_strong), 16));
         portalActionButton.setOnClickListener(view -> {
             if (builtInInteractiveChallengeVisible && builtInLoginSubmissionPending) {
                 completeBuiltInInteractiveChallenge();
@@ -850,11 +851,11 @@ public class MainActivity extends Activity {
 
         portalQrActionButton = new Button(this);
         portalQrActionButton.setAllCaps(false);
-        portalQrActionButton.setTextColor(Color.rgb(38, 54, 83));
+        portalQrActionButton.setTextColor(getColor(R.color.native_text_primary));
         portalQrActionButton.setTextSize(14);
         portalQrActionButton.setText("保存二维码并打开微信");
         portalQrActionButton.setContentDescription("保存教务系统登录二维码并打开微信");
-        portalQrActionButton.setBackground(roundBackground(Color.WHITE, 16));
+        portalQrActionButton.setBackground(roundBackground(getColor(R.color.native_surface), 16));
         portalQrActionButton.setOnClickListener(view -> saveQrAndOpenWechat());
         portalQrActionButton.setVisibility(View.GONE);
         FrameLayout.LayoutParams qrActionParams = new FrameLayout.LayoutParams(
@@ -867,11 +868,11 @@ public class MainActivity extends Activity {
 
         interactiveTrustDevicePanel = new FrameLayout(this);
         interactiveTrustDevicePanel.setPadding(dp(8), 0, dp(8), 0);
-        interactiveTrustDevicePanel.setBackground(roundBackground(Color.WHITE, 14));
+        interactiveTrustDevicePanel.setBackground(roundBackground(getColor(R.color.native_surface), 14));
         interactiveTrustDevicePanel.setElevation(dp(4));
         interactiveTrustDeviceCheck = new CheckBox(this);
         interactiveTrustDeviceCheck.setText("信任此设备（默认已勾选）");
-        interactiveTrustDeviceCheck.setTextColor(Color.rgb(47, 61, 83));
+        interactiveTrustDeviceCheck.setTextColor(getColor(R.color.native_text_primary));
         interactiveTrustDeviceCheck.setTextSize(13);
         interactiveTrustDeviceCheck.setContentDescription("信任此设备，默认已勾选");
         interactiveTrustDeviceCheck.setChecked(true);
@@ -940,7 +941,7 @@ public class MainActivity extends Activity {
         }
         // 保持跨版本稳定的 UA 标识，避免应用更新被学校的可信设备策略视为全新设备。
         settings.setUserAgentString(settings.getUserAgentString() + " ZhiZhangDongDa/Android");
-        webView.setBackgroundColor(Color.rgb(246, 247, 249));
+        webView.setBackgroundColor(getColor(R.color.native_background));
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setVerticalScrollBarEnabled(false);
         webView.setHorizontalScrollBarEnabled(false);
@@ -1174,7 +1175,7 @@ public class MainActivity extends Activity {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setPadding(dp(8), dp(7), dp(8), dp(7));
-        bar.setBackgroundColor(Color.WHITE);
+        bar.setBackgroundColor(getColor(R.color.native_surface));
         String[][] methods = {
                 {LOGIN_METHOD_BUILT_IN, "内置登录"},
                 {LOGIN_METHOD_PASSWORD, "原网页账密"},
@@ -1204,7 +1205,7 @@ public class MainActivity extends Activity {
 
     private FrameLayout createBuiltInLoginPanel() {
         FrameLayout panel = new FrameLayout(this);
-        panel.setBackgroundColor(Color.rgb(246, 247, 249));
+        panel.setBackgroundColor(getColor(R.color.native_background));
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -1214,14 +1215,14 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("内置登录");
-        title.setTextColor(Color.rgb(24, 35, 54));
+        title.setTextColor(getColor(R.color.native_text_primary));
         title.setTextSize(24);
         title.setTypeface(null, android.graphics.Typeface.BOLD);
         content.addView(title);
 
         TextView subtitle = new TextView(this);
         subtitle.setText("通过学校官方统一身份认证页面提交。凭据仅使用 Android Keystore 加密保存在本机，用于登录失效后的后台自动重试。");
-        subtitle.setTextColor(Color.rgb(91, 104, 125));
+        subtitle.setTextColor(getColor(R.color.native_text_secondary));
         subtitle.setTextSize(13);
         subtitle.setLineSpacing(0, 1.25f);
         LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(
@@ -1255,7 +1256,7 @@ public class MainActivity extends Activity {
 
         builtInTrustDeviceCheck = new CheckBox(this);
         builtInTrustDeviceCheck.setText("信任此设备，并保存加密凭据用于后台自动登录");
-        builtInTrustDeviceCheck.setTextColor(Color.rgb(47, 61, 83));
+        builtInTrustDeviceCheck.setTextColor(getColor(R.color.native_text_primary));
         builtInTrustDeviceCheck.setTextSize(13);
         builtInTrustDeviceCheck.setChecked(true);
         LinearLayout.LayoutParams trustParams = new LinearLayout.LayoutParams(
@@ -1268,7 +1269,7 @@ public class MainActivity extends Activity {
         builtInLoginButton.setAllCaps(false);
         builtInLoginButton.setTextSize(15);
         builtInLoginButton.setTextColor(Color.WHITE);
-        builtInLoginButton.setBackground(roundBackground(Color.rgb(43, 101, 153), 14));
+        builtInLoginButton.setBackground(roundBackground(getColor(R.color.native_brand), 14));
         builtInLoginButton.setOnClickListener(view -> {
             if (builtInLoginChallengeVisible) submitBuiltInVerificationCode();
             else submitBuiltInCredentials(false);
@@ -1280,8 +1281,8 @@ public class MainActivity extends Activity {
         builtInMobileLoginButton.setText("使用手机验证码登录");
         builtInMobileLoginButton.setAllCaps(false);
         builtInMobileLoginButton.setTextSize(13);
-        builtInMobileLoginButton.setTextColor(Color.rgb(43, 101, 153));
-        builtInMobileLoginButton.setBackground(roundBackground(Color.WHITE, 14));
+        builtInMobileLoginButton.setTextColor(getColor(R.color.native_brand_text));
+        builtInMobileLoginButton.setBackground(roundBackground(getColor(R.color.native_surface), 14));
         builtInMobileLoginButton.setContentDescription("在内置登录流程中使用手机验证码登录");
         builtInMobileLoginButton.setOnClickListener(view -> startBuiltInMobileLogin());
         LinearLayout.LayoutParams mobileLoginParams = new LinearLayout.LayoutParams(
@@ -1299,8 +1300,8 @@ public class MainActivity extends Activity {
         builtInOpenAcademicButton.setText("打开教务系统原网页");
         builtInOpenAcademicButton.setAllCaps(false);
         builtInOpenAcademicButton.setTextSize(12);
-        builtInOpenAcademicButton.setTextColor(Color.rgb(43, 101, 153));
-        builtInOpenAcademicButton.setBackground(roundBackground(Color.WHITE, 14));
+        builtInOpenAcademicButton.setTextColor(getColor(R.color.native_brand_text));
+        builtInOpenAcademicButton.setBackground(roundBackground(getColor(R.color.native_surface), 14));
         builtInOpenAcademicButton.setContentDescription("打开教务系统原网页");
         builtInOpenAcademicButton.setOnClickListener(view -> openOfficialAcademicPortal());
         manualNavigationRow.addView(builtInOpenAcademicButton, new LinearLayout.LayoutParams(0, dp(44), 1f));
@@ -1309,8 +1310,8 @@ public class MainActivity extends Activity {
         builtInCloseLoginButton.setText("关闭并返回主页");
         builtInCloseLoginButton.setAllCaps(false);
         builtInCloseLoginButton.setTextSize(12);
-        builtInCloseLoginButton.setTextColor(Color.rgb(66, 81, 104));
-        builtInCloseLoginButton.setBackground(roundBackground(Color.rgb(232, 237, 243), 14));
+        builtInCloseLoginButton.setTextColor(getColor(R.color.native_text_secondary));
+        builtInCloseLoginButton.setBackground(roundBackground(getColor(R.color.native_surface_subtle), 14));
         builtInCloseLoginButton.setContentDescription("关闭认证页并返回执掌东大主页");
         builtInCloseLoginButton.setOnClickListener(view -> closePortalLoginToDashboard());
         LinearLayout.LayoutParams closeLoginParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
@@ -1319,7 +1320,7 @@ public class MainActivity extends Activity {
         content.addView(manualNavigationRow, manualNavigationParams);
 
         builtInLoginStatus = new TextView(this);
-        builtInLoginStatus.setTextColor(Color.rgb(111, 121, 138));
+        builtInLoginStatus.setTextColor(getColor(R.color.native_text_tertiary));
         builtInLoginStatus.setTextSize(12);
         builtInLoginStatus.setLineSpacing(0, 1.25f);
         LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
@@ -1329,7 +1330,7 @@ public class MainActivity extends Activity {
 
         TextView fallback = new TextView(this);
         fallback.setText("手机验证码属于内置登录的补充验证方式。需要时可点击上面的按钮；图形验证码、短信发送、Cookie 和跳转仍由学校官方页面完成，验证码仅提交给学校页面，应用不会保存。如果学校已经登录但仍停在认证页，可使用上方按钮手动打开原网页或返回主页。");
-        fallback.setTextColor(Color.rgb(125, 135, 151));
+        fallback.setTextColor(getColor(R.color.native_text_tertiary));
         fallback.setTextSize(11);
         fallback.setLineSpacing(0, 1.2f);
         content.addView(fallback);
@@ -1341,7 +1342,7 @@ public class MainActivity extends Activity {
             builtInLoginStatus.setText("已读取本机加密凭据。登录状态失效时会先在后台自动重试。");
         } else if (!lastAcademicLoginError.isEmpty()) {
             builtInLoginStatus.setText(lastAcademicLoginError);
-            builtInLoginStatus.setTextColor(Color.rgb(176, 57, 57));
+            builtInLoginStatus.setTextColor(getColor(R.color.native_error));
         }
 
         scroll.addView(content, new ScrollView.LayoutParams(
@@ -1357,7 +1358,7 @@ public class MainActivity extends Activity {
         field.setSingleLine(true);
         field.setInputType(inputType);
         field.setPadding(dp(14), 0, dp(14), 0);
-        field.setBackground(roundBackground(Color.WHITE, 12));
+        field.setBackground(roundBackground(getColor(R.color.native_surface), 12));
         return field;
     }
 
@@ -1386,8 +1387,9 @@ public class MainActivity extends Activity {
     }
 
     private void applySystemBarInsets() {
-        int systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        boolean darkMode = isDarkMode();
+        int systemUiVisibility = darkMode ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        if (!darkMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             systemUiVisibility |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         }
         getWindow().getDecorView().setSystemUiVisibility(systemUiVisibility);
@@ -2689,9 +2691,9 @@ public class MainActivity extends Activity {
                 View child = loginMethodBar.getChildAt(index);
                 if (!(child instanceof Button)) continue;
                 boolean selected = loginMethodForCurrentPortal.equals(String.valueOf(child.getTag()));
-                ((Button) child).setTextColor(selected ? Color.WHITE : Color.rgb(66, 81, 104));
+                ((Button) child).setTextColor(selected ? Color.WHITE : getColor(R.color.native_text_secondary));
                 child.setBackground(roundBackground(
-                        selected ? Color.rgb(43, 101, 153) : Color.rgb(242, 245, 248),
+                        selected ? getColor(R.color.native_brand) : getColor(R.color.native_surface_subtle),
                         10
                 ));
             }
@@ -2726,7 +2728,7 @@ public class MainActivity extends Activity {
         }
         if (nativeBuiltIn && builtInLoginStatus != null && !lastAcademicLoginError.isEmpty()) {
             builtInLoginStatus.setText(lastAcademicLoginError);
-            builtInLoginStatus.setTextColor(Color.rgb(176, 57, 57));
+            builtInLoginStatus.setTextColor(getColor(R.color.native_error));
         }
     }
 
@@ -3505,7 +3507,7 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (builtInLoginStatus == null) return;
             builtInLoginStatus.setText(message == null ? "" : message);
-            builtInLoginStatus.setTextColor(error ? Color.rgb(176, 57, 57) : Color.rgb(74, 94, 120));
+            builtInLoginStatus.setTextColor(error ? getColor(R.color.native_error) : getColor(R.color.native_text_secondary));
         });
     }
 
@@ -4340,17 +4342,17 @@ public class MainActivity extends Activity {
         FrameLayout panel = new FrameLayout(this);
         applyEcodePanelChrome(panel, false);
 
-        ecodeWebView.setBackgroundColor(Color.WHITE);
+        ecodeWebView.setBackgroundColor(getColor(R.color.native_background));
         ecodeWebView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         panel.addView(ecodeWebView, fullScreenParams());
 
         ecodeCollapsedCard = new FrameLayout(this);
-        ecodeCollapsedCard.setBackground(roundBackground(Color.WHITE, 0));
+        ecodeCollapsedCard.setBackground(roundBackground(getColor(R.color.native_surface), 0));
         ecodeCollapsedCard.setContentDescription("校园码，点击查看完整 E 码通");
         ecodeCollapsedCard.setOnClickListener(view -> setEcodeExpanded(true));
 
         FrameLayout ecodeThumbnailShell = new FrameLayout(this);
-        ecodeThumbnailShell.setBackground(roundBackground(Color.rgb(239, 244, 248), 8));
+        ecodeThumbnailShell.setBackground(roundBackground(getColor(R.color.native_ecode_thumbnail), 8));
         ecodeThumbnailShell.setClipToPadding(true);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             ecodeThumbnailShell.setClipToOutline(true);
@@ -4373,13 +4375,13 @@ public class MainActivity extends Activity {
         ecodeCopy.setGravity(Gravity.CENTER_VERTICAL);
         TextView ecodeTitle = new TextView(this);
         ecodeTitle.setText("校园码");
-        ecodeTitle.setTextColor(Color.rgb(28, 28, 30));
+        ecodeTitle.setTextColor(getColor(R.color.native_text_primary));
         ecodeTitle.setTextSize(14);
         ecodeTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         ecodeCopy.addView(ecodeTitle, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         ecodeCollapsedTimeView = new TextView(this);
         ecodeCollapsedTimeView.setText("点击查看完整 E 码通");
-        ecodeCollapsedTimeView.setTextColor(Color.rgb(107, 114, 128));
+        ecodeCollapsedTimeView.setTextColor(getColor(R.color.native_text_secondary));
         ecodeCollapsedTimeView.setTextSize(11);
         LinearLayout.LayoutParams ecodeTimeParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         ecodeTimeParams.topMargin = dp(4);
@@ -4390,14 +4392,14 @@ public class MainActivity extends Activity {
 
         TextView ecodeArrow = new TextView(this);
         ecodeArrow.setText("›");
-        ecodeArrow.setTextColor(Color.rgb(49, 93, 143));
+        ecodeArrow.setTextColor(getColor(R.color.native_brand_text));
         ecodeArrow.setTextSize(25);
         ecodeArrow.setGravity(Gravity.CENTER);
         FrameLayout.LayoutParams arrowParams = new FrameLayout.LayoutParams(dp(40), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END);
         arrowParams.setMargins(0, 0, dp(8), 0);
         ecodeCollapsedCard.addView(ecodeArrow, arrowParams);
         View ecodeHeaderDivider = new View(this);
-        ecodeHeaderDivider.setBackgroundColor(Color.rgb(229, 231, 235));
+        ecodeHeaderDivider.setBackgroundColor(getColor(R.color.native_border));
         ecodeCollapsedCard.addView(
                 ecodeHeaderDivider,
                 new FrameLayout.LayoutParams(
@@ -4409,12 +4411,12 @@ public class MainActivity extends Activity {
         panel.addView(ecodeCollapsedCard, fullScreenParams());
 
         ecodeErrorView = new TextView(this);
-        ecodeErrorView.setTextColor(Color.rgb(151, 55, 55));
+        ecodeErrorView.setTextColor(getColor(R.color.native_error));
         ecodeErrorView.setTextSize(11);
         ecodeErrorView.setGravity(Gravity.CENTER_VERTICAL);
         ecodeErrorView.setMaxLines(3);
         ecodeErrorView.setPadding(dp(10), dp(7), dp(10), dp(7));
-        ecodeErrorView.setBackground(roundBackground(Color.argb(235, 255, 239, 239), 12));
+        ecodeErrorView.setBackground(roundBackground(withAlpha(getColor(R.color.native_error_surface), 235), 12));
         ecodeErrorView.setVisibility(View.GONE);
         FrameLayout.LayoutParams errorParams = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
@@ -4437,10 +4439,10 @@ public class MainActivity extends Activity {
 
         ecodeCollapseButton = new TextView(this);
         ecodeCollapseButton.setText("收起");
-        ecodeCollapseButton.setTextColor(Color.rgb(38, 54, 83));
+        ecodeCollapseButton.setTextColor(getColor(R.color.native_text_primary));
         ecodeCollapseButton.setTextSize(12);
         ecodeCollapseButton.setGravity(Gravity.CENTER);
-        ecodeCollapseButton.setBackground(roundBackground(Color.argb(230, 255, 255, 255), 18));
+        ecodeCollapseButton.setBackground(roundBackground(withAlpha(getColor(R.color.native_surface), 230), 18));
         ecodeCollapseButton.setOnClickListener(view -> setEcodeExpanded(false));
         ecodeCollapseButton.setVisibility(View.GONE);
         FrameLayout.LayoutParams collapseParams = new FrameLayout.LayoutParams(dp(58), dp(34), Gravity.TOP | Gravity.END);
@@ -4449,11 +4451,11 @@ public class MainActivity extends Activity {
 
         ecodeRefreshButton = new TextView(this);
         ecodeRefreshButton.setText("刷新");
-        ecodeRefreshButton.setTextColor(Color.rgb(38, 54, 83));
+        ecodeRefreshButton.setTextColor(getColor(R.color.native_text_primary));
         ecodeRefreshButton.setTextSize(12);
         ecodeRefreshButton.setGravity(Gravity.CENTER);
         ecodeRefreshButton.setContentDescription("刷新校园 E 码通原网页");
-        ecodeRefreshButton.setBackground(roundBackground(Color.argb(230, 255, 255, 255), 18));
+        ecodeRefreshButton.setBackground(roundBackground(withAlpha(getColor(R.color.native_surface), 230), 18));
         ecodeRefreshButton.setOnClickListener(view -> refreshEcodePage());
         FrameLayout.LayoutParams refreshParams = new FrameLayout.LayoutParams(dp(58), dp(34), Gravity.TOP | Gravity.END);
         refreshParams.setMargins(0, dp(10), dp(10), 0);
@@ -4461,11 +4463,11 @@ public class MainActivity extends Activity {
 
         ecodeLoginButton = new TextView(this);
         ecodeLoginButton.setText("登录");
-        ecodeLoginButton.setTextColor(Color.rgb(38, 54, 83));
+        ecodeLoginButton.setTextColor(getColor(R.color.native_text_primary));
         ecodeLoginButton.setTextSize(12);
         ecodeLoginButton.setGravity(Gravity.CENTER);
         ecodeLoginButton.setContentDescription("单独登录校园 E 码通");
-        ecodeLoginButton.setBackground(roundBackground(Color.argb(230, 255, 255, 255), 18));
+        ecodeLoginButton.setBackground(roundBackground(withAlpha(getColor(R.color.native_surface), 230), 18));
         ecodeLoginButton.setOnClickListener(view -> openEcodeLogin());
         FrameLayout.LayoutParams loginParams = new FrameLayout.LayoutParams(dp(58), dp(34), Gravity.TOP | Gravity.END);
         loginParams.setMargins(0, dp(10), dp(142), 0);
@@ -5131,10 +5133,10 @@ public class MainActivity extends Activity {
     private void applyEcodePanelChrome(FrameLayout panel, boolean expanded) {
         if (panel == null) return;
         if (expanded) {
-            panel.setBackground(roundBackground(Color.WHITE, 0, 0, 12, 12));
+            panel.setBackground(roundBackground(getColor(R.color.native_surface), 0, 0, 12, 12));
             panel.setElevation(dp(2));
         } else {
-            panel.setBackground(roundBackground(Color.WHITE, 0));
+            panel.setBackground(roundBackground(getColor(R.color.native_surface), 0));
             panel.setElevation(0f);
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -5144,6 +5146,10 @@ public class MainActivity extends Activity {
 
     private GradientDrawable roundBackground(int color, int radiusDp) {
         return roundBackground(color, radiusDp, radiusDp, radiusDp, radiusDp);
+    }
+
+    private int withAlpha(int color, int alpha) {
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
     }
 
     private GradientDrawable roundBackground(int color, int topLeftDp, int topRightDp, int bottomRightDp, int bottomLeftDp) {
@@ -5164,6 +5170,11 @@ public class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private boolean isDarkMode() {
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
     }
 
     @Override
