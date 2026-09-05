@@ -92,7 +92,7 @@ assert.match(source, /showBuiltInInteractiveChallenge\([\s\S]*restorePortalOverl
 assert.match(source, /CAMPUS_ACADEMIC_HTTPS = "https:\/\/jwxt\.neu\.edu\.cn"/);
 assert.match(source, /CAMPUS_ECODE_URL = "https:\/\/ecode\.neu\.edu\.cn\/ecode\/"/);
 assert.match(source, /applyEcodePanelChrome/);
-assert.match(source, /roundBackground\(Color\.WHITE, 0, 0, 12, 12\)/);
+assert.match(source, /roundBackground\(getColor\(R\.color\.native_surface\), 0, 0, 12, 12\)/);
 assert.doesNotMatch(source, /panel\.setBackground\(roundBackground\(Color\.WHITE, 20\)\)/);
 assert.match(source, /ECODE_COLLAPSED_HEIGHT_DP = 112/);
 assert.match(source, /private String academicHomeUrl\(\)/);
