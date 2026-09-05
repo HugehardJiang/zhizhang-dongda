@@ -41,6 +41,17 @@ assert.match(source, /credentialInputs/);
 assert.match(source, /当前页面已进入人工图形\/手机验证流程/);
 assert.match(source, /waitForPage/);
 assert.match(source, /verifyAcademicSessionAfterInteractiveChallenge/);
+assert.match(source, /verifyBuiltInLoginSession/);
+assert.match(source, /background-confirm/);
+assert.match(source, /background-error-confirm/);
+assert.match(source, /interactiveChallenge=challenge\|\|graphInput\|\|graphImage\|\|\(mobileFlow&&!credentialInputs\)/);
+assert.match(source, /if \(status == 401\) return true;/);
+assert.match(source, /loginrequired/);
+assert.match(source, /authenticated.*false/);
+assert.match(source, /请先登录/);
+assert.match(source, /authCodeFields/);
+assert.match(source, /forbiddenWithAuthContext/);
+assert.match(source, /visible\(save\)&&!credentialInputs/);
 assert.match(source, /首次安装时 Dashboard 尚未加载/);
 
 // Trust-device remains enabled by default and is synchronized into the
@@ -67,6 +78,8 @@ assert.match(source, /showBuiltInInteractiveChallenge\([\s\S]*restorePortalOverl
 // requiring an automatic redirect.
 assert.match(source, /isPortalLoginPage\(portalWebView == null \? "" : portalWebView\.getUrl\(\)\)\) \{\s*closePortalLoginToDashboard\(\);/);
 assert.match(source, /isPortalLoginPage\(url\)\s*\? "关闭认证页，返回主页"/);
+assert.match(source, /builtInLoginSubmissionPending && !backgroundLoginInProgress/);
+assert.match(source, /saveBuiltInCredentials\(pendingBuiltInUsername, pendingBuiltInPassword\)/);
 
 // Credentials and challenge values must not be added to diagnostic output.
 assert.match(source, /不保存密码、验证码、Cookie/);

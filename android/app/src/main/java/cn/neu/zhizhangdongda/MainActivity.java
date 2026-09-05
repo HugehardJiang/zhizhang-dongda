@@ -105,7 +105,7 @@ public class MainActivity extends Activity {
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.78";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.79";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -622,6 +622,7 @@ public class MainActivity extends Activity {
     private int builtInLoginPortalProbeAttempts;
     private int builtInLoginRetryCount;
     private boolean builtInLoginPortalProbeScheduled;
+    private boolean builtInLoginSessionProbeInProgress;
     private String pendingBuiltInUsername = "";
     private String pendingBuiltInPassword = "";
     private String lastAcademicLoginError = "";
@@ -1381,6 +1382,17 @@ public class MainActivity extends Activity {
      * 并按现有流程提示重新登录。
      */
     private void closePortalLoginToDashboard() {
+        // 学校登录成功后有时仍把 WebView 留在 /tpass/login。此时不能先
+        // cancelAutomaticBackgroundLogin()，否则会清掉当前手动登录事务，
+        // 也就没有机会保存用户刚刚确认过的加密账号密码。
+        if (builtInLoginSubmissionPending && !backgroundLoginInProgress) {
+            verifyBuiltInLoginSession(activeLoginOperationId, "manual-login-close", true);
+            return;
+        }
+        closePortalLoginToDashboardNow();
+    }
+
+    private void closePortalLoginToDashboardNow() {
         cancelAutomaticBackgroundLogin();
         clearPendingQrUrl();
         showDashboard();
@@ -1449,6 +1461,7 @@ public class MainActivity extends Activity {
         builtInInteractiveChallengeVisible = false;
         builtInMobileLoginMode = false;
         builtInLoginPortalProbeScheduled = false;
+        builtInLoginSessionProbeInProgress = false;
         pendingBuiltInPassword = "";
         backgroundLoginForEcode = false;
         pendingEcodeLoginUrl = "";
@@ -2182,6 +2195,7 @@ public class MainActivity extends Activity {
         builtInLoginPortalProbeAttempts = 0;
         builtInLoginRetryCount = 0;
         builtInLoginPortalProbeScheduled = false;
+        builtInLoginSessionProbeInProgress = false;
         if (!background) backgroundLoginForEcode = false;
         beginLoginDiagnostics(background, true);
         recordLoginDiagnostic(
@@ -2425,6 +2439,7 @@ public class MainActivity extends Activity {
             // 图形验证码、短信输入或手机登录后的账号选择。
             return;
         }
+        if (builtInLoginSessionProbeInProgress) return;
         if (!isPortalLoginPage(currentUrl)) {
             if (isPortalPageUrl(currentUrl)) {
                 builtInLoginInspectionAttempts += 1;
@@ -2446,7 +2461,10 @@ public class MainActivity extends Activity {
                 + "var un=document.getElementById('un'),pd=document.getElementById('pd');"
                 + "var credentialInputs=visible(un)&&visible(pd);"
                 + "var loginForm=document.getElementById('loginForm')||document.getElementById('loginform')||un||pd;"
-                + "var challenge=visible(m)||visible(save)||visible(document.getElementById('second_valid_ok'));"
+                // 普通账号密码页也可能预渲染“信任设备”复选框；只有短信
+                // 输入/二次认证控件本身，或没有账号密码框时的信任选项，
+                // 才能把当前页面判定为人工挑战，避免截断旧后台登录。
+                + "var challenge=visible(m)||visible(document.getElementById('second_valid_ok'))||(visible(save)&&!credentialInputs);"
                 + "var mobileIds=['loginMobile','sendConfirm','codeImage','getMobileVerifyCode','phoneCode','finishloginbymobile'];"
                 + "var mobileFlow=mobileIds.some(function(id){return visible(document.getElementById(id));});"
                 + "var graphInput=Array.prototype.some.call(document.querySelectorAll('input'),function(n){"
@@ -2464,7 +2482,11 @@ public class MainActivity extends Activity {
                 + "Array.prototype.slice.call(document.querySelectorAll('body *')).forEach(function(n){if(n.children&&n.children.length)return;if(!visible(n))return;var t=text(n);if(t&&t.length<160&&/(密码错误|账号不存在|登录失败|不正确|锁定|过期|验证码错误|认证失败|不能为空|未找到|禁止)/.test(t))add(n);});"
                 + "var visibleText=text(document.body);"
                 + "var challengeText=/(图形验证码|图片验证码|验证码图片|安全验证|获取短信验证码|短信验证码|手机验证码|手机登录)/.test(visibleText);"
-                + "var interactiveChallenge=mobileFlow||graphInput||graphImage||challengeText;"
+                // 普通账密页可能同时展示“手机登录”说明或隐藏模板文字；
+                // 只要可见账号密码输入框仍在，就不能把这些提示误判成
+                // 当前必须人工完成的手机挑战。真正的图形控件仍会被
+                // graphInput/graphImage 单独识别。
+                + "var interactiveChallenge=challenge||graphInput||graphImage||(mobileFlow&&!credentialInputs)||(challengeText&&!credentialInputs);"
                 + "var hiddenError=text(document.getElementById('errormsghide'));"
                 + "var rsa=document.getElementById('rsa'),ul=document.getElementById('ul'),pl=document.getElementById('pl'),lt=document.getElementById('lt');"
                 + "return JSON.stringify({challenge:challenge,interactiveChallenge:interactiveChallenge,mobileFlow:mobileFlow,graphInput:graphInput,graphImage:graphImage,error:errors.join('；'),hiddenError:hiddenError,sendAvailable:visible(send),loginForm:Boolean(loginForm),credentialInputs:credentialInputs,rsaPresent:Boolean(rsa&&rsa.value),ulLength:ul&&ul.value?ul.value.length:0,plLength:pl&&pl.value?pl.value.length:0,ltPresent:Boolean(lt&&lt.value)});"
@@ -2525,6 +2547,13 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (!errorText.isEmpty()) {
+                    if (backgroundLoginInProgress && !builtInLoginSessionProbeInProgress) {
+                        // 认证页上的旧错误提示可能没有随新一轮登录清空；
+                        // 先确认当前 Cookie，避免把已经成功的可信设备登录
+                        // 当成密码错误。
+                        verifyBuiltInLoginSession(operationId, "background-error-confirm", false);
+                        return;
+                    }
                     finishBuiltInLoginFailure("学校统一身份认证返回：" + errorText, backgroundLoginInProgress);
                     return;
                 }
@@ -2539,18 +2568,11 @@ public class MainActivity extends Activity {
                 // 页面仍在跳转时可能暂时无法读取结果，继续短暂轮询。
             }
             if (builtInLoginInspectionAttempts >= LOGIN_INSPECTION_MAX_ATTEMPTS) {
-                if (backgroundLoginInProgress && builtInLoginRetryCount < BUILT_IN_LOGIN_RETRY_MAX) {
-                    builtInLoginRetryCount += 1;
-                    builtInLoginInspectionAttempts = 0;
-                    builtInLoginPortalProbeAttempts = 0;
-                    builtInLoginPortalProbeScheduled = false;
-                    builtInLoginAwaitingPage = true;
-                    recordLoginDiagnostic(
-                            "retry",
-                            "认证页提交后仍返回登录页，重新获取 WebVPN 认证页并只重试一次"
-                    );
-                    portalWebView.stopLoading();
-                    portalWebView.loadUrl(PORTAL_URL);
+                if (backgroundLoginInProgress) {
+                    // 可信设备已生效时，学校可能已经写入 Cookie，但不一定
+                    // 立即把 WebView 地址改成 /jwapp/。先用业务接口确认，
+                    // 避免把“登录成功但页面没跳转”误报成后台失败。
+                    verifyBuiltInLoginSession(operationId, "background-confirm", false);
                     return;
                 }
                 String hiddenError = "";
@@ -2704,12 +2726,34 @@ public class MainActivity extends Activity {
     }
 
     private void verifyAcademicSessionAfterInteractiveChallenge(long operationId) {
+        verifyBuiltInLoginSession(operationId, "interactive-confirm", false);
+    }
+
+    /**
+     * 登录表单提交后不要只靠 URL 判断成功。学校在可信设备已登记时，
+     * 可能已经写入有效 Cookie，却暂时把 WebView 留在 /tpass/login；
+     * 直接探测教务接口才能区分“页面没跳转”和“真的登录失败”。
+     *
+     * closeAfterFailure 只用于用户主动点击“关闭并返回主页”的场景：
+     * 探测暂时无法确认时仍尊重用户的关闭选择，但不会伪造成功状态。
+     */
+    private void verifyBuiltInLoginSession(long operationId, String diagnosticPhase,
+                                           boolean closeAfterFailure) {
         if (portalWebView == null || !isCurrentLoginOperation(operationId)) return;
+        if (builtInLoginSessionProbeInProgress) return;
+        String currentUrl = portalWebView.getUrl();
+        if (isAcademicPortalReadyUrl(currentUrl)) {
+            finishBuiltInLoginSuccess(operationId);
+            return;
+        }
+        builtInLoginSessionProbeInProgress = true;
+        boolean background = backgroundLoginInProgress;
         if (portalActionButton != null) {
             portalActionButton.setEnabled(false);
             portalActionButton.setText("正在确认学校登录…");
         }
-        recordLoginDiagnostic("interactive-confirm", "用户请求确认图形/手机验证后的教务会话");
+        if (!background && builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+        recordLoginDiagnostic(diagnosticPhase, "用当前 WebView Cookie 确认教务会话");
         cookieManager.flush();
         networkExecutor.execute(() -> {
             long deadline = System.currentTimeMillis() + ACADEMIC_PROBE_TOTAL_BUDGET_MS;
@@ -2725,11 +2769,47 @@ public class MainActivity extends Activity {
             }
             AcademicProbeResult finalResult = result;
             runOnUiThread(() -> {
+                builtInLoginSessionProbeInProgress = false;
                 if (!isCurrentLoginOperation(operationId)) return;
                 if (finalResult.kind == AcademicProbeResult.HEALTHY) {
                     finishBuiltInLoginSuccess(operationId);
                     return;
                 }
+                if (background) {
+                    if (builtInLoginRetryCount < BUILT_IN_LOGIN_RETRY_MAX) {
+                        builtInLoginRetryCount += 1;
+                        builtInLoginInspectionAttempts = 0;
+                        builtInLoginPortalProbeAttempts = 0;
+                        builtInLoginPortalProbeScheduled = false;
+                        builtInLoginAwaitingPage = true;
+                        recordLoginDiagnostic(
+                                "retry",
+                                "Cookie 尚未确认有效，重新获取 WebVPN 认证页并只重试一次"
+                        );
+                        portalWebView.stopLoading();
+                        portalWebView.loadUrl(PORTAL_URL);
+                        return;
+                    }
+                    finishBuiltInLoginFailure(
+                            finalResult.kind == AcademicProbeResult.INVALID
+                                    ? "后台自动登录提交后，学校会话仍未生效。"
+                                    : "后台自动登录已提交，但暂时无法确认学校会话。",
+                            true
+                    );
+                    return;
+                }
+                if (closeAfterFailure) {
+                    Toast.makeText(
+                            this,
+                            finalResult.kind == AcademicProbeResult.INVALID
+                                    ? "未确认到有效教务会话，已返回主页。"
+                                    : "暂时无法确认教务会话，已返回主页；联网后会再次探测。",
+                            Toast.LENGTH_LONG
+                    ).show();
+                    closePortalLoginToDashboardNow();
+                    return;
+                }
+                if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
                 if (portalActionButton != null) {
                     portalActionButton.setEnabled(true);
                     portalActionButton.setText("验证完成，进入执掌东大");
@@ -2842,6 +2922,7 @@ public class MainActivity extends Activity {
         builtInMobileLoginMode = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
+        builtInLoginSessionProbeInProgress = false;
         builtInLoginRetryCount = 0;
         backgroundLoginForEcode = false;
         pendingEcodeLoginUrl = "";
@@ -2895,6 +2976,7 @@ public class MainActivity extends Activity {
         builtInMobileLoginMode = false;
         backgroundLoginInProgress = false;
         builtInLoginPortalProbeScheduled = false;
+        builtInLoginSessionProbeInProgress = false;
         builtInLoginRetryCount = 0;
         backgroundLoginForEcode = false;
         pendingEcodeLoginUrl = "";
@@ -2949,6 +3031,38 @@ public class MainActivity extends Activity {
         String text = body == null ? "" : body;
         if (text.length() > 600000) text = text.substring(0, 600000);
         String lower = text.toLowerCase(java.util.Locale.ROOT);
+        String compact = lower.replaceAll("\\s+", "");
+        // 教务接口不一定重定向到 HTML 登录页，也可能用 HTTP 200 返回
+        // {loginRequired:true}、{authenticated:false} 或“请先登录”。
+        // 只按“是否 JSON”判断会把这种失效响应误当成健康会话，导致
+        // 后台自动登录根本不会启动。
+        if (text.trim().startsWith("{")) {
+            try {
+                JSONObject payload = new JSONObject(text);
+                String[] authCodeFields = {"code", "status", "errCode", "errorCode"};
+                for (String field : authCodeFields) {
+                    String code = String.valueOf(payload.opt(field)).trim();
+                    if ("401".equals(code) || "403".equals(code)) return true;
+                }
+            } catch (Exception ignored) {
+                // 后续仍用不依赖 JSON 解析的文本/HTML 规则判断。
+            }
+        }
+        if (compact.contains("\"loginrequired\":true")
+                || compact.contains("\"authenticated\":false")
+                || compact.contains("\"loggedin\":false")
+                || compact.contains("\"sessionvalid\":false")) {
+            return true;
+        }
+        boolean explicitAuthText = lower.matches(
+                "(?s).*(登录失效|请先登录|未登录|登录过期|会话(?:已)?(?:失效|过期)|统一身份认证|unauthori[sz]ed|authentication required|session expired|login required).*"
+        );
+        boolean forbiddenWithAuthContext = lower.contains("forbidden")
+                && (lower.contains("login") || lower.contains("auth") || lower.contains("session")
+                || lower.contains("登录") || lower.contains("认证"));
+        if (explicitAuthText || forbiddenWithAuthContext) {
+            return true;
+        }
         return (lower.contains("/tpass/login") || lower.contains("id=\"loginform\"")
                 || lower.contains("id='loginform'"))
                 && (text.contains("统一身份认证") || lower.contains("uniform identity authentication"));
