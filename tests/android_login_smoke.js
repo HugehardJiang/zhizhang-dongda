@@ -104,6 +104,18 @@ assert.match(source, /installPortalQrCapture\(\)[\s\S]*!isPortalLoginPage\(porta
 assert.match(source, /loadBuiltInAcademicPortalProbe[\s\S]*academicHomeUrl\(\)[\s\S]*academicHomeFallbackUrl\(\)/);
 assert.match(source, /https:\/\/pass\.neu\.edu\.cn\//);
 assert.match(source, /academicLoginEntryUrl/);
+assert.match(source, /academicCasCallbackUrl\(\)/);
+assert.match(source, /campusAuthLoginUrl\(academicCasCallbackUrl\(\)\)/);
+assert.match(source, /rewriteCampusAuthServiceUrl/);
+assert.match(source, /handleCampusCasTicketLanding/);
+assert.match(source, /cas-ticket-wrong-path/);
+assert.match(source, /cas-service-rewrite/);
+assert.match(source, /shouldOverrideUrlLoading/);
+assert.match(source, /academicCasTicketValue\(url\)\.isEmpty\(\)/);
+assert.doesNotMatch(
+  source,
+  /campusAuthLoginUrl\(academicHomeUrl\(\)\)/
+);
 assert.match(source, /hidePortalOverlays/);
 assert.match(source, /url-jwapp-confirm/);
 assert.match(source, /inspect-jwapp-confirm/);
