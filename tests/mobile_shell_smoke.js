@@ -316,6 +316,10 @@ assert.ok(dashboardCss.includes('bottom: calc(64px + env(safe-area-inset-bottom)
 assert.ok(!dashboardCss.includes('.toast-region { top: calc(var(--toolbar-height) + 10px)'));
 assert.ok(dashboardCss.includes('.android-shell.has-modal .page-wrap { overflow: hidden; overscroll-behavior: none; }'));
 assert.ok(dashboardCss.includes('.mobile-nav-indicator'));
+assert.ok(dashboardCss.includes('min-height: 112px'));
+assert.ok(!/android-shell \.android-ecode-placeholder \{[^}]*min-height: 104px/.test(dashboardCss));
+assert.ok(dashboardCss.includes('-webkit-tap-highlight-color: transparent'));
+assert.ok(dashboardCss.includes('.mobile-nav-item:focus-visible'));
 assert.ok(dashboardCss.includes('transform: translate3d(calc(var(--mobile-nav-index, 0) * 100%), 0, 0)'));
 assert.ok(dashboardCss.includes('@media (prefers-reduced-motion: reduce)'));
 const dashboardHtml = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');

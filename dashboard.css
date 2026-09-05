@@ -8,7 +8,7 @@ body {
 }
 
 button, input, select { font: inherit; }
-button { cursor: pointer; }
+button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 
 .app-shell { min-height: 100vh; }
 
@@ -1303,16 +1303,19 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .course-collision-summary strong { color: var(--text-primary); }
 
 .android-ecode-card[hidden] { display: none !important; }
-.android-ecode-card { min-height: 104px; height: 104px; padding: 0; margin: 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; box-shadow: none; }
+.android-ecode-card { min-height: 112px; height: 112px; padding: 0; margin: 0; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; box-shadow: none; background: var(--surface); }
 .android-ecode-qr-shell { width: 72px; height: 72px; }
 .android-ecode-time { color: var(--text-secondary); font-size: 11px; }
 .android-ecode-unavailable { color: var(--text-tertiary); font-size: 11px; }
 .android-shell .android-ecode-placeholder {
-  min-height: 104px;
-  height: 104px;
+  min-height: 112px;
+  height: 112px;
   visibility: hidden;
   pointer-events: none;
   overflow: hidden;
+  background: var(--surface);
+  border-radius: 0;
+  box-shadow: none;
   transition: height 190ms ease, min-height 190ms ease, margin 190ms ease, opacity 160ms ease;
 }
 .android-shell .android-ecode-placeholder.android-ecode-placeholder-hidden {
@@ -1380,13 +1383,19 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
     background: var(--brand-soft);
   }
   .mobile-bottom-nav.has-indicator .mobile-nav-indicator { opacity: 1; }
-  .mobile-nav-item { position: relative; z-index: 1; flex-direction: column; justify-content: center; gap: 3px; padding: 0; color: var(--text-tertiary); text-align: center; font-size: 10px; font-weight: 600; transition: color 160ms ease, opacity 140ms ease; }
+  .mobile-nav-item { position: relative; z-index: 1; flex-direction: column; justify-content: center; gap: 3px; padding: 0; color: var(--text-tertiary); text-align: center; font-size: 10px; font-weight: 600; border-radius: 10px; -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; transition: color 160ms ease, opacity 140ms ease; }
   .mobile-nav-item .nav-icon { width: 18px; height: 18px; transition: color 160ms ease, opacity 140ms ease; }
   /* Gear outlines are slightly top-heavy optically; lift only the inner
      circle in the mobile bottom bar so it sits on the gear's visual center. */
   .mobile-nav-item .settings-nav-center { transform: translateY(-0.75px); }
   .mobile-nav-item.is-active { color: var(--brand); font-weight: 600; }
-  .mobile-nav-item:active { opacity: 0.72; }
+  .mobile-nav-item:active { opacity: 0.72; background: transparent; }
+  .mobile-nav-item:focus,
+  .mobile-nav-item:focus-visible {
+    outline: none;
+    background: transparent;
+    box-shadow: none;
+  }
   .overview-date { margin: -7px 0 18px; }
   .overview-next { grid-template-columns: 74px minmax(0, 1fr); gap: 12px; padding: 15px 0; }
   .overview-next-time { font-size: 20px; }

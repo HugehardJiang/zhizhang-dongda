@@ -115,7 +115,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.85";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.87";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -4338,11 +4338,7 @@ public class MainActivity extends Activity {
 
     private FrameLayout createEcodePanel() {
         FrameLayout panel = new FrameLayout(this);
-        panel.setBackground(roundBackground(Color.WHITE, 20));
-        panel.setElevation(dp(4));
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            panel.setClipToOutline(true);
-        }
+        applyEcodePanelChrome(panel, false);
 
         ecodeWebView.setBackgroundColor(Color.WHITE);
         ecodeWebView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
@@ -4400,6 +4396,16 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams arrowParams = new FrameLayout.LayoutParams(dp(40), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END);
         arrowParams.setMargins(0, 0, dp(8), 0);
         ecodeCollapsedCard.addView(ecodeArrow, arrowParams);
+        View ecodeHeaderDivider = new View(this);
+        ecodeHeaderDivider.setBackgroundColor(Color.rgb(229, 231, 235));
+        ecodeCollapsedCard.addView(
+                ecodeHeaderDivider,
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        Math.max(1, dp(1)),
+                        Gravity.BOTTOM
+                )
+        );
         panel.addView(ecodeCollapsedCard, fullScreenParams());
 
         ecodeErrorView = new TextView(this);
@@ -4486,6 +4492,7 @@ public class MainActivity extends Activity {
         ecodeCollapsedCard.setVisibility(expanded ? View.GONE : View.VISIBLE);
         ecodeRefreshButton.setVisibility(expanded ? View.VISIBLE : View.GONE);
         ecodeLoginButton.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        applyEcodePanelChrome(ecodePanel, expanded);
 
         ValueAnimator animator = ValueAnimator.ofInt(start, target);
         animator.setDuration(260);
@@ -5121,10 +5128,37 @@ public class MainActivity extends Activity {
         return value;
     }
 
+    private void applyEcodePanelChrome(FrameLayout panel, boolean expanded) {
+        if (panel == null) return;
+        if (expanded) {
+            panel.setBackground(roundBackground(Color.WHITE, 0, 0, 12, 12));
+            panel.setElevation(dp(2));
+        } else {
+            panel.setBackground(roundBackground(Color.WHITE, 0));
+            panel.setElevation(0f);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            panel.setClipToOutline(expanded);
+        }
+    }
+
     private GradientDrawable roundBackground(int color, int radiusDp) {
+        return roundBackground(color, radiusDp, radiusDp, radiusDp, radiusDp);
+    }
+
+    private GradientDrawable roundBackground(int color, int topLeftDp, int topRightDp, int bottomRightDp, int bottomLeftDp) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
-        drawable.setCornerRadius(dp(radiusDp));
+        float topLeft = dp(topLeftDp);
+        float topRight = dp(topRightDp);
+        float bottomRight = dp(bottomRightDp);
+        float bottomLeft = dp(bottomLeftDp);
+        drawable.setCornerRadii(new float[] {
+                topLeft, topLeft,
+                topRight, topRight,
+                bottomRight, bottomRight,
+                bottomLeft, bottomLeft
+        });
         return drawable;
     }
 
