@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.106` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.81` / `81` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.107` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.82` / `82` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -81,7 +81,7 @@ dashboard.html  +  dashboard.css  +  dashboard.js     ← 几乎全部业务在�
 | --- | --- | --- |
 | 查询台 UI | 根目录 `dashboard.*` | 构建时 `syncWebAssets` 拷贝同一套 |
 | 登录 | 用户自己在学校网页登录；插件不存账密 | 内置登录 / 原网页账密 / 微信二维码；成功后 Keystore AES-GCM 存账密 |
-| 网络 | 页面 `fetch` + Cookie | `AndroidApi.request` → `HttpURLConnection`，只允许 `https://webvpn.neu.edu.cn/` |
+| 网络 | 页面 `fetch` + Cookie；校园网直连 `jwxt.neu.edu.cn`，校外 WebVPN | `AndroidApi.request` → `HttpURLConnection`，允许 WebVPN / jwxt / pass / ecode |
 | 培养计划 / 课程大纲 | 培养计划需要原系统页面桥接；课程大纲直接复用浏览器登录会话，不需常驻页面 | **无入口**：启动时删掉 `[data-view="curriculum"]` 和 `[data-view="course-outline"]` |
 | 个人缓存 | 主要靠内存 + `localStorage` 设置 | 应用内部 `personal-cache/`，文件名 = 学号 SHA-256 |
 | 本地课表 | `chrome.storage.local` | 独立目录 `local-schedule/`，同样按学号哈希 |
@@ -282,7 +282,7 @@ Chrome：`chrome://extensions/` → 开发者模式 → 加载本仓库根目录
 
 1. **禁止**把账号、密码、Cookie、SSO ticket、`Authorization`、验证码、完整查询参数写入仓库、日志、诊断原文或 PDF。
 2. 诊断报告必须脱敏（见现有 `sanitizeDiagnosticUrl` / `cacheSafeValue`）。
-3. 原生网络桥只允许 `https://webvpn.neu.edu.cn/`。
+3. 原生网络桥只允许东北大学 WebVPN、教务 `jwxt.neu.edu.cn`、统一认证 `pass.neu.edu.cn` 和 E 码通 `ecode.neu.edu.cn`。
 4. 接口 POST 是 `application/x-www-form-urlencoded`；`querySetting` 是表单里的 JSON 字符串，不是 JSON body。
 5. 课表 XHR 需要 WebVPN 标记 `vpn-12-o1-jwxt.neu.edu.cn`，且不要加 `Fetch-Api: true`。
 6. `/http/` 优先，`/https/` 兜底；课表上下文兼容 `kbapp` 与 `kbbpapp`。

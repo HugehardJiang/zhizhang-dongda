@@ -340,7 +340,9 @@ assert.ok(!mainActivitySource.includes('复用 E 码通\/统一认证长会话')
 assert.ok(/handleEcodeSessionInvalid[\s\S]*backgroundLoginForEcode = true;[\s\S]*submitBuiltInCredentials\(true\)/.test(mainActivitySource));
 assert.ok(/onPageFinished[\s\S]*isPortalLoginPage\(url\)[\s\S]*handleEcodeSessionInvalid/.test(mainActivitySource));
 assert.ok(/finishBuiltInLoginSuccess[\s\S]*wasForEcode[\s\S]*reloadEcodeAfterBackgroundLogin/.test(mainActivitySource));
-assert.ok(/refreshEcodePage[\s\S]*ecodeWebView\.loadUrl\(ECODE_URL\)/.test(mainActivitySource));
+assert.ok(/refreshEcodePage[\s\S]*ecodeWebView\.loadUrl\(ecodeUrl\(\)\)/.test(mainActivitySource));
+assert.ok(mainActivitySource.includes('CAMPUS_ACADEMIC_HTTPS'));
+assert.ok(mainActivitySource.includes('isAllowedNativeRequestUrl'));
 assert.ok(mainActivitySource.includes('submitBuiltInCredentialsToSchoolPage'));
 assert.ok(mainActivitySource.includes("window.login();submitter='window.login'"));
 assert.ok(mainActivitySource.includes("button.click();submitter='index_login_btn'"));

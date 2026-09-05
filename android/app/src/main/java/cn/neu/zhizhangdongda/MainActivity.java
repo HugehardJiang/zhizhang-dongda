@@ -99,19 +99,23 @@ public class MainActivity extends Activity {
     private static final String LOG_TAG = "ZhizhangEcode";
     private static final String PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
     private static final String PORTAL_FALLBACK_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
-    // 打开原教务系统或换取 CAS 票据时必须落到教务首页 /jwapp/sys/homeapp。
-    // 只打开 WebVPN 应用根地址时，统一认证的 service 经常变成 webvpn 门户，
-    // 登录后会进校园门户或 E 码通；只打开 /jwapp/ 则停在 EMAP 欢迎页，
-    // 看不到成绩、课表等模块。
-    private static final String ACADEMIC_HOME_URL = PORTAL_URL + "/jwapp/sys/homeapp";
-    private static final String ACADEMIC_HOME_FALLBACK_URL = PORTAL_FALLBACK_URL + "/jwapp/sys/homeapp";
+    private static final String CAMPUS_ACADEMIC_HTTPS = "https://jwxt.neu.edu.cn";
+    private static final String CAMPUS_ACADEMIC_HTTP = "http://jwxt.neu.edu.cn";
+    private static final String CAMPUS_AUTH_HOST = "pass.neu.edu.cn";
+    private static final String CAMPUS_ECODE_URL = "https://ecode.neu.edu.cn/ecode/";
+    private static final String ACCESS_NETWORK_AUTO = "auto";
+    private static final String ACCESS_NETWORK_CAMPUS = "campus";
+    private static final String ACCESS_NETWORK_WEBVPN = "webvpn";
+    private static final String ACCESS_NETWORK_MODE = "access_network_mode";
+    private static final String ACCESS_NETWORK_RESOLVED = "access_network_resolved";
     // 这是学校 E 码通对应的 WebVPN 目标地址；其中的代理标识必须与学校
     // 给出的地址完全一致，少一个字符都会被 WebVPN 解析成 PARSE_FAILED。
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.81";
+    private static final String WEBVPN_ECODE_URL = ECODE_URL;
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.82";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -648,6 +652,9 @@ public class MainActivity extends Activity {
     // 已进入 /jwapp/ 就只展示原网页；只有仍停在认证页才显示内置登录。
     private boolean academicPortalViewerActive;
     private int academicEcodeRedirectAttempts;
+    private String accessNetworkMode = ACCESS_NETWORK_AUTO;
+    private String accessNetworkResolved = ACCESS_NETWORK_WEBVPN;
+    private boolean accessNetworkProbeDone;
     private boolean builtInLoginChallengeVisible;
     private boolean builtInInteractiveChallengeVisible;
     private boolean builtInMobileLoginMode;
@@ -767,6 +774,8 @@ public class MainActivity extends Activity {
         lastLoginDiagnostics = preferences.getString(LAST_LOGIN_DIAGNOSTICS, "");
         savedQrImageUri = preferences.getString(SAVED_QR_IMAGE_URI, "");
         savedQrImagePath = preferences.getString(SAVED_QR_IMAGE_PATH, "");
+        restoreAccessNetworkPreference();
+        startAccessNetworkResolve();
 
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(246, 247, 249));
@@ -1391,7 +1400,7 @@ public class MainActivity extends Activity {
                     || !isPortalPageUrl(currentUrl)
                     || isEcodeTargetReadyUrl(currentUrl)) {
                 academicEcodeRedirectAttempts = 0;
-                portalWebView.loadUrl(ACADEMIC_HOME_URL);
+                portalWebView.loadUrl(academicHomeUrl());
             }
             portalWebView.setVisibility(View.VISIBLE);
             dashboardHome.setVisibility(View.GONE);
@@ -1420,7 +1429,7 @@ public class MainActivity extends Activity {
             // 是否还要登录。不要先盖内置登录层，也不要打开 WebVPN 根地址
             // （那个入口登录后经常落到校园门户或 E 码通）。
             if (portalWebView != null) {
-                portalWebView.loadUrl(ACADEMIC_HOME_URL);
+                portalWebView.loadUrl(academicHomeUrl());
             }
             showPortal(false);
         });
@@ -1544,7 +1553,7 @@ public class MainActivity extends Activity {
             if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
             if (!dashboardLoaded) {
                 dashboardLoaded = true;
-                ecodeWebView.loadUrl(ECODE_URL);
+                ecodeWebView.loadUrl(ecodeUrl());
                 dashboardWebView.loadUrl(DASHBOARD_URL);
             }
             if (ecodePanel != null) {
@@ -2064,12 +2073,164 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String normalizeAccessNetworkMode(String value) {
+        if (ACCESS_NETWORK_CAMPUS.equals(value) || ACCESS_NETWORK_WEBVPN.equals(value)) return value;
+        return ACCESS_NETWORK_AUTO;
+    }
+
+    private String normalizeAccessNetworkResolved(String value) {
+        return ACCESS_NETWORK_CAMPUS.equals(value) ? ACCESS_NETWORK_CAMPUS : ACCESS_NETWORK_WEBVPN;
+    }
+
+    private boolean isCampusAccess() {
+        return ACCESS_NETWORK_CAMPUS.equals(accessNetworkResolved);
+    }
+
+    private String academicRootUrl() {
+        return isCampusAccess() ? CAMPUS_ACADEMIC_HTTPS : PORTAL_URL;
+    }
+
+    private String academicRootFallbackUrl() {
+        return isCampusAccess() ? CAMPUS_ACADEMIC_HTTP : PORTAL_FALLBACK_URL;
+    }
+
+    private String academicHomeUrl() {
+        return academicRootUrl() + "/jwapp/sys/homeapp";
+    }
+
+    private String academicHomeFallbackUrl() {
+        return academicRootFallbackUrl() + "/jwapp/sys/homeapp";
+    }
+
+    private String ecodeUrl() {
+        return isCampusAccess() ? CAMPUS_ECODE_URL : WEBVPN_ECODE_URL;
+    }
+
+    private void restoreAccessNetworkPreference() {
+        if (preferences == null) return;
+        accessNetworkMode = normalizeAccessNetworkMode(preferences.getString(ACCESS_NETWORK_MODE, ACCESS_NETWORK_AUTO));
+        String storedResolved = normalizeAccessNetworkResolved(preferences.getString(ACCESS_NETWORK_RESOLVED, ACCESS_NETWORK_WEBVPN));
+        if (ACCESS_NETWORK_CAMPUS.equals(accessNetworkMode) || ACCESS_NETWORK_WEBVPN.equals(accessNetworkMode)) {
+            accessNetworkResolved = accessNetworkMode;
+        } else {
+            accessNetworkResolved = storedResolved;
+        }
+    }
+
+    private void persistAccessNetworkPreference() {
+        if (preferences == null) return;
+        preferences.edit()
+                .putString(ACCESS_NETWORK_MODE, accessNetworkMode)
+                .putString(ACCESS_NETWORK_RESOLVED, accessNetworkResolved)
+                .apply();
+    }
+
+    private void startAccessNetworkResolve() {
+        if (ACCESS_NETWORK_CAMPUS.equals(accessNetworkMode) || ACCESS_NETWORK_WEBVPN.equals(accessNetworkMode)) {
+            accessNetworkResolved = accessNetworkMode;
+            accessNetworkProbeDone = true;
+            persistAccessNetworkPreference();
+            return;
+        }
+        networkExecutor.execute(() -> {
+            boolean campusReachable = probeAccessOriginReachable(
+                    CAMPUS_ACADEMIC_HTTPS + "/jwapp/sys/homeapp/api/home/currentUser.do", 2200)
+                    || probeAccessOriginReachable(
+                    CAMPUS_ACADEMIC_HTTP + "/jwapp/sys/homeapp/api/home/currentUser.do", 1800);
+            runOnUiThread(() -> applyResolvedAccessNetwork(
+                    ACCESS_NETWORK_AUTO,
+                    campusReachable ? ACCESS_NETWORK_CAMPUS : ACCESS_NETWORK_WEBVPN,
+                    true
+            ));
+        });
+    }
+
+    private boolean probeAccessOriginReachable(String urlText, int timeoutMs) {
+        AcademicProbeResult result = probeAcademicEndpoint(urlText, timeoutMs);
+        return result.kind == AcademicProbeResult.HEALTHY || result.kind == AcademicProbeResult.INVALID;
+    }
+
+    private void applyResolvedAccessNetwork(String mode, String resolved, boolean notifyDashboard) {
+        String previous = accessNetworkResolved;
+        accessNetworkMode = normalizeAccessNetworkMode(mode);
+        accessNetworkResolved = normalizeAccessNetworkResolved(resolved);
+        accessNetworkProbeDone = true;
+        persistAccessNetworkPreference();
+        if (!accessNetworkResolved.equals(previous) && dashboardLoaded && ecodeWebView != null) {
+            ecodeWebView.stopLoading();
+            ecodeWebView.loadUrl(ecodeUrl());
+        }
+        if (notifyDashboard) notifyDashboardAccessNetwork();
+        completeDashboardHandshakeIfReady();
+    }
+
+    private void notifyDashboardAccessNetwork() {
+        if (dashboardWebView == null || !dashboardLoaded) return;
+        String script = "window.__androidAccessNetworkResolved && window.__androidAccessNetworkResolved("
+                + JSONObject.quote(accessNetworkMode) + ","
+                + JSONObject.quote(accessNetworkResolved) + ");";
+        dashboardWebView.evaluateJavascript(script, null);
+    }
+
+    private void reloadAccessNetworkEndpoints() {
+        runOnUiThread(() -> {
+            if (ecodeWebView != null && dashboardLoaded) {
+                ecodeWebView.stopLoading();
+                ecodeWebView.loadUrl(ecodeUrl());
+            }
+            notifyDashboardAccessNetwork();
+            requestDashboardRefreshAfterSessionProbe(true);
+            requestAcademicSessionProbe("access-network-change", 0L, true);
+        });
+    }
+
+    private boolean isAllowedSchoolHost(String host) {
+        if (host == null) return false;
+        String normalized = host.toLowerCase(java.util.Locale.ROOT);
+        return "webvpn.neu.edu.cn".equals(normalized)
+                || "jwxt.neu.edu.cn".equals(normalized)
+                || CAMPUS_AUTH_HOST.equals(normalized)
+                || "ecode.neu.edu.cn".equals(normalized);
+    }
+
+    private boolean isAllowedNativeRequestUrl(String urlText) {
+        if (urlText == null || urlText.isEmpty()) return false;
+        try {
+            URL url = new URL(urlText);
+            String protocol = url.getProtocol() == null ? "" : url.getProtocol().toLowerCase(java.util.Locale.ROOT);
+            String host = url.getHost();
+            if (!isAllowedSchoolHost(host)) return false;
+            if ("webvpn.neu.edu.cn".equalsIgnoreCase(host)) {
+                return "https".equals(protocol) && urlText.startsWith("https://webvpn.neu.edu.cn/");
+            }
+            if ("jwxt.neu.edu.cn".equalsIgnoreCase(host)) {
+                return "https".equals(protocol) || "http".equals(protocol);
+            }
+            return "https".equals(protocol);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private boolean isPortalPageUrl(String url) {
-        return url != null && url.startsWith("https://webvpn.neu.edu.cn/");
+        if (url == null || url.isEmpty()) return false;
+        try {
+            URL parsed = new URL(url);
+            String host = parsed.getHost() == null ? "" : parsed.getHost().toLowerCase(java.util.Locale.ROOT);
+            return "webvpn.neu.edu.cn".equals(host)
+                    || "jwxt.neu.edu.cn".equals(host)
+                    || CAMPUS_AUTH_HOST.equals(host);
+        } catch (Exception ignored) {
+            return url.startsWith("https://webvpn.neu.edu.cn/")
+                    || url.startsWith("https://jwxt.neu.edu.cn/")
+                    || url.startsWith("http://jwxt.neu.edu.cn/")
+                    || url.startsWith("https://pass.neu.edu.cn/");
+        }
     }
 
     private boolean isPortalLoginPage(String url) {
-        return isPortalPageUrl(url) && url.contains("/tpass/login");
+        if (url == null) return false;
+        return url.contains("/tpass/login") || url.contains("pass.neu.edu.cn/login");
     }
 
     private String extractLoginService(String url) {
@@ -2126,11 +2287,19 @@ public class MainActivity extends Activity {
             }
 
             String targetPath = path.replace("/checkQRCodeScan", "/qyQrLogin");
-            StringBuilder target = new StringBuilder("https://webvpn.neu.edu.cn").append(targetPath).append("?");
-            if (!marker.isEmpty()) target.append(marker).append("&");
-            target.append("uuid=").append(Uri.encode(uuid));
+            StringBuilder target = new StringBuilder();
+            if (isCampusAccess() || (poll.getHost() != null && poll.getHost().equalsIgnoreCase(CAMPUS_AUTH_HOST))) {
+                target.append("https://pass.neu.edu.cn").append(targetPath.contains("/tpass/")
+                        ? targetPath.substring(targetPath.indexOf("/tpass/"))
+                        : "/tpass/qyQrLogin");
+                target.append("?uuid=").append(Uri.encode(uuid));
+            } else {
+                target.append("https://webvpn.neu.edu.cn").append(targetPath).append("?");
+                if (!marker.isEmpty()) target.append(marker).append("&");
+                target.append("uuid=").append(Uri.encode(uuid));
+            }
             if (service != null && !service.isEmpty()) {
-                target.append("&service=").append(Uri.encode(service));
+                target.append(target.toString().contains("?") ? "&" : "?").append("service=").append(Uri.encode(service));
             }
             return target.toString();
         } catch (RuntimeException ignored) {
@@ -2233,7 +2402,7 @@ public class MainActivity extends Activity {
                 "redirect-ecode-to-jwapp attempt=" + academicEcodeRedirectAttempts
                         + " from=" + sanitizeDiagnosticUrl(url)
         );
-        portalWebView.loadUrl(ACADEMIC_HOME_URL);
+        portalWebView.loadUrl(academicHomeUrl());
         return true;
     }
 
@@ -2261,7 +2430,7 @@ public class MainActivity extends Activity {
                 "redirect-emap-shell-to-homeapp attempt=" + academicEcodeRedirectAttempts
                         + " from=" + sanitizeDiagnosticUrl(url)
         );
-        portalWebView.loadUrl(ACADEMIC_HOME_URL);
+        portalWebView.loadUrl(academicHomeUrl());
         return true;
     }
 
@@ -2277,7 +2446,7 @@ public class MainActivity extends Activity {
                     if (academicEcodeRedirectAttempts >= ACADEMIC_ECODE_REDIRECT_MAX) return;
                     academicEcodeRedirectAttempts += 1;
                     recordLoginDiagnostic("portal-viewer", "emap-welcome-text-to-homeapp");
-                    portalWebView.loadUrl(ACADEMIC_HOME_URL);
+                    portalWebView.loadUrl(academicHomeUrl());
                 }
         );
     }
@@ -2412,7 +2581,7 @@ public class MainActivity extends Activity {
             } else {
                 portalWebView.loadUrl(isPortalLoginPage(pendingEcodeLoginUrl)
                         ? pendingEcodeLoginUrl
-                        : ECODE_URL);
+                        : ecodeUrl());
             }
         } else if (!background && isPortalLoginPage(currentUrl)) {
             injectBuiltInCredentialsIntoSchoolPage(operationId);
@@ -2420,7 +2589,7 @@ public class MainActivity extends Activity {
             // 后台登录不能复用上一次失败后留下的登录页。统一认证页的
             // lt/execution 与 WebVPN 代理会话是一组短时状态，必须从教务
             // 入口重新获取，避免把旧表单再次提交。
-            portalWebView.loadUrl(ACADEMIC_HOME_URL);
+            portalWebView.loadUrl(academicHomeUrl());
         }
     }
 
@@ -2454,8 +2623,8 @@ public class MainActivity extends Activity {
         builtInLoginPortalProbeAttempts += 1;
         cookieManager.flush();
         String target = backgroundLoginForEcode
-                ? ECODE_URL
-                : (builtInLoginPortalProbeAttempts == 1 ? ACADEMIC_HOME_URL : ACADEMIC_HOME_FALLBACK_URL);
+                ? ecodeUrl()
+                : (builtInLoginPortalProbeAttempts == 1 ? academicHomeUrl() : academicHomeFallbackUrl());
         recordLoginDiagnostic(
                 "portal-probe",
                 "attempt=" + builtInLoginPortalProbeAttempts
@@ -2973,12 +3142,12 @@ public class MainActivity extends Activity {
         networkExecutor.execute(() -> {
             long deadline = System.currentTimeMillis() + ACADEMIC_PROBE_TOTAL_BUDGET_MS;
             AcademicProbeResult result = probeAcademicEndpoint(
-                    PORTAL_URL + "/jwapp/sys/homeapp/api/home/currentUser.do",
+                    academicRootUrl() + "/jwapp/sys/homeapp/api/home/currentUser.do",
                     Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
             );
             if (result.kind == AcademicProbeResult.UNKNOWN && System.currentTimeMillis() < deadline) {
                 result = probeAcademicEndpoint(
-                        PORTAL_URL + "/jwapp/sys/homeapp/api/home/kb/xnxq.do",
+                        academicRootUrl() + "/jwapp/sys/homeapp/api/home/kb/xnxq.do",
                         Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
                 );
             }
@@ -3002,7 +3171,7 @@ public class MainActivity extends Activity {
                                 "Cookie 尚未确认有效，重新获取 WebVPN 认证页并只重试一次"
                         );
                         portalWebView.stopLoading();
-                        portalWebView.loadUrl(ACADEMIC_HOME_URL);
+                        portalWebView.loadUrl(academicHomeUrl());
                         return;
                     }
                     finishBuiltInLoginFailure(
@@ -3238,7 +3407,14 @@ public class MainActivity extends Activity {
     }
 
     private boolean isEcodeTargetReadyUrl(String url) {
-        return url != null && url.contains(ECODE_TARGET_TOKEN) && !isPortalLoginPage(url);
+        if (url == null || isPortalLoginPage(url)) return false;
+        if (url.contains(ECODE_TARGET_TOKEN)) return true;
+        try {
+            String host = new URL(url).getHost();
+            return host != null && host.equalsIgnoreCase("ecode.neu.edu.cn");
+        } catch (Exception ignored) {
+            return url.contains("ecode.neu.edu.cn");
+        }
     }
 
     private boolean isAcademicLoginInvalidResponse(int status, String body) {
@@ -3382,7 +3558,7 @@ public class MainActivity extends Activity {
         ecodeProbeAttempts = 0;
         setEcodeError("后台登录成功，正在重新加载学校原网页…");
         ecodeWebView.stopLoading();
-        ecodeWebView.loadUrl(ECODE_URL);
+        ecodeWebView.loadUrl(ecodeUrl());
     }
 
     /**
@@ -3576,10 +3752,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean isAllowedQrUrl(String url) {
-        if (url == null || url.isEmpty()) return false;
+        if (url == null || url.isEmpty() || !url.contains("/tpass/qyQrLogin") || !url.contains("uuid=")) {
+            return false;
+        }
         return url.startsWith("https://webvpn.neu.edu.cn/")
-                && url.contains("/tpass/qyQrLogin")
-                && url.contains("uuid=");
+                || url.startsWith("https://pass.neu.edu.cn/");
     }
 
     private void receiveQrUrl(String url) {
@@ -4095,7 +4272,7 @@ public class MainActivity extends Activity {
         ecodeWebView.stopLoading();
         // E 码通与教务系统分别检查业务会话。直接刷新 E 码通目标；若它
         // 跳回统一认证页，由独立后台登录流程恢复，不再借道教务入口。
-        ecodeWebView.loadUrl(ECODE_URL);
+        ecodeWebView.loadUrl(ecodeUrl());
     }
 
     private void openEcodeLogin() {
@@ -4105,7 +4282,7 @@ public class MainActivity extends Activity {
         ecodeProbeAttempts = 0;
         setEcodeError("已展开 E 码通原网页，可在这里单独登录；不会影响教务系统会话");
         ecodeWebView.stopLoading();
-        ecodeWebView.loadUrl(ECODE_URL);
+        ecodeWebView.loadUrl(ecodeUrl());
     }
 
     private void setEcodePanelHidden(boolean hidden) {
@@ -4490,6 +4667,7 @@ public class MainActivity extends Activity {
     private void completeDashboardHandshakeIfReady() {
         if (!dashboardVisible || !dashboardPageReady
                 || !dashboardHandshakeSignalReceived || dashboardHandshakeReceived) return;
+        if (!accessNetworkProbeDone) return;
         dashboardHandshakeReceived = true;
         requestDashboardRefreshAfterSessionProbe(false);
         long now = System.currentTimeMillis();
@@ -4554,14 +4732,14 @@ public class MainActivity extends Activity {
     private void performAcademicSessionProbe(long probeId, long probeEpoch, long loginOperationId, String reason) {
         long deadline = System.currentTimeMillis() + ACADEMIC_PROBE_TOTAL_BUDGET_MS;
         AcademicProbeResult result = probeAcademicEndpoint(
-                PORTAL_URL + "/jwapp/sys/homeapp/api/home/currentUser.do",
+                academicRootUrl() + "/jwapp/sys/homeapp/api/home/currentUser.do",
                 Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
         );
         // currentUser.do 是最快的探测；只有它无法判断时才用同一 WebVPN
         // 代理下的 kb/xnxq.do 兜底，两个请求总预算约 5 秒。
         if (result.kind == AcademicProbeResult.UNKNOWN && System.currentTimeMillis() < deadline) {
             result = probeAcademicEndpoint(
-                    PORTAL_URL + "/jwapp/sys/homeapp/api/home/kb/xnxq.do",
+                    academicRootUrl() + "/jwapp/sys/homeapp/api/home/kb/xnxq.do",
                     Math.min(ACADEMIC_PROBE_TIMEOUT_MS, Math.max(500, (int) (deadline - System.currentTimeMillis())))
             );
         }
@@ -4574,8 +4752,8 @@ public class MainActivity extends Activity {
     private AcademicProbeResult probeAcademicEndpoint(String urlText, int timeoutMs) {
         HttpURLConnection connection = null;
         try {
-            if (urlText == null || !urlText.startsWith("https://webvpn.neu.edu.cn/")) {
-                return new AcademicProbeResult(AcademicProbeResult.UNKNOWN, -1, "探测地址不在学校 WebVPN 范围内");
+            if (!isAllowedNativeRequestUrl(urlText)) {
+                return new AcademicProbeResult(AcademicProbeResult.UNKNOWN, -1, "探测地址不在允许的学校范围内");
             }
             URL url = new URL(urlText);
             connection = (HttpURLConnection) url.openConnection();
@@ -4872,6 +5050,30 @@ public class MainActivity extends Activity {
         }
 
         @android.webkit.JavascriptInterface
+        public String getAccessNetworkMode() {
+            return accessNetworkMode == null ? ACCESS_NETWORK_AUTO : accessNetworkMode;
+        }
+
+        @android.webkit.JavascriptInterface
+        public String getAccessNetworkResolved() {
+            return accessNetworkResolved == null ? ACCESS_NETWORK_WEBVPN : accessNetworkResolved;
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setAccessNetworkMode(String mode, String resolved) {
+            runOnUiThread(() -> applyResolvedAccessNetwork(
+                    normalizeAccessNetworkMode(mode),
+                    normalizeAccessNetworkResolved(resolved),
+                    false
+            ));
+        }
+
+        @android.webkit.JavascriptInterface
+        public void reloadAccessNetworkEndpoints() {
+            MainActivity.this.reloadAccessNetworkEndpoints();
+        }
+
+        @android.webkit.JavascriptInterface
         public String getLoginMethod() {
             return preferences == null ? LOGIN_METHOD_BUILT_IN : readLoginMethodPreference();
         }
@@ -5026,8 +5228,8 @@ public class MainActivity extends Activity {
     private void performRequest(String requestId, String method, String urlText, String body, String headersJson) {
         HttpURLConnection connection = null;
         try {
-            if (urlText == null || !urlText.startsWith("https://webvpn.neu.edu.cn/")) {
-                deliver(requestId, -1, "只允许访问东北大学 WebVPN 地址");
+            if (!isAllowedNativeRequestUrl(urlText)) {
+                deliver(requestId, -1, "只允许访问东北大学教务、统一认证、E 码通或 WebVPN 地址");
                 return;
             }
 

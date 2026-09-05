@@ -89,16 +89,20 @@ assert.match(source, /showBuiltInInteractiveChallenge\([\s\S]*restorePortalOverl
 
 // Opening the original academic system must land on homeapp, not the EMAP
 // shell at /jwapp/ and not the WebVPN root (which can CAS into E-code).
-assert.match(source, /ACADEMIC_HOME_URL = PORTAL_URL \+ "\/jwapp\/sys\/homeapp"/);
+assert.match(source, /CAMPUS_ACADEMIC_HTTPS = "https:\/\/jwxt\.neu\.edu\.cn"/);
+assert.match(source, /CAMPUS_ECODE_URL = "https:\/\/ecode\.neu\.edu\.cn\/ecode\/"/);
+assert.match(source, /private String academicHomeUrl\(\)/);
+assert.match(source, /isAllowedNativeRequestUrl/);
 assert.match(source, /academicPortalViewerActive = true/);
 assert.match(source, /shouldShowAcademicPortalViewer/);
 assert.match(source, /applyAcademicPortalViewerUi/);
 assert.match(source, /redirectAcademicPortalAwayFromEcode/);
 assert.match(source, /redirectAcademicPortalAwayFromBareShell/);
 assert.match(source, /Welcome come to EMAP/);
-assert.match(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(ACADEMIC_HOME_URL\)/);
+assert.match(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(academicHomeUrl\(\)\)/);
 assert.match(source, /installPortalQrCapture\(\)[\s\S]*!isPortalLoginPage\(portalWebView\.getUrl\(\)\)/);
-assert.match(source, /loadBuiltInAcademicPortalProbe[\s\S]*ACADEMIC_HOME_URL[\s\S]*ACADEMIC_HOME_FALLBACK_URL/);
+assert.match(source, /loadBuiltInAcademicPortalProbe[\s\S]*academicHomeUrl\(\)[\s\S]*academicHomeFallbackUrl\(\)/);
+assert.match(source, /https:\/\/pass\.neu\.edu\.cn\//);
 assert.doesNotMatch(source, /openPortalForReauthentication\(\)[\s\S]*loadUrl\(PORTAL_URL\)/);
 
 // When the school keeps the user on an already-authenticated login page, the

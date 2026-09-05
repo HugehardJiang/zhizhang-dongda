@@ -12,28 +12,40 @@ if (IS_ANDROID_APP) {
   document.querySelectorAll('[data-view="course-outline"]').forEach((node) => node.remove());
 }
 
-// 登录后教务系统会把入口从 /https/ 重定向到 /http/；原系统的课表 iframe、
-// 静态脚本和数据请求都使用重定向后的根地址。保留 /https/ 作为失效入口兜底。
-const PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
-const PORTAL_FALLBACK_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
-const HOME_API_ROOT = `${PORTAL_URL}/jwapp/sys/homeapp/api/home`;
-const KB_API_ROOT = `${PORTAL_URL}/jwapp/sys/kbapp`;
-const KB_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/kbapp/*default`;
-const KBBP_API_ROOT = `${PORTAL_URL}/jwapp/sys/kbbpapp`;
-const KBBP_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/kbbpapp/*default`;
-// WebVPN 注入到原系统 XHR URL 上的目标主机标记；缺少它时课表模块会返回 403。
+// 校园网直连原站；校外走 WebVPN。登录后 WebVPN 通常从 /https/ 转到 /http/。
+const ACCESS_NETWORK_SETTING_KEY = "zhizhang.accessNetwork.v1";
+const ACCESS_NETWORK_AUTO = "auto";
+const ACCESS_NETWORK_CAMPUS = "campus";
+const ACCESS_NETWORK_WEBVPN = "webvpn";
+const WEBVPN_ACADEMIC_HTTP = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
+const WEBVPN_ACADEMIC_HTTPS = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
+const CAMPUS_ACADEMIC_HTTPS = "https://jwxt.neu.edu.cn";
+const CAMPUS_ACADEMIC_HTTP = "http://jwxt.neu.edu.cn";
+const CAMPUS_AUTH_ORIGIN = "https://pass.neu.edu.cn";
+const CAMPUS_ECODE_URL = "https://ecode.neu.edu.cn/ecode/";
+const WEBVPN_ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
+let accessNetworkMode = ACCESS_NETWORK_AUTO;
+let accessNetworkResolved = ACCESS_NETWORK_WEBVPN;
+let PORTAL_URL = WEBVPN_ACADEMIC_HTTP;
+let PORTAL_FALLBACK_URL = WEBVPN_ACADEMIC_HTTPS;
+let HOME_API_ROOT = `${PORTAL_URL}/jwapp/sys/homeapp/api/home`;
+let KB_API_ROOT = `${PORTAL_URL}/jwapp/sys/kbapp`;
+let KB_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/kbapp/*default`;
+let KBBP_API_ROOT = `${PORTAL_URL}/jwapp/sys/kbbpapp`;
+let KBBP_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/kbbpapp/*default`;
+// WebVPN 注入到原系统 XHR URL 上的目标主机标记；校园网直连时不要带。
 const WEBVPN_TARGET_MARKER = "vpn-12-o1-jwxt.neu.edu.cn";
-const JWPUB_API_ROOT = `${PORTAL_URL}/jwapp/sys/jwpubapp`;
-const SCORE_API_ROOT = `${PORTAL_URL}/jwapp/sys/cjzhcxapp`;
-const SCORE_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/cjzhcxapp/*default`;
-const PYFA_API_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl`;
-const PYFA_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl/*default`;
+let JWPUB_API_ROOT = `${PORTAL_URL}/jwapp/sys/jwpubapp`;
+let SCORE_API_ROOT = `${PORTAL_URL}/jwapp/sys/cjzhcxapp`;
+let SCORE_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/cjzhcxapp/*default`;
+let PYFA_API_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl`;
+let PYFA_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl/*default`;
 // 培养方案模块和课表模块使用不同的 WebVPN 目标标记。
 const PYFA_TARGET_MARKER = "vpn-12-o1-jwxt.neu.edu.cn";
 // 课程大纲走独立的 WebVPN 目标路由；不要复用课表/培养方案的 o1 标记。
 const COURSE_OUTLINE_TARGET_MARKER = "o2";
 const COURSE_OUTLINE_WEBVPN_MARKER = `vpn-12-${COURSE_OUTLINE_TARGET_MARKER}-jwxt.neu.edu.cn`;
-const COURSE_OUTLINE_API_ROOT = `${PORTAL_URL}/jwapp/sys/kccx`;
+let COURSE_OUTLINE_API_ROOT = `${PORTAL_URL}/jwapp/sys/kccx`;
 const COURSE_OUTLINE_LIST_PATH = "modules/dgcx/cxlb.do";
 const COURSE_OUTLINE_METADATA_PATH = "modules/kcdgwhgl.do";
 const COURSE_OUTLINE_DETAIL_ENDPOINTS = Object.freeze([
@@ -142,6 +154,140 @@ function writeStoredSetting(key, value) {
     // file:// 页面或隐私模式可能禁用 localStorage；不影响当前会话使用。
   }
 }
+
+function normalizeAccessNetworkMode(value) {
+  const mode = String(value || "").trim();
+  if (mode === ACCESS_NETWORK_CAMPUS || mode === ACCESS_NETWORK_WEBVPN) return mode;
+  return ACCESS_NETWORK_AUTO;
+}
+
+function normalizeAccessNetworkResolved(value) {
+  return String(value || "").trim() === ACCESS_NETWORK_CAMPUS
+    ? ACCESS_NETWORK_CAMPUS
+    : ACCESS_NETWORK_WEBVPN;
+}
+
+function applyAccessNetworkResolved(resolved) {
+  accessNetworkResolved = normalizeAccessNetworkResolved(resolved);
+  if (accessNetworkResolved === ACCESS_NETWORK_CAMPUS) {
+    PORTAL_URL = CAMPUS_ACADEMIC_HTTPS;
+    PORTAL_FALLBACK_URL = CAMPUS_ACADEMIC_HTTP;
+  } else {
+    PORTAL_URL = WEBVPN_ACADEMIC_HTTP;
+    PORTAL_FALLBACK_URL = WEBVPN_ACADEMIC_HTTPS;
+  }
+  HOME_API_ROOT = `${PORTAL_URL}/jwapp/sys/homeapp/api/home`;
+  KB_API_ROOT = `${PORTAL_URL}/jwapp/sys/kbapp`;
+  KB_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/kbapp/*default`;
+  KBBP_API_ROOT = `${PORTAL_URL}/jwapp/sys/kbbpapp`;
+  KBBP_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/kbbpapp/*default`;
+  JWPUB_API_ROOT = `${PORTAL_URL}/jwapp/sys/jwpubapp`;
+  SCORE_API_ROOT = `${PORTAL_URL}/jwapp/sys/cjzhcxapp`;
+  SCORE_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/cjzhcxapp/*default`;
+  PYFA_API_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl`;
+  PYFA_CONTEXT_ROOT = `${PORTAL_URL}/jwapp/sys/pyfagl/*default`;
+  COURSE_OUTLINE_API_ROOT = `${PORTAL_URL}/jwapp/sys/kccx`;
+}
+
+function persistAccessNetworkPreference(mode, resolved) {
+  accessNetworkMode = normalizeAccessNetworkMode(mode);
+  applyAccessNetworkResolved(resolved == null ? accessNetworkResolved : resolved);
+  const payload = JSON.stringify({
+    mode: accessNetworkMode,
+    resolved: accessNetworkResolved
+  });
+  writeStoredSetting(ACCESS_NETWORK_SETTING_KEY, payload);
+  if (IS_ANDROID_APP) {
+    try { globalThis.AndroidApi?.setAccessNetworkMode?.(accessNetworkMode, accessNetworkResolved); } catch { /* native mirror optional */ }
+  }
+}
+
+function readAccessNetworkPreference() {
+  if (IS_ANDROID_APP) {
+    try {
+      const nativeMode = globalThis.AndroidApi?.getAccessNetworkMode?.();
+      const nativeResolved = globalThis.AndroidApi?.getAccessNetworkResolved?.();
+      if (nativeMode || nativeResolved) {
+        return {
+          mode: normalizeAccessNetworkMode(nativeMode),
+          resolved: normalizeAccessNetworkResolved(nativeResolved)
+        };
+      }
+    } catch { /* fall through to localStorage */ }
+  }
+  try {
+    const stored = JSON.parse(readStoredSetting(ACCESS_NETWORK_SETTING_KEY, "") || "{}");
+    return {
+      mode: normalizeAccessNetworkMode(stored.mode),
+      resolved: normalizeAccessNetworkResolved(stored.resolved)
+    };
+  } catch {
+    return { mode: ACCESS_NETWORK_AUTO, resolved: ACCESS_NETWORK_WEBVPN };
+  }
+}
+
+function bootstrapAccessNetworkFromStore() {
+  const stored = readAccessNetworkPreference();
+  accessNetworkMode = stored.mode;
+  applyAccessNetworkResolved(stored.mode === ACCESS_NETWORK_AUTO ? stored.resolved : stored.mode);
+}
+
+function shouldAttachWebVpnMarker() {
+  return accessNetworkResolved === ACCESS_NETWORK_WEBVPN;
+}
+
+function academicHomeUrl() {
+  return `${PORTAL_URL}/jwapp/sys/homeapp`;
+}
+
+async function probeCampusAcademicReachable() {
+  const previous = accessNetworkResolved;
+  applyAccessNetworkResolved(ACCESS_NETWORK_CAMPUS);
+  const targets = [
+    `${CAMPUS_ACADEMIC_HTTPS}/jwapp/sys/homeapp/api/home/currentUser.do`,
+    `${CAMPUS_ACADEMIC_HTTP}/jwapp/sys/homeapp/api/home/currentUser.do`
+  ];
+  try {
+    for (const target of targets) {
+      try {
+        await requestJsonOnce(target, { timeoutMs: 2500 });
+        return true;
+      } catch (error) {
+        if (error?.authFailure) return true;
+      }
+    }
+    return false;
+  } finally {
+    if (accessNetworkResolved !== ACCESS_NETWORK_CAMPUS || previous !== ACCESS_NETWORK_CAMPUS) {
+      applyAccessNetworkResolved(previous);
+    }
+  }
+}
+
+async function resolveAccessNetwork(options = {}) {
+  const requested = normalizeAccessNetworkMode(options.mode || accessNetworkMode);
+  if (requested === ACCESS_NETWORK_CAMPUS || requested === ACCESS_NETWORK_WEBVPN) {
+    persistAccessNetworkPreference(requested, requested);
+    return accessNetworkResolved;
+  }
+  const campusReachable = await probeCampusAcademicReachable();
+  persistAccessNetworkPreference(ACCESS_NETWORK_AUTO, campusReachable ? ACCESS_NETWORK_CAMPUS : ACCESS_NETWORK_WEBVPN);
+  return accessNetworkResolved;
+}
+
+globalThis.__androidAccessNetworkResolved = (mode, resolved) => {
+  accessNetworkMode = normalizeAccessNetworkMode(mode);
+  const previous = accessNetworkResolved;
+  applyAccessNetworkResolved(resolved);
+  writeStoredSetting(ACCESS_NETWORK_SETTING_KEY, JSON.stringify({
+    mode: accessNetworkMode,
+    resolved: accessNetworkResolved
+  }));
+  if (previous !== accessNetworkResolved && !IS_ANDROID_APP && typeof refresh === "function") {
+    try { refresh(true); } catch { /* handshake may not be ready */ }
+  }
+  if (state.view === "settings") render();
+};
 
 function normalizeCurrentTermPreference(raw = {}) {
   let source = raw;
@@ -1609,7 +1755,9 @@ function courseOutlineCodePathFromMetadata(value) {
   try {
     const target = new URL(raw);
     const portal = new URL(PORTAL_URL);
-    if (target.protocol !== "https:" || target.origin !== portal.origin) return "";
+    const fallback = new URL(PORTAL_FALLBACK_URL);
+    if (!["http:", "https:"].includes(target.protocol)) return "";
+    if (target.origin !== portal.origin && target.origin !== fallback.origin) return "";
     const portalPath = portal.pathname.replace(/\/+$/, "");
     const relativePath = target.pathname === "/jwapp/code/"
       ? target.pathname
@@ -1644,6 +1792,7 @@ function courseOutlineCodePathsFromMetadata(metadata) {
 }
 
 function appendCourseOutlineWebVpnMarker(url) {
+  if (!shouldAttachWebVpnMarker()) return url;
   const target = new URL(url);
   if (!target.searchParams.has(COURSE_OUTLINE_WEBVPN_MARKER)) {
     // Keep the marker as a valueless query key, while preserving any existing
@@ -1669,11 +1818,13 @@ function courseOutlineApiUrl(path, query = {}) {
 }
 
 function webVpnApiUrl(root, path) {
-  return `${apiUrl(root, path)}?${WEBVPN_TARGET_MARKER}`;
+  const url = apiUrl(root, path);
+  return shouldAttachWebVpnMarker() ? `${url}?${WEBVPN_TARGET_MARKER}` : url;
 }
 
 function pyfaUrl(root, path) {
-  return `${apiUrl(root, path)}?${PYFA_TARGET_MARKER}`;
+  const url = apiUrl(root, path);
+  return shouldAttachWebVpnMarker() ? `${url}?${PYFA_TARGET_MARKER}` : url;
 }
 
 function portalUrlVariants(url) {
@@ -1685,7 +1836,7 @@ function portalUrlVariants(url) {
 }
 
 function isAuthenticationUrl(url = "") {
-  return /(?:\/tpass\/login|\/cas\/login|\/login(?:[/?#]|$)|统一身份认证)/i.test(String(url || ""));
+  return /(?:\/tpass\/login|\/cas\/login|pass\.neu\.edu\.cn\/(?:tpass\/)?login|\/login(?:[/?#]|$)|统一身份认证)/i.test(String(url || ""));
 }
 
 function isAuthenticationPayload(payload) {
@@ -7323,6 +7474,56 @@ function webVpnEncryptHostname(hostname) {
   return webVpnBytesToHex(encrypted);
 }
 
+function webVpnHexToBytes(hex) {
+  const raw = String(hex || "");
+  if (raw.length % 2) throw new Error("WebVPN 主机密文长度无效");
+  const bytes = new Uint8Array(raw.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(raw.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function webVpnDecryptHostname(cipherHex) {
+  const encoder = new TextEncoder();
+  const key = encoder.encode(WEBVPN_COMPAT_KEY);
+  const cipher = webVpnHexToBytes(cipherHex);
+  const expandedKey = webVpnAesExpandKey(key);
+  let feedback = Uint8Array.from(key);
+  const plain = new Uint8Array(cipher.length);
+  for (let offset = 0; offset < cipher.length; offset += 16) {
+    const stream = webVpnAesEncryptBlock(feedback, expandedKey);
+    const size = Math.min(16, cipher.length - offset);
+    const cipherBlock = new Uint8Array(16);
+    for (let index = 0; index < size; index += 1) {
+      cipherBlock[index] = cipher[offset + index];
+      plain[offset + index] = cipher[offset + index] ^ stream[index];
+    }
+    feedback = cipherBlock;
+  }
+  return new TextDecoder().decode(plain).replace(/\0+$/g, "");
+}
+
+function webVpnUrlToOriginal(input) {
+  const parsed = new URL(String(input || "").trim());
+  if (parsed.hostname.toLowerCase() !== "webvpn.neu.edu.cn") {
+    throw new Error("不是东北大学 WebVPN 地址");
+  }
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  if (parts.length < 2 || !["http", "https"].includes(parts[0])) {
+    throw new Error("无法识别 WebVPN 协议或主机密文");
+  }
+  const keyHex = webVpnBytesToHex(new TextEncoder().encode(WEBVPN_COMPAT_KEY));
+  const token = parts[1] || "";
+  if (!token.toLowerCase().startsWith(keyHex.toLowerCase())) {
+    throw new Error("WebVPN 主机密文与本地密钥不匹配");
+  }
+  const hostname = webVpnDecryptHostname(token.slice(keyHex.length));
+  if (!hostname) throw new Error("无法还原原始域名");
+  const rest = parts.length > 2 ? `/${parts.slice(2).join("/")}` : "/";
+  return `${parts[0]}://${hostname}${rest}${parsed.search}${parsed.hash}`;
+}
+
 function webVpnUrlFromInput(input) {
   let source = String(input || "").trim();
   if (!source) throw new Error("请输入需要通过 WebVPN 访问的网址");
@@ -7354,7 +7555,10 @@ const WEBVPN_QUICK_SITES = [
 function updateWebVpnTool(input) {
   state.webvpnTool.input = String(input || "").trim();
   try {
-    state.webvpnTool.output = webVpnUrlFromInput(state.webvpnTool.input);
+    const source = state.webvpnTool.input;
+    state.webvpnTool.output = /^https:\/\/webvpn\.neu\.edu\.cn\/(?:http|https)\//i.test(source)
+      ? webVpnUrlToOriginal(source)
+      : webVpnUrlFromInput(source);
     state.webvpnTool.error = "";
     return true;
   } catch (error) {
@@ -7437,10 +7641,14 @@ function renderSettingsWithLocalOverlay() {
   const loginPrivacy = IS_ANDROID_APP
     ? "学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。"
     : "插件不会保存账号、密码或验证码。";
+  const accessResolvedText = accessNetworkResolved === ACCESS_NETWORK_CAMPUS
+    ? "校园网直连（jwxt.neu.edu.cn）"
+    : "WebVPN（webvpn.neu.edu.cn）";
+  const accessNetworkBlock = `<section class="settings-section"><div class="settings-intro"><h3>访问网络</h3><p>校园网请直连教务原地址；校外请使用 WebVPN。两种环境的登录 Cookie 不能混用。</p></div><label class="settings-field"><span>访问方式</span><select id="accessNetworkSelect"><option value="auto" ${accessNetworkMode === ACCESS_NETWORK_AUTO ? "selected" : ""}>自动检测</option><option value="campus" ${accessNetworkMode === ACCESS_NETWORK_CAMPUS ? "selected" : ""}>校园网直连</option><option value="webvpn" ${accessNetworkMode === ACCESS_NETWORK_WEBVPN ? "selected" : ""}>WebVPN（校外）</option></select><small>当前实际使用：${escapeHtml(accessResolvedText)}。</small></label></section>`;
   const moreToolsBlock = `<section class="settings-section settings-tools-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>WebVPN 地址生成器</strong><small>把普通网址转换为东北大学校外访问链接</small></div><button class="button button-primary" type="button" data-action="open-webvpn-tool">生成</button></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}${courseOutlineMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>`;
   const toastBlock = `<section class="settings-section"><div class="settings-intro"><h3>状态提示</h3><p>控制页面底部的临时 Toast 提示。</p></div><label class="settings-row settings-toggle-row" for="toastNotificationsEnabled"><div><strong>显示底部 Toast 提示</strong><small>关闭后隐藏所有底部 Toast，包括登录状态、缓存和数据刷新提示。</small></div><span class="settings-switch"><input id="toastNotificationsEnabled" type="checkbox" role="switch" ${toastEnabled ? "checked" : ""} /><span class="settings-switch-track" aria-hidden="true"></span></span></label></section>`;
   const campusBlock = `<section class="settings-section campus-settings"><div class="settings-intro"><h3>默认校区与上课时间</h3><p>当教务课表只提供节次时，用于计算正在上课、下一节课和今日是否结束。课程地点中明确的校区会优先于此设置。</p></div><label class="settings-field"><span>默认校区</span><select id="campusSettingSelect"><option value="" ${state.campus.code ? "" : "selected"}>未设置</option><option value="nanhu" ${state.campus.code === CAMPUS_CODES.NANHU ? "selected" : ""}>南湖校区</option><option value="hunnan" ${state.campus.code === CAMPUS_CODES.HUNNAN ? "selected" : ""}>浑南校区</option></select><small>当前：${escapeHtml(campusLabel(state.campus.code))}。南湖早课 08:00 开始，浑南早课 08:30 开始；第 5–12 节时间相同。</small></label><div class="settings-actions"><button class="button button-primary" type="button" data-action="save-campus-setting">保存校区</button></div><div class="settings-callout"><strong>节次时间</strong><span>南湖1–4节：08:00–11:40；浑南1–4节：08:30–12:10；5–8节：14:00–17:40；9–12节：18:30–22:00。</span></div></section>`;
-  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}${campusBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
+  return `<div>${sectionHeading("设置", "") }<div class="panel settings-panel">${moreToolsBlock}${currentTermSettingsBlock()}${campusBlock}${accessNetworkBlock}<section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位重复课程；一次性日程按真实日期显示。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>${escapeHtml(loginDescription)}</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect">${loginOptions}</select><small>${escapeHtml(loginPrivacy)}</small></label></section>${toastBlock}${cacheBlock}${localBlock}</div>${renderWebVpnToolModal()}${renderCourseDetailModal()}${localScheduleModalMarkup()}</div>`;
 }
 
 function updatePersonalTermSelect() {
@@ -10366,17 +10574,18 @@ function openPortal() {
     globalThis.AndroidApi.openPortal();
     return;
   }
+  const portalHome = academicHomeUrl();
   if (globalThis.chrome?.tabs?.create) {
     const method = readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password";
     if (chrome.runtime?.sendMessage) {
-      chrome.runtime.sendMessage({ type: "open-portal-login", method }, (response) => {
-        if (chrome.runtime.lastError || !response?.ok) chrome.tabs.create({ url: PORTAL_URL });
+      chrome.runtime.sendMessage({ type: "open-portal-login", method, url: portalHome }, (response) => {
+        if (chrome.runtime.lastError || !response?.ok) chrome.tabs.create({ url: portalHome });
       });
     } else {
-      chrome.tabs.create({ url: PORTAL_URL });
+      chrome.tabs.create({ url: portalHome });
     }
   } else {
-    window.open(PORTAL_URL, "_blank", "noopener");
+    window.open(portalHome, "_blank", "noopener");
   }
 }
 
@@ -13186,6 +13395,22 @@ elements.content.addEventListener("change", (event) => {
     state.courseOutline.list.pageSize = Math.max(1, Math.min(100, Number(event.target.value) || 10));
     return loadCourseOutlineList({ pageNumber: 1, pageSize: state.courseOutline.list.pageSize, force: true });
   }
+  if (event.target.id === "accessNetworkSelect") {
+    const mode = normalizeAccessNetworkMode(event.target.value);
+    setNotice("正在切换访问网络…");
+    resolveAccessNetwork({ mode }).then((resolved) => {
+      const label = resolved === ACCESS_NETWORK_CAMPUS ? "校园网直连" : "WebVPN";
+      setNotice(`已切换为${label}。`, "success");
+      if (IS_ANDROID_APP) {
+        try { globalThis.AndroidApi?.reloadAccessNetworkEndpoints?.(); } catch { /* native will pick up prefs */ }
+      }
+      render();
+      return refresh(true);
+    }).catch((error) => {
+      setNotice(`访问网络切换失败：${error.message || "请重试"}`, "error");
+    });
+    return;
+  }
   if (event.target.id === "loginMethodSelect") {
     const requestedMethod = String(event.target.value || "");
     const method = IS_ANDROID_APP
@@ -13593,6 +13818,7 @@ globalThis.__handleAndroidBack = () => {
   }
   return false;
 };
+bootstrapAccessNetworkFromStore();
 // 桌面扩展保持原有的自动刷新；Android 只在文档加载完成后向原生发送
 // 一次启动握手，由原生并行安排 WebVPN 轻量会话探测和唯一刷新链路。
 if (IS_ANDROID_APP) {
@@ -13606,5 +13832,5 @@ if (IS_ANDROID_APP) {
     globalThis.AndroidApi?.dashboardReady?.();
   });
 } else {
-  refresh();
+  resolveAccessNetwork().finally(() => refresh());
 }

@@ -44,7 +44,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 构建产物位于：
 
 ```text
-app/build/outputs/apk/release/执掌东大-Android-0.1.81-release.apk
+app/build/outputs/apk/release/执掌东大-Android-0.1.82-release.apk
 ```
 
 根目录的 `dashboard.html`、`dashboard.css`、`dashboard.js` 会在构建前自动同步到 Android assets，因此接口解析和界面逻辑与浏览器插件共用一套代码。
@@ -61,6 +61,6 @@ app/build/outputs/apk/release/执掌东大-Android-0.1.81-release.apk
 
 二维码地址由原登录页的 `QRCode.makeCode` 或其 `checkQRCodeScan` 轮询请求生成，应用只在内存中短暂保存当前二维码地址；点击保存按钮时，从原登录页当前显示的 canvas/img 导出 PNG 到系统相册，不上传二维码，也不把登录地址交给浏览器。二维码本身由学校服务端控制有效期，通常需要在失效前完成扫码。应用回到前台后保留“删除刚刚的二维码图片并进入主界面”按钮，进入查询页时会重新刷新接口数据。
 
-应用不保存明文账号、密码或验证码。用户勾选“信任此设备”且登录成功后，学号和密码会由 Android Keystore 生成的不可导出 AES 密钥以 GCM 模式加密，`SharedPreferences` 仅保存 IV 和密文封装；短信验证码永不持久化。原生网络桥只允许访问 `webvpn.neu.edu.cn`，且只注入到本地查询页。
+应用不保存明文账号、密码或验证码。用户勾选“信任此设备”且登录成功后，学号和密码会由 Android Keystore 生成的不可导出 AES 密钥以 GCM 模式加密，`SharedPreferences` 仅保存 IV 和密文封装；短信验证码永不持久化。原生网络桥只允许访问 `webvpn.neu.edu.cn`、`jwxt.neu.edu.cn`、`pass.neu.edu.cn` 和 `ecode.neu.edu.cn`，且只注入到本地查询页。设置中可选择自动检测、校园网直连或 WebVPN；校园网使用 `https://jwxt.neu.edu.cn` 与 `https://ecode.neu.edu.cn/ecode/`，校外仍走 WebVPN。
 
 缓存同样不保存 Cookie、Authorization、令牌、验证码或密码字段；只包含已经映射成页面展示结构的成绩、考试、课程、课表和成绩分项结果。用户切换账号后，新账号第一次成功读取会建立新的缓存文件；清除缓存只删除当前账号对应的应用内部缓存。

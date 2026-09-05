@@ -76,6 +76,8 @@ globalThis.__auditTest = {
   courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
   isAuthenticationPayload, isAuthenticationUrl, authenticationFailure, isCourseOutlineLoginError, courseOutlineMapWithConcurrency, postCourseOutline, courseOutlineEndpointResult, requestJson,
+  applyAccessNetworkResolved, shouldAttachWebVpnMarker, webVpnApiUrl, webVpnUrlFromInput, webVpnUrlToOriginal, webVpnEncryptHostname, webVpnDecryptHostname,
+  ACCESS_NETWORK_CAMPUS, ACCESS_NETWORK_WEBVPN, CAMPUS_ACADEMIC_HTTPS, PORTAL_URL,
   courseOutlineFieldLabel, courseOutlineTeachingReferenceSupplementalLabel, courseOutlineShapeLabel, renderCourseOutlineRecord, renderCourseOutlineBasicRecord, renderCourseOutlineSection,
   normalizeCourseOutlineCourseCode, normalizeCourseOutlineCourseName, courseOutlineCandidateFromRow, dedupeCourseOutlineCandidates,
   courseOutlineExactCodeCandidates, courseOutlineExactNameCandidates, rankCourseOutlineCodeCandidates,
@@ -163,7 +165,18 @@ const t = global.__auditTest;
   assert.equal(t.courseOutlineCodePathFromMetadata('https://example.com/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do'), '');
   assert.deepEqual(t.courseOutlineCodePathsFromMetadata({ a: '/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do', b: ['/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do'] }), ['/jwapp/code/8afd75f4-fb19-4120-9d49-2e6e1de99f8f.do']);
   assert.equal(t.isAuthenticationUrl('https://webvpn.neu.edu.cn/tpass/login'), true);
+  assert.equal(t.isAuthenticationUrl('https://pass.neu.edu.cn/tpass/login'), true);
   assert.equal(t.isAuthenticationUrl('https://webvpn.neu.edu.cn/jwapp/sys/kccx/modules/dgcx/cxlb.do'), false);
+  t.applyAccessNetworkResolved(t.ACCESS_NETWORK_CAMPUS);
+  assert.equal(t.shouldAttachWebVpnMarker(), false);
+  assert.equal(t.webVpnApiUrl(t.CAMPUS_ACADEMIC_HTTPS + '/jwapp/sys/kbapp', 'api/wdkbcx/getMyScheduleDetail.do').includes('vpn-12-o1-jwxt.neu.edu.cn'), false);
+  t.applyAccessNetworkResolved(t.ACCESS_NETWORK_WEBVPN);
+  assert.equal(t.shouldAttachWebVpnMarker(), true);
+  assert.equal(t.webVpnEncryptHostname('jwxt.neu.edu.cn'), 'baf6bc2bc4cb43c8bc1d6f66c806db');
+  assert.equal(t.webVpnDecryptHostname('b5e2ab3b8f8b48d8e7566e77934bd689'), 'ecode.neu.edu.cn');
+  assert.equal(t.webVpnDecryptHostname('a0e0b72cc4cb43c8bc1d6f66c806db'), 'pass.neu.edu.cn');
+  const encodedJwxt = t.webVpnUrlFromInput('http://jwxt.neu.edu.cn/jwapp/sys/homeapp');
+  assert.equal(t.webVpnUrlToOriginal(encodedJwxt), 'http://jwxt.neu.edu.cn/jwapp/sys/homeapp');
   assert.equal(t.isAuthenticationPayload({ code: 403 }), true);
   assert.equal(t.isCourseOutlineLoginError(t.authenticationFailure('HTTP 403', 403)), true);
   assert.equal(t.courseOutlineHeaders({ 'Fetch-Api': 'true' })['X-Requested-With'], 'XMLHttpRequest');

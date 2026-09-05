@@ -14,6 +14,7 @@ chrome.action.onClicked.addListener(() => {
 // 注意：不要把任何学生的方案 ID、年级、专业或最低学分写在这里。
 // 方案 ID 是教务系统按账号动态分配的，换账号后必须以原系统当前页面为准。
 const PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
+const CAMPUS_PORTAL_URL = "https://jwxt.neu.edu.cn/jwapp/sys/homeapp";
 const LOGIN_METHOD_WECHAT = "wechat";
 const CURRICULUM_PENDING_KEY = "zhizhang.curriculumBootstrap";
 const CURRICULUM_PENDING_MAX_AGE_MS = 10 * 60 * 1000;
@@ -26,6 +27,12 @@ let courseOutlineBootstrapInFlight = null;
 
 function isWebVpnPortalUrl(url = "") {
   return /^https:\/\/webvpn\.neu\.edu\.cn\//i.test(String(url || ""));
+}
+
+function isSchoolPortalUrl(url = "") {
+  return isWebVpnPortalUrl(url)
+    || /^https?:\/\/jwxt\.neu\.edu\.cn\//i.test(String(url || ""))
+    || /^https:\/\/pass\.neu\.edu\.cn\//i.test(String(url || ""));
 }
 
 function isCurriculumPageIdentity(url = "", title = "") {
@@ -42,9 +49,16 @@ function isCourseOutlinePageIdentity(url = "", title = "") {
 }
 
 async function findLatestPortalTab(preferredTabId = null, preferredModule = "curriculum") {
-  const tabs = await chrome.tabs.query({ url: "https://webvpn.neu.edu.cn/*" });
+  const tabs = await chrome.tabs.query({
+    url: [
+      "https://webvpn.neu.edu.cn/*",
+      "https://jwxt.neu.edu.cn/*",
+      "http://jwxt.neu.edu.cn/*",
+      "https://pass.neu.edu.cn/*"
+    ]
+  });
   const portalTabs = tabs
-    .filter((item) => item.id && isWebVpnPortalUrl(item.url))
+    .filter((item) => item.id && isSchoolPortalUrl(item.url))
     .sort((left, right) => {
       const preferredDelta = Number(right.id === Number(preferredTabId)) - Number(left.id === Number(preferredTabId));
       if (preferredDelta) return preferredDelta;
@@ -132,8 +146,9 @@ async function selectPortalQrLogin(tabId) {
   return false;
 }
 
-async function openPortalLogin(method) {
-  const tab = await chrome.tabs.create({ url: PORTAL_URL, active: true });
+async function openPortalLogin(method, url) {
+  const target = String(url || "").trim() || PORTAL_URL;
+  const tab = await chrome.tabs.create({ url: target, active: true });
   if (!tab?.id) return { ok: false, error: "无法打开教务系统登录页" };
   if (method === LOGIN_METHOD_WECHAT) {
     const selected = await selectPortalQrLogin(tab.id);
@@ -922,7 +937,7 @@ async function readCurriculumFromPortalTab(planId, planName = "", preferredTabId
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "open-portal-login") {
-    openPortalLogin(message.method === LOGIN_METHOD_WECHAT ? LOGIN_METHOD_WECHAT : "password")
+    openPortalLogin(message.method === LOGIN_METHOD_WECHAT ? LOGIN_METHOD_WECHAT : "password", message.url)
       .then((data) => sendResponse(data))
       .catch((error) => sendResponse({ ok: false, error: error.message || "无法打开教务系统登录页" }));
     return true;
