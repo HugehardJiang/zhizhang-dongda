@@ -99,18 +99,19 @@ public class MainActivity extends Activity {
     private static final String LOG_TAG = "ZhizhangEcode";
     private static final String PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
     private static final String PORTAL_FALLBACK_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
-    // 打开原教务系统或换取 CAS 票据时必须落到 /jwapp/。只打开 WebVPN 应用根
-    // 地址时，统一认证的 service 经常变成 webvpn 门户本身，登录后会进校园
-    // 门户或 E 码通，而不是教务首页。
-    private static final String ACADEMIC_HOME_URL = PORTAL_URL + "/jwapp/";
-    private static final String ACADEMIC_HOME_FALLBACK_URL = PORTAL_FALLBACK_URL + "/jwapp/";
+    // 打开原教务系统或换取 CAS 票据时必须落到教务首页 /jwapp/sys/homeapp。
+    // 只打开 WebVPN 应用根地址时，统一认证的 service 经常变成 webvpn 门户，
+    // 登录后会进校园门户或 E 码通；只打开 /jwapp/ 则停在 EMAP 欢迎页，
+    // 看不到成绩、课表等模块。
+    private static final String ACADEMIC_HOME_URL = PORTAL_URL + "/jwapp/sys/homeapp";
+    private static final String ACADEMIC_HOME_FALLBACK_URL = PORTAL_FALLBACK_URL + "/jwapp/sys/homeapp";
     // 这是学校 E 码通对应的 WebVPN 目标地址；其中的代理标识必须与学校
     // 给出的地址完全一致，少一个字符都会被 WebVPN 解析成 PARSE_FAILED。
     // 不把 SPA 的 #/ 片段直接交给 WebVPN 代理，先请求目录地址，让原网页
     // 自己完成重定向，兼容 Android WebView 的代理解析行为。
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.80";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.81";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -970,6 +971,9 @@ public class MainActivity extends Activity {
                         recordLoginDiagnosticPage("page-finished", view, url);
                     }
                     if (redirectAcademicPortalAwayFromEcode(url)) {
+                        return;
+                    }
+                    if (redirectAcademicPortalAwayFromBareShell(url)) {
                         return;
                     }
                     installPortalQrCapture();
@@ -2192,6 +2196,25 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isBareAcademicShellUrl(String url) {
+        if (url == null || !isPortalPageUrl(url) || isPortalLoginPage(url) || isEcodeTargetReadyUrl(url)) {
+            return false;
+        }
+        try {
+            String path = Uri.parse(url).getPath();
+            if (path == null) return false;
+            String normalized = path.replaceAll("/+$", "");
+            return normalized.endsWith("/jwapp")
+                    || normalized.matches(".*/jwapp/index(?:\\.html|\\.do)?$");
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private boolean isAcademicHomeAppUrl(String url) {
+        return url != null && url.contains("/jwapp/sys/homeapp");
+    }
+
     /**
      * 查看原教务系统时，若 WebView 被 WebVPN 带到 E 码通，拉回教务首页。
      * E 码通自己的后台恢复仍使用 portalWebView，那种情况不能拦截。
@@ -2212,6 +2235,51 @@ public class MainActivity extends Activity {
         );
         portalWebView.loadUrl(ACADEMIC_HOME_URL);
         return true;
+    }
+
+    /**
+     * /jwapp/ 只是 EMAP 容器，页面往往只有 “Welcome come to EMAP.”。
+     * 查看原系统时应进入 homeapp；登录换票也可以用这个真实首页。
+     */
+    private boolean redirectAcademicPortalAwayFromBareShell(String url) {
+        if (portalWebView == null || backgroundLoginForEcode || backgroundLoginInProgress) return false;
+        if (!academicPortalViewerActive && dashboardVisible) return false;
+        if (isPortalLoginPage(url) || isAcademicHomeAppUrl(url)) return false;
+        boolean bareShell = isBareAcademicShellUrl(url)
+                || (isAcademicPortalReadyUrl(url) && !url.contains("/jwapp/sys/"));
+        if (!bareShell) {
+            recoverAcademicPortalViewerFromEmapWelcome();
+            return false;
+        }
+        if (academicEcodeRedirectAttempts >= ACADEMIC_ECODE_REDIRECT_MAX) {
+            recordLoginDiagnostic("portal-viewer", "原教务入口停在 EMAP 欢迎页，已停止重定向");
+            return false;
+        }
+        academicEcodeRedirectAttempts += 1;
+        recordLoginDiagnostic(
+                "portal-viewer",
+                "redirect-emap-shell-to-homeapp attempt=" + academicEcodeRedirectAttempts
+                        + " from=" + sanitizeDiagnosticUrl(url)
+        );
+        portalWebView.loadUrl(ACADEMIC_HOME_URL);
+        return true;
+    }
+
+    private void recoverAcademicPortalViewerFromEmapWelcome() {
+        if (portalWebView == null || !academicPortalViewerActive || backgroundLoginInProgress) return;
+        if (isAcademicHomeAppUrl(portalWebView.getUrl())) return;
+        portalWebView.evaluateJavascript(
+                "(function(){var t=String((document.body&&document.body.innerText)||document.title||'').replace(/\\s+/g,' ');"
+                        + "return /Welcome come to EMAP|Welcome to EMAP/i.test(t);})();",
+                value -> {
+                    if (portalWebView == null || !academicPortalViewerActive) return;
+                    if (!"true".equalsIgnoreCase(decodeJavascriptString(value))) return;
+                    if (academicEcodeRedirectAttempts >= ACADEMIC_ECODE_REDIRECT_MAX) return;
+                    academicEcodeRedirectAttempts += 1;
+                    recordLoginDiagnostic("portal-viewer", "emap-welcome-text-to-homeapp");
+                    portalWebView.loadUrl(ACADEMIC_HOME_URL);
+                }
+        );
     }
 
     private void applyPortalLoginMethodUi() {
