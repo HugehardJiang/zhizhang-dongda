@@ -237,7 +237,7 @@ function shouldAttachWebVpnMarker() {
 }
 
 function academicHomeUrl() {
-  return `${PORTAL_URL}/jwapp/sys/homeapp`;
+  return `${PORTAL_URL}/jwapp/sys/homeapp/*default/index.do`;
 }
 
 async function probeCampusAcademicReachable() {

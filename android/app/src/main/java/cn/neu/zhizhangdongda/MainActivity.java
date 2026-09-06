@@ -116,7 +116,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.88";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.91";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -1491,9 +1491,10 @@ public class MainActivity extends Activity {
             academicCasTicketBounceAttempts = 0;
             academicHomeNotFoundAttempts = 0;
             clearPendingQrUrl();
-            // 校园网必须先进入 /jwapp/ 换票；直接打开 /jwapp/sys/homeapp 会让
-            // CAS 把 ticket 送到 404 页。WebVPN 仍打开 homeapp。不要打开
-            // WebVPN 根地址（登录后经常落到校园门户或 E 码通）。
+            // 校园网必须先进入 /jwapp/ 换票。WebVPN 打开
+            // /jwapp/sys/homeapp/*default/index.do，不要打开不存在的
+            // /jwapp/sys/homeapp。不要打开 WebVPN 根地址（登录后经常落到
+            // 校园门户或 E 码通）。
             if (portalWebView != null) {
                 portalWebView.loadUrl(academicViewerEntryUrl());
             }
@@ -2158,23 +2159,16 @@ public class MainActivity extends Activity {
     }
 
     private String academicHomeUrl() {
-        return academicRootUrl() + "/jwapp/sys/homeapp";
+        return academicRootUrl() + "/jwapp/sys/homeapp/*default/index.do";
     }
 
     private String academicHomeFallbackUrl() {
-        return academicRootFallbackUrl() + "/jwapp/sys/homeapp";
-    }
-
-    private String academicHomeIndexUrl() {
-        return academicHomeUrl() + "/*default/index.do";
-    }
-
-    private String academicHomeIndexFallbackUrl() {
-        return academicHomeFallbackUrl() + "/*default/index.do";
+        return academicRootFallbackUrl() + "/jwapp/sys/homeapp/*default/index.do";
     }
 
     /**
-     * 从查询台打开原教务系统：校园网先走 EMAP 换票入口，换完再进 homeapp。
+     * 从查询台打开原教务系统：校园网先走 EMAP 换票入口，换完再进 homeapp 首页。
+     * 不要打开 /jwapp/sys/homeapp（学校返回 404：该资源不存在）。
      */
     private String academicViewerEntryUrl() {
         return isCampusAccess() ? academicCasCallbackUrl() : academicHomeUrl();
@@ -2274,9 +2268,9 @@ public class MainActivity extends Activity {
     }
 
     private boolean recoverCampusAcademicNotFound(WebView view, String url, int status) {
-        if (!isCampusAccess() || view == null || url == null) return false;
+        if (view == null || url == null) return false;
         if (isPortalLoginPage(url) || isAcademicCasTicketUrl(url)) return false;
-        boolean looksMissing = status == 404;
+        boolean looksMissing = status == 404 || isAcademicMissingHomeAppPath(url);
         if (!looksMissing) {
             String title = view.getTitle();
             looksMissing = title != null && title.trim().equals("404");
@@ -2284,21 +2278,17 @@ public class MainActivity extends Activity {
         if (!looksMissing) return false;
         if (!isAcademicHomeAppUrl(url) && !isBareAcademicShellUrl(url)) return false;
         if (academicHomeNotFoundAttempts >= ACADEMIC_HOME_NOT_FOUND_MAX) {
-            recordLoginDiagnostic("portal-viewer", "校园网教务首页连续 404，已停止改写入口");
+            recordLoginDiagnostic("portal-viewer", "教务首页连续 404，已停止改写入口");
             return false;
         }
         academicHomeNotFoundAttempts += 1;
-        String target;
-        if (isBareAcademicShellUrl(url) && url.startsWith("https://")) {
-            target = academicRootFallbackUrl() + "/jwapp/";
-        } else if (isAcademicHomeAppUrl(url) && !url.contains("*default")) {
-            target = url.startsWith("https://") ? academicHomeFallbackUrl() : academicHomeIndexUrl();
-        } else {
-            target = academicHomeIndexFallbackUrl();
-        }
+        boolean onIndex = url.contains("*default/index.do") || url.contains("%2Adefault/index.do");
+        String target = (!onIndex || isAcademicMissingHomeAppPath(url))
+                ? academicHomeUrl()
+                : academicHomeFallbackUrl();
         recordLoginDiagnostic(
                 "portal-viewer",
-                "campus-404-fallback attempt=" + academicHomeNotFoundAttempts
+                "academic-404-fallback attempt=" + academicHomeNotFoundAttempts
                         + " from=" + sanitizeDiagnosticUrl(url)
                         + " to=" + sanitizeDiagnosticUrl(target)
         );
@@ -2587,6 +2577,25 @@ public class MainActivity extends Activity {
 
     private boolean isAcademicHomeAppUrl(String url) {
         return url != null && url.contains("/jwapp/sys/homeapp");
+    }
+
+    /**
+     * 学校明确返回 [/jwapp/sys/homeapp] is not available。
+     * 真实首页是 /jwapp/sys/homeapp/*default/index.do。
+     */
+    private boolean isAcademicMissingHomeAppPath(String url) {
+        if (!isAcademicHomeAppUrl(url)) return false;
+        if (url.contains("*default") || url.contains("%2Adefault") || url.contains("/api/")) {
+            return false;
+        }
+        try {
+            String path = Uri.parse(url).getPath();
+            if (path == null) return false;
+            String normalized = path.replaceAll("/+$", "");
+            return normalized.endsWith("/jwapp/sys/homeapp");
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     /**
@@ -3638,6 +3647,8 @@ public class MainActivity extends Activity {
 
     private boolean isAcademicPortalReadyUrl(String url) {
         if (!isPortalPageUrl(url) || url == null || !url.contains("/jwapp/")) return false;
+        // /jwapp/sys/homeapp 本身 404，不能当成教务已就绪。
+        if (isAcademicMissingHomeAppPath(url)) return false;
         // ticket 还在地址上说明 CAS 尚未换票；此时 Cookie 探测必然失败。
         return academicCasTicketValue(url).isEmpty();
     }
@@ -3706,6 +3717,9 @@ public class MainActivity extends Activity {
                     "教务会话已失效，正在后台使用本机加密凭据重登…"
             );
             submitBuiltInCredentials(true);
+            return;
+        }
+        if (backgroundLoginAttemptedForCurrentFailure && "failed".equals(loginDiagnosticStatus)) {
             return;
         }
         String failure = reason == null || reason.trim().isEmpty()

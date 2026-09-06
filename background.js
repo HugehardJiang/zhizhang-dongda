@@ -14,7 +14,7 @@ chrome.action.onClicked.addListener(() => {
 // 注意：不要把任何学生的方案 ID、年级、专业或最低学分写在这里。
 // 方案 ID 是教务系统按账号动态分配的，换账号后必须以原系统当前页面为准。
 const PORTAL_URL = "https://webvpn.neu.edu.cn/http/62304135386136393339346365373340baf6bc2bc4cb43c8bc1d6f66c806db";
-const CAMPUS_PORTAL_URL = "https://jwxt.neu.edu.cn/jwapp/sys/homeapp";
+const CAMPUS_PORTAL_URL = "https://jwxt.neu.edu.cn/jwapp/sys/homeapp/*default/index.do";
 const LOGIN_METHOD_WECHAT = "wechat";
 const CURRICULUM_PENDING_KEY = "zhizhang.curriculumBootstrap";
 const CURRICULUM_PENDING_MAX_AGE_MS = 10 * 60 * 1000;

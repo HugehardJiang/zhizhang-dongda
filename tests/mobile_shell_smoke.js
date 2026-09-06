@@ -322,6 +322,8 @@ assert.ok(dashboardCss.includes('-webkit-tap-highlight-color: transparent'));
 assert.ok(dashboardCss.includes('.mobile-nav-item:focus-visible'));
 assert.ok(dashboardCss.includes('transform: translate3d(calc(var(--mobile-nav-index, 0) * 100%), 0, 0)'));
 assert.ok(dashboardCss.includes('@media (prefers-reduced-motion: reduce)'));
+assert.ok(!/\.schedule-week-toolbar select \{[^}]*background: #fff/.test(dashboardCss));
+assert.ok(dashboardCss.includes('.schedule-week-toolbar select option'));
 const dashboardHtml = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
 assert.ok(dashboardHtml.includes('class="mobile-nav-indicator"'));
 assert.ok(code.includes('function syncMobileBottomNavIndicator()'));
@@ -414,14 +416,17 @@ const androidManifestSource = fs.readFileSync(path.join(
 const adaptiveIconSource = fs.readFileSync(path.join(
   __dirname, '..', 'android', 'app', 'src', 'main', 'res', 'drawable-v26', 'ic_app.xml'
 ), 'utf8');
-const iconForegroundSource = fs.readFileSync(path.join(
-  __dirname, '..', 'android', 'app', 'src', 'main', 'res', 'drawable', 'ic_app_foreground.xml'
-), 'utf8');
+const iconForegroundPng = path.join(
+  __dirname, '..', 'android', 'app', 'src', 'main', 'res', 'drawable', 'ic_app_foreground.png'
+);
 assert.ok(androidManifestSource.includes('android:icon="@drawable/ic_app"'));
 assert.ok(androidManifestSource.includes('android:roundIcon="@drawable/ic_app"'));
 assert.ok(adaptiveIconSource.includes('<adaptive-icon'));
 assert.ok(adaptiveIconSource.includes('@drawable/ic_app_foreground'));
-assert.ok(iconForegroundSource.includes('#FFFFC857'));
+assert.ok(fs.existsSync(iconForegroundPng));
+assert.ok(!fs.existsSync(path.join(
+  __dirname, '..', 'android', 'app', 'src', 'main', 'res', 'drawable', 'ic_app_foreground.xml'
+)));
 
 audit.prepare();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
