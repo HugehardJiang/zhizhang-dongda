@@ -116,7 +116,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.91";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.95";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -425,7 +425,15 @@ public class MainActivity extends Activity {
     private static final String LOCAL_SCHEDULE_DIRECTORY = "local-schedule";
     // JavascriptInterface 参数和返回值会经过 Binder；控制在 900 KiB 内，
     // 避免大号成绩历史在部分 Android 版本上触发事务大小限制。
-    private static final int PERSONAL_CACHE_MAX_BYTES = 900 * 1024;
+    private static final int PERSONAL_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+    private final Object personalCacheIoLock = new Object();
+    private PersonalCacheStore personalCacheStore;
+    private String personalCacheReadId = "";
+    private String personalCacheReadBuffer = "";
+    private String personalCacheWriteId = "";
+    private String personalCacheWriteStudent = "";
+    private StringBuilder personalCacheWriteBuffer;
+    private int personalCacheWriteLength;
     private static final int LOCAL_SCHEDULE_MAX_BYTES = 900 * 1024;
     private static final int ECODE_COLLAPSED_HEIGHT_DP = 112;
     // 会话探测严格使用学校 WebVPN 地址；不允许回退到 jwxt 直连。
@@ -1931,9 +1939,15 @@ public class MainActivity extends Activity {
 
     private boolean copyLoginDiagnosticsToClipboard() {
         String report = buildLoginDiagnostics();
+        return copyTextToClipboard("执掌东大登录诊断信息", report);
+    }
+
+    private boolean copyTextToClipboard(String label, String text) {
+        String value = text == null ? "" : text;
+        if (value.trim().isEmpty()) return false;
         ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard == null) return false;
-        clipboard.setPrimaryClip(ClipData.newPlainText("执掌东大登录诊断信息", report));
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, value));
         return true;
     }
 
@@ -1980,34 +1994,95 @@ public class MainActivity extends Activity {
     }
 
     private void savePersonalCachePayload(String payload) {
-        if (payload == null || payload.isEmpty() || preferences == null) return;
-        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > PERSONAL_CACHE_MAX_BYTES) return;
-        String key = personalCacheKey(payload);
-        if (key.isEmpty()) return;
-        File directory = personalCacheDirectory();
-        File target = personalCacheFile(key);
-        File temporary = new File(directory, key + ".tmp");
-        try (FileOutputStream output = new FileOutputStream(temporary)) {
-            output.write(bytes);
-            output.flush();
-        } catch (Exception ignored) {
-            temporary.delete();
-            return;
+        // Compatibility entry point: all writers use the same serialized,
+        // transactional store; never delete the prior cache before committing.
+        synchronized (personalCacheIoLock) {
+            try {
+                if (payload == null || payload.getBytes(StandardCharsets.UTF_8).length > PERSONAL_CACHE_MAX_BYTES) return;
+                JSONObject value = new JSONObject(payload);
+                value.put("schema", "zhizhang-personal-cache/v3");
+                cacheStore().save(personalCacheKey(payload), value);
+            } catch (Exception ignored) { /* new bridge returns explicit errors */ }
         }
-        if (target.exists()) target.delete();
-        if (!temporary.renameTo(target)) {
-            try (FileOutputStream output = new FileOutputStream(target)) {
-                output.write(bytes);
-                output.flush();
-                temporary.delete();
-            } catch (Exception ignored) {
-                target.delete();
-                temporary.delete();
-                return;
+    }
+
+    private PersonalCacheStore cacheStore() {
+        if (personalCacheStore == null) personalCacheStore = new PersonalCacheStore(this);
+        return personalCacheStore;
+    }
+
+    private String cacheReply(boolean ok, String error) {
+        return "{\"ok\":" + ok + ",\"error\":" + JSONObject.quote(error == null ? "" : error) + "}";
+    }
+
+    private String cacheProfileForStudent(String student) {
+        return personalCacheKey("{\"studentId\":" + JSONObject.quote(student == null ? "" : student.trim()) + "}");
+    }
+
+    private String beginPersonalCacheRead(String student) {
+        synchronized (personalCacheIoLock) {
+            personalCacheReadBuffer = "";
+            personalCacheReadId = "";
+            try {
+                String expected = student == null ? "" : student.trim();
+                // If credentials already identify a different account, do not
+                // briefly display the previous account's cache at cold start.
+                if (expected.isEmpty()) expected = loadBuiltInCredentials().username.trim();
+                String profile = expected.isEmpty() ? cacheStore().lastProfile() : cacheProfileForStudent(expected);
+                String payload = profile.isEmpty() ? "" : cacheStore().load(profile);
+                if (payload.isEmpty()) {
+                    String legacyKey = profile.isEmpty() && preferences != null
+                            ? preferences.getString(PERSONAL_CACHE_LAST_KEY, "") : profile;
+                    if (!legacyKey.isEmpty() && personalCacheFile(legacyKey).isFile()) {
+                        try (InputStream input = new java.io.FileInputStream(personalCacheFile(legacyKey))) {
+                            payload = readResponse(input);
+                        }
+                    }
+                }
+                if (!payload.isEmpty()) {
+                    JSONObject value = new JSONObject(payload);
+                    if (!expected.isEmpty() && !expected.equals(value.optString("studentId"))) {
+                        return cacheReply(false, "缓存账号不匹配，未加载其他账号的数据");
+                    }
+                    if (payload.getBytes(StandardCharsets.UTF_8).length > PERSONAL_CACHE_MAX_BYTES) {
+                        return cacheReply(false, "缓存超过读取上限，已保留磁盘数据");
+                    }
+                }
+                personalCacheReadBuffer = payload;
+                personalCacheReadId = java.util.UUID.randomUUID().toString();
+                return "{\"ok\":true,\"readId\":" + JSONObject.quote(personalCacheReadId)
+                        + ",\"length\":" + payload.length() + "}";
+            } catch (Exception error) {
+                return cacheReply(false, "缓存读取失败，未修改磁盘数据");
             }
         }
-        preferences.edit().putString(PERSONAL_CACHE_LAST_KEY, key).apply();
+    }
+
+    private String commitPersonalCacheWrite(String requestId) {
+        synchronized (personalCacheIoLock) {
+            try {
+                if (!personalCacheWriteId.equals(requestId) || personalCacheWriteBuffer == null
+                        || personalCacheWriteBuffer.length() != personalCacheWriteLength) {
+                    return cacheReply(false, "缓存传输不完整，原缓存已保留");
+                }
+                String text = personalCacheWriteBuffer.toString();
+                if (text.getBytes(StandardCharsets.UTF_8).length > PERSONAL_CACHE_MAX_BYTES) {
+                    return cacheReply(false, "缓存超过保存上限，原缓存已保留");
+                }
+                JSONObject value = new JSONObject(text);
+                if (!personalCacheWriteStudent.equals(value.optString("studentId"))) return cacheReply(false, "缓存账号不匹配");
+                cacheStore().save(cacheProfileForStudent(personalCacheWriteStudent), value);
+                // The synchronous bridge returns only AFTER SQLite endTransaction.
+                return "{\"ok\":true,\"requestId\":" + JSONObject.quote(requestId) + "}";
+            } catch (Exception error) {
+                return cacheReply(false, "缓存保存失败，原缓存已保留，请检查存储空间后重试");
+            } finally {
+                if (personalCacheWriteId.equals(requestId)) {
+                    personalCacheWriteBuffer = null;
+                    personalCacheWriteId = "";
+                }
+            }
+        }
     }
 
     private void clearPersonalCachePayload() {
@@ -5442,6 +5517,11 @@ public class MainActivity extends Activity {
         }
 
         @android.webkit.JavascriptInterface
+        public boolean copyText(String text) {
+            return copyTextToClipboard("执掌东大 Prompt", text);
+        }
+
+        @android.webkit.JavascriptInterface
         public void request(String requestId, String method, String url, String body, String headersJson) {
             networkExecutor.execute(() -> performRequest(requestId, method, url, body, headersJson));
         }
@@ -5453,7 +5533,95 @@ public class MainActivity extends Activity {
 
         @android.webkit.JavascriptInterface
         public void savePersonalCache(String payload) {
-            networkExecutor.execute(() -> savePersonalCachePayload(payload));
+            savePersonalCachePayload(payload);
+        }
+
+        @android.webkit.JavascriptInterface
+        public String cacheBeginRead(String studentId) {
+            return beginPersonalCacheRead(studentId);
+        }
+
+        @android.webkit.JavascriptInterface
+        public String cacheReadChunk(String readId, int offset) {
+            synchronized (personalCacheIoLock) {
+                if (!personalCacheReadId.equals(readId) || offset < 0 || offset > personalCacheReadBuffer.length()) return "";
+                return personalCacheReadBuffer.substring(offset, Math.min(offset + 32768, personalCacheReadBuffer.length()));
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        public void cacheEndRead(String readId) {
+            synchronized (personalCacheIoLock) {
+                if (personalCacheReadId.equals(readId)) {
+                    personalCacheReadId = "";
+                    personalCacheReadBuffer = "";
+                }
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        public String cacheBeginWrite(String requestId, String studentId, int length) {
+            synchronized (personalCacheIoLock) {
+                if (requestId == null || requestId.isEmpty() || studentId == null || studentId.trim().isEmpty()
+                        || length < 0 || length > PERSONAL_CACHE_MAX_BYTES) return cacheReply(false, "缓存请求无效或超过上限");
+                personalCacheWriteId = requestId;
+                personalCacheWriteStudent = studentId.trim();
+                personalCacheWriteLength = length;
+                personalCacheWriteBuffer = new StringBuilder();
+                return cacheReply(true, "");
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        public String cacheWriteChunk(String requestId, int offset, String chunk) {
+            synchronized (personalCacheIoLock) {
+                if (!personalCacheWriteId.equals(requestId) || personalCacheWriteBuffer == null || chunk == null
+                        || chunk.length() > 32768 || offset != personalCacheWriteBuffer.length()
+                        || offset + chunk.length() > personalCacheWriteLength) return cacheReply(false, "缓存分块顺序错误");
+                personalCacheWriteBuffer.append(chunk);
+                return cacheReply(true, "");
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        public String cacheCommitWrite(String requestId) {
+            return commitPersonalCacheWrite(requestId);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void cacheAbortWrite(String requestId) {
+            synchronized (personalCacheIoLock) {
+                if (personalCacheWriteId.equals(requestId)) {
+                    personalCacheWriteId = "";
+                    personalCacheWriteBuffer = null;
+                }
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        public String cacheClearProfile(String studentId) {
+            synchronized (personalCacheIoLock) {
+                try {
+                    String profile = cacheProfileForStudent(studentId);
+                    if (profile.isEmpty()) profile = cacheStore().lastProfile();
+                    if (profile.isEmpty() && preferences != null) profile = preferences.getString(PERSONAL_CACHE_LAST_KEY, "");
+                    personalCacheWriteBuffer = null;
+                    personalCacheWriteId = "";
+                    personalCacheReadBuffer = "";
+                    personalCacheReadId = "";
+                    if (!profile.isEmpty()) {
+                        cacheStore().clear(profile);
+                        File legacy = personalCacheFile(profile);
+                        if (legacy.exists() && !legacy.delete()) return cacheReply(false, "旧缓存清除失败，请重试");
+                        if (preferences != null && profile.equals(preferences.getString(PERSONAL_CACHE_LAST_KEY, ""))) {
+                            preferences.edit().remove(PERSONAL_CACHE_LAST_KEY).commit();
+                        }
+                    }
+                    return cacheReply(true, "");
+                } catch (Exception error) {
+                    return cacheReply(false, "缓存清除失败，请重试");
+                }
+            }
         }
 
         @android.webkit.JavascriptInterface

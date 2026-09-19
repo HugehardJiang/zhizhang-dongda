@@ -22,7 +22,7 @@ function createElementStub() {
   const element = {
     value: "", textContent: "", innerHTML: "", className: "", disabled: false, hidden: false, src: "",
     dataset: {}, selectedOptions: [], classList: createClassList(), children: [], parentElement: null,
-    addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, setSelectionRange() {}, click() {}, insertAdjacentHTML() {},
+    addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, select() {}, setSelectionRange() {}, click() {}, insertAdjacentHTML() {},
     replaceChildren(...children) {
       this.children.forEach((child) => { child.parentElement = null; });
       this.children = children;
@@ -68,6 +68,7 @@ global.AndroidApi = {
   getLoginError() { return ""; },
   getLoginDiagnostics() { return "执掌东大 Android 登录诊断报告\n测试报告"; },
   copyLoginDiagnostics() { nativeCalls.push("copy-login-diagnostics"); return true; },
+  copyText(text) { nativeCalls.push(`copy-text:${String(text || "")}`); return true; },
   setLoginMethod(method) { nativeCalls.push(`login:${method}`); },
   getToastNotificationsEnabled() { return nativeToastNotificationsEnabled; },
   setToastNotificationsEnabled(enabled) {
@@ -168,6 +169,12 @@ globalThis.__mobileShellAudit = {
   saveCurrentTermPreference,
   currentTermCodeFor,
   persistCampusCode,
+  copyLocalScheduleTransferText,
+  selectLocalScheduleAiPrompt,
+  localScheduleAiPrompt,
+  openLocalScheduleAiPrompt,
+  openLocalScheduleBatchImport,
+  renderLocalScheduleTransferModal,
   bootstrapLocalDashboard,
   syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
@@ -210,12 +217,36 @@ assert.ok(loginSettings.includes('从教务系统同步'));
 assert.ok(loginSettings.indexOf('当前学期') < loginSettings.indexOf('第一周周日'));
 assert.ok(loginSettings.includes('id="campusSettingSelect"'));
 assert.ok(loginSettings.indexOf('默认校区与上课时间') < loginSettings.indexOf('第一周周日'));
+assert.ok(loginSettings.includes('data-action="open-local-schedule-ai-prompt"'));
+assert.ok(loginSettings.includes('data-action="open-local-schedule-batch-import"'));
 
 // Campus preference is mirrored to the native settings bridge so it survives
 // WebView storage cleanup and can drive section-only time calculations.
 assert.strictEqual(audit.persistCampusCode('hunnan'), 'hunnan');
 assert.strictEqual(nativeCampusSetting, 'hunnan');
 assert.ok(nativeCalls.includes('campus:hunnan'));
+
+// The AI import prompt is generated from the live Android preferences and
+// remains a local copy/paste workflow; Android Back dismisses it like every
+// other modal without changing the current settings page.
+audit.state.view = 'settings';
+audit.state.termCode = '2025-2026-2';
+audit.state.campus.code = 'hunnan';
+audit.state.calendar.firstWeekStart = '2026-08-16';
+assert.ok(audit.localScheduleAiPrompt().includes('第一周周日：2026-08-16'));
+assert.ok(audit.localScheduleAiPrompt().includes('第1节：08:30-09:15'));
+audit.openLocalScheduleAiPrompt();
+assert.strictEqual(audit.state.localScheduleTransfer.mode, 'ai-prompt');
+assert.ok(audit.renderLocalScheduleTransferModal().includes('应用本身不会上传你的图片'));
+assert.ok(audit.renderLocalScheduleTransferModal().includes('复制 Prompt'));
+assert.strictEqual(global.__handleAndroidBack(), true);
+assert.strictEqual(audit.state.localScheduleTransfer.mode, '');
+assert.strictEqual(audit.state.view, 'settings');
+audit.openLocalScheduleBatchImport();
+assert.strictEqual(audit.state.localScheduleTransfer.mode, 'batch-import');
+assert.ok(audit.renderLocalScheduleTransferModal().includes('AI 标准 JSON'));
+assert.strictEqual(global.__handleAndroidBack(), true);
+assert.strictEqual(audit.state.localScheduleTransfer.mode, '');
 
 // Local-schedule controls opened from Settings must render on Settings itself,
 // and Android Back must dismiss their state before changing the current page.
@@ -331,6 +362,9 @@ assert.ok(code.includes('syncMobileBottomNavIndicator();'));
 assert.ok(code.includes('MOBILE_NAV_VIEW_ALIASES'));
 assert.ok(code.includes('all: "settings"'));
 assert.ok(dashboardCss.includes('overscroll-behavior: contain; touch-action: pan-y;'));
+assert.ok(dashboardCss.includes('.schedule-action-groups'));
+assert.ok(dashboardCss.includes('.schedule-action-group-secondary'));
+assert.ok(dashboardCss.includes('grid-template-columns: repeat(2, minmax(0, 1fr))'));
 assert.ok(dashboardCss.includes('.settings-switch-track::after'));
 assert.ok(dashboardCss.includes(':checked + .settings-switch-track::after'));
 assert.ok(!dashboardCss.includes('input[role="switch"]::before'));
@@ -407,6 +441,8 @@ assert.ok(mainActivitySource.includes('public void setCurrentTermSettings(String
 assert.ok(mainActivitySource.includes('LAST_LOGIN_DIAGNOSTICS'));
 assert.ok(mainActivitySource.includes('public String getLoginDiagnostics()'));
 assert.ok(mainActivitySource.includes('public boolean copyLoginDiagnostics()'));
+assert.ok(mainActivitySource.includes('public boolean copyText(String text)'));
+assert.ok(mainActivitySource.includes('copyTextToClipboard("执掌东大 Prompt", text)'));
 assert.ok(mainActivitySource.includes('sanitizeDiagnosticUrl'));
 assert.ok(mainActivitySource.includes('LOGIN_DIAGNOSTIC_EVENT_MAX'));
 
@@ -506,6 +542,20 @@ audit.syncModal();
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
 
 (async () => {
+  // Android uses the native clipboard bridge for the AI Prompt. The inline
+  // notice and manual-select fallback make the result visible even when a
+  // system Toast is unavailable.
+  audit.state.localScheduleTransfer = {
+    mode: "ai-prompt", text: "", promptText: "复制测试 Prompt", error: "", notice: "", preview: null
+  };
+  assert.strictEqual(await audit.copyLocalScheduleTransferText("复制测试 Prompt", "Prompt 已复制。"), true);
+  assert.ok(nativeCalls.includes("copy-text:复制测试 Prompt"));
+  assert.strictEqual(audit.state.localScheduleTransfer.notice, "Prompt 已复制。");
+  const promptTextarea = document.getElementById("localScheduleAiPromptText");
+  promptTextarea.value = "手动选择测试 Prompt";
+  assert.strictEqual(audit.selectLocalScheduleAiPrompt(), true);
+  assert.ok(audit.state.localScheduleTransfer.notice.includes("全选"));
+
   // Offline cold-start regression: local data must become usable without the
   // native session probe or any network response.
   audit.state.view = "overview";

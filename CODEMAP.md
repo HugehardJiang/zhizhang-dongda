@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.116` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.91` / `91` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.120` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.95` / `95` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -172,8 +172,9 @@ saveImage / saveCsv
 | 5463–9258 | 各页 `render*`、导出 PNG/CSV、课程传输 | 中间有重复函数，以文件后部为准 |
 | **9259–9308** | **`render()`** | 路由总入口：按 `state.view` 填 `#content` |
 | 9384–9437 | `refresh()` | 先缓存/本地安排，再打网；代次号作废旧请求 |
-| **9439–10427** | **本地课表 overlay** | schema `zhizhang-local-schedule/v1`；**禁止写入 `state.data.courses`** |
-| 10428–文末 | DOM 事件、`data-action`、`__refreshDashboard` | 交互都从 `#content` 委托 |
+| **10864–13315** | **本地课表 overlay** | schema `zhizhang-local-schedule/v1`；**禁止写入 `state.data.courses`** |
+| **13317–14088** | **本地课表批量导入** | schema `zhizhang-schedule-import/v1`；AI Prompt 使用当前校区时间和第一周周日；预览后原子写入本地层，不改教务缓存或原有导出 |
+| 14089–文末 | DOM 事件、`data-action`、`__refreshDashboard` | 交互都从 `#content` 委托 |
 
 `state.view` 取值：`overview` | `personal` | `exams` | `scores` | `all` | `curriculum` | `settings`。
 

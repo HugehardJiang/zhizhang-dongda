@@ -10,8 +10,9 @@ android {
         applicationId = "cn.neu.zhizhangdongda"
         minSdk = 24
         targetSdk = 35
-        versionCode = 91
-        versionName = "0.1.91"
+        versionCode = 95
+        versionName = "0.1.95"
+        testInstrumentationRunner = "cn.neu.zhizhangdongda.CacheStoreInstrumentation"
     }
 
     buildTypes {

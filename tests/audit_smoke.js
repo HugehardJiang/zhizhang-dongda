@@ -48,7 +48,8 @@ globalThis.__auditTest = {
   mergePersonalCourseSources,
   calculateAverageGpa, courseIndexForScope,
   courseAtScopeIndex, courseRowsForScope, queryAllSchedule, loadAllScheduleList,
-  currentAcademicWeekNumber, defaultPersonalScheduleWeek, scheduleWeekValue,
+  currentAcademicWeekNumber, defaultPersonalScheduleWeek, scheduleWeekValue, scheduleWeekDateForDay,
+  scheduleSectionClockText, scheduleGridSwipeDirection,
   personalScheduleRows,
   courseArrangementRows, renderCourseRowsTable, scheduleExportRows,
   scheduleCsvEntries, buildScheduleCsv, scheduleCsvFileName,
@@ -72,6 +73,10 @@ globalThis.__auditTest = {
   currentScoreReminder, acknowledgeCurrentScoreReminder, renderNewScoreReminderModal,
   localScheduleStorageKey, localScheduleProfileKey, localSchedulePayload,
   scheduleCsvHasRows, renderPersonal, renderOverview, renderOverviewPriority, renderSettings, renderCourseDetailModal,
+  personalScheduleActions, localScheduleAiPrompt, localScheduleTransferPeriodTimes, localScheduleTransferPeriodLines,
+  localScheduleTransferParseDate, localScheduleTransferWeekNumbers, localScheduleTransferContext,
+  localScheduleTransferAcademicInfo, localScheduleTransferInferSections, normalizeLocalScheduleImportItems, parseLocalScheduleTransferText,
+  buildLocalScheduleImportPreview, localScheduleTransferSignature,
   courseOutlinePayloadFromRuntimeResponse, courseOutlineCollection, normalizeCourseOutlineEndpointPayload, courseOutlineQuerySettings,
   courseOutlineListBody, courseOutlineKey, courseOutlineExportDocument, courseOutlineBusinessError,
   courseOutlinePayloadFromResponse, courseOutlineApiUrl, courseOutlineHeaders, courseOutlineCodePathFromMetadata, courseOutlineCodePathsFromMetadata,
@@ -555,6 +560,43 @@ const t = global.__auditTest;
   t.state.calendar.firstWeekStart = '';
   assert.strictEqual(t.defaultPersonalScheduleWeek(), 'all');
 
+  // A selected week shows the real Sunday-first dates in the grid header.
+  // February 29 verifies that the calculation follows leap-year calendar days.
+  t.state.calendar.firstWeekStart = '2024-02-25';
+  t.state.scheduleWeek.personal = '1';
+  const leapDay = t.scheduleWeekDateForDay('1', 4);
+  assert.deepStrictEqual([leapDay.getFullYear(), leapDay.getMonth() + 1, leapDay.getDate()], [2024, 2, 29]);
+  const leapWeekGrid = t.renderScheduleGrid([
+    { name: '闰年课程', weekday: '星期四', weeks: '1周', section: '第1-2节' }
+  ], 'personal');
+  assert.ok(leapWeekGrid.includes('周四</span><small class="schedule-day-date">2月29日'));
+  t.state.scheduleWeek.personal = 'all';
+  const allWeeksGrid = t.renderScheduleGrid([
+    { name: '整学期课程', weekday: '星期四', weeks: '1-16周', section: '第1-2节' }
+  ], 'personal');
+  assert.strictEqual(allWeeksGrid.includes('schedule-day-date'), false);
+
+  // The fixed section column follows the selected campus timetable, and a
+  // horizontal swipe is only a week-switch candidate when it is dominant.
+  const savedScheduleCampus = t.state.campus.code;
+  t.state.campus.code = 'nanhu';
+  assert.strictEqual(t.scheduleSectionClockText(1), '08:00-08:45');
+  assert.strictEqual(t.scheduleSectionClockText(5), '14:00-14:45');
+  t.state.campus.code = 'hunnan';
+  assert.strictEqual(t.scheduleSectionClockText(1), '08:30-09:15');
+  const scheduleGridWithTimes = t.renderScheduleGrid([
+    { name: '校区时间课程', weekday: '星期一', weeks: '1周', section: '第1-2节' }
+  ], 'personal');
+  assert.ok(scheduleGridWithTimes.includes('schedule-section-label-with-time'));
+  assert.ok(scheduleGridWithTimes.includes('08:30-09:15'));
+  assert.ok(scheduleGridWithTimes.includes('data-schedule-scope="personal"'));
+  assert.strictEqual(t.scheduleGridSwipeDirection(-80, 10), 'next');
+  assert.strictEqual(t.scheduleGridSwipeDirection(80, 10), 'previous');
+  assert.strictEqual(t.scheduleGridSwipeDirection(10, 80), '');
+  t.state.campus.code = savedScheduleCampus;
+  t.state.calendar.firstWeekStart = '';
+  t.state.scheduleWeek.personal = '';
+
   // Existing schedule parsing behavior remains intact.
   assert.deepStrictEqual(t.parseSectionRange('第5-8节'), { start: 5, end: 8 });
   assert.deepStrictEqual([...t.courseWeekNumbers({ weeks: '1-8周（单）、2-8周（双）' })].sort((a,b)=>a-b), [1,2,3,4,5,6,7,8]);
@@ -838,7 +880,8 @@ const t = global.__auditTest;
   assert.deepStrictEqual(campusSnapshot.scheduleDetail.map((row) => [row.campus, row.location]).sort((left, right) => left[1].localeCompare(right[1])), [
     ['南湖校区', '大成313'], ['南湖校区', '线上'], ['南湖校区', '逸405']
   ]);
-  assert.ok(campusSnapshot.scheduleDetail.every((row) => row.sourceCourseIndex === 0));
+  assert.ok(campusSnapshot.scheduleDetail.every((row) => row.courseId === campusSnapshot.courses[0].courseId));
+  assert.ok(campusSnapshot.scheduleDetail.every((row) => !Object.hasOwn(row, 'sourceCourseIndex')));
   assert.ok(campusSnapshot.scheduleDetail.every((row) => !Object.prototype.hasOwnProperty.call(row, 'raw')));
 
   const liveDataReference = t.state.data;
@@ -856,6 +899,45 @@ const t = global.__auditTest;
   t.state.personalCache = previousCacheState;
   t.state.termCode = previousTermCode;
   t.state.data = previousData;
+
+  // Independent grid meetings must survive a real JSON round trip, including
+  // repeated offline saves. A compound text fallback cannot recover these.
+  {
+    const savedData = t.state.data;
+    const savedCache = t.state.personalCache;
+    const raw = {
+      courseName: '[实]MATLAB语言与应用-科学绘图与基本数学问题的MATLAB求解',
+      courseCode: 'A1304000078-MAT2', teachClassId: 'MAT2',
+      dayOfWeek: 4, weeks: '6周', teacherName: '鲍艳',
+      campusName: '南湖校区', placeName: '信息学馆250 自动化2508(30)'
+    };
+    const merged = t.mergePersonalCourseSources([], [
+      { ...raw, beginSection: 1, endSection: 2 },
+      { ...raw, beginSection: 5, endSection: 6 }
+    ]);
+    t.state.data = { ...savedData, ...merged };
+    const fingerprint = () => t.schoolPersonalScheduleRows().map(row => (
+      [row.name, row.weekday, row.section, row.weeks, row.teacher, row.location, row.campus]
+    ));
+    const expected = fingerprint();
+    assert.strictEqual(expected.length, 2);
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      const snapshot = JSON.parse(JSON.stringify(t.cacheTermSnapshot()));
+      assert.strictEqual(snapshot.scheduleDetail.length, 2);
+      if (cycle === 0) {
+        // Already installed v2 caches have no normalized-record marker.
+        [...snapshot.courses, ...snapshot.scheduleDetail].forEach(row => delete row.courseRecordVersion);
+      }
+      t.state.personalCache = { ...savedCache, termSnapshots: { ROUNDTRIP: snapshot } };
+      assert.strictEqual(t.applyCachedTermSnapshot('ROUNDTRIP'), true);
+      assert.deepStrictEqual(fingerprint(), expected, `offline round trip ${cycle}`);
+      assert.strictEqual(t.courseArrangementRows(t.state.data.courses[0]).length, 2);
+      assert.ok(t.renderCourseRowsTable(t.state.data.courses, false, 'personal').includes('2 条安排'));
+      assert.strictEqual(t.scheduleExportRows('personal').length, 2);
+    }
+    t.state.data = savedData;
+    t.state.personalCache = savedCache;
+  }
 
   // A legacy snapshot may have retained the campus only inside the location
   // string. Hydration normalizes it before any offline renderer reads it.
@@ -1323,6 +1405,8 @@ const t = global.__auditTest;
     localSchedule: t.state.localSchedule,
     calendar: t.state.calendar
   }));
+  const savedCampusState = { ...t.state.campus };
+  const savedTransferState = JSON.parse(JSON.stringify(t.state.localScheduleTransfer || {}));
   const localSchool = t.mapCourse({
     courseName: '大学物理', courseNo: 'A-PHYS', weeks: '1-16周', weekday: '星期二', section: '第3-4节',
     teacher: '崔老师', classroom: '逸201'
@@ -1582,6 +1666,105 @@ const t = global.__auditTest;
   assert.strictEqual(t.localSchedulePayload().schema, 'zhizhang-local-schedule/v1');
   assert.strictEqual(t.localSchedulePayload().studentId, 'student-A');
 
+  // AI batch import: the prompt is generated from the live campus table and
+  // the configured first Sunday; the parser accepts both week/weekday and
+  // explicit dates without trusting external ids or raw fields.
+  t.state.campus.code = 'nanhu';
+  t.state.calendar.firstWeekStart = '2024-02-25';
+  const nanhuPrompt = t.localScheduleAiPrompt();
+  assert.ok(nanhuPrompt.includes('南湖校区'));
+  assert.ok(nanhuPrompt.includes('第一周周日：2024-02-25'));
+  assert.ok(nanhuPrompt.includes('第1节：08:00-08:45'));
+  assert.ok(nanhuPrompt.includes('第12节：21:15-22:00'));
+  assert.ok(nanhuPrompt.includes('zhizhang-schedule-import/v1'));
+  const scheduleActionMarkup = t.personalScheduleActions();
+  assert.ok(scheduleActionMarkup.includes('schedule-action-groups'));
+  assert.ok(scheduleActionMarkup.includes('aria-label="自定义安排"'));
+  assert.ok(scheduleActionMarkup.includes('aria-label="课表导入导出"'));
+  assert.ok(scheduleActionMarkup.includes('data-action="open-schedule-image-export"'));
+  assert.ok(scheduleActionMarkup.includes('data-action="open-local-schedule-ai-prompt"'));
+  t.state.campus.code = 'hunnan';
+  assert.ok(t.localScheduleAiPrompt().includes('第1节：08:30-09:15'));
+  t.state.campus.code = 'nanhu';
+  assert.deepStrictEqual(t.localScheduleTransferWeekNumbers('第1-6周（单周）'), [1, 3, 5]);
+  assert.deepStrictEqual(t.localScheduleTransferWeekNumbers('1-6周（双周）'), [2, 4, 6]);
+  assert.deepStrictEqual(t.localScheduleTransferParseDate('2024年2月29日', 2024), { date: '2024-02-29', inferredYear: false, error: '' });
+  assert.strictEqual(t.localScheduleTransferParseDate('2023-02-29', 2023).date, '');
+
+  const aiImportText = JSON.stringify({
+    schema: 'zhizhang-schedule-import/v1', schemaVersion: 1,
+    context: { termCode: 'LOCAL-TERM', termName: '本地测试学期', firstWeekSunday: '2024-02-25', campus: 'nanhu' },
+    items: [
+      { type: 'course', title: '日期课', courseCode: 'LEAP-001', credit: '3', category: '专业课', assessment: '考试课', requirement: '必修', dates: ['2024-02-29'], startSection: 3, endSection: 4, location: '南湖校区 教101', teacher: '张三', id: '外部ID', raw: { password: '不要保存' } },
+      { type: 'course', title: '周次课', weeks: '第2-4周', weekday: '星期一', section: '第5-6节', location: '教202', teacher: '李四', startTime: '14:00', endTime: '15:40' },
+      { type: 'event', title: '班会', dates: ['2024-03-03'], allDay: true, location: '会议室' }
+    ]
+  }, null, 2);
+  const parsedAiImport = t.parseLocalScheduleTransferText(aiImportText);
+  const aiRows = parsedAiImport.items.flatMap((item, index) => t.normalizeLocalScheduleImportItems(item, index, parsedAiImport.context));
+  assert.strictEqual(aiRows[0].item.course.weekdayIndex, 4);
+  assert.deepStrictEqual(aiRows[0].item.course.weekNumbers, [1]);
+  assert.strictEqual(aiRows[0].item.course.startSection, 3);
+  assert.strictEqual(aiRows[0].item.location.includes('教101'), true);
+  assert.strictEqual(aiRows[0].item.courseCode, 'LEAP-001');
+  assert.strictEqual(aiRows[0].item.credit, '3');
+  assert.strictEqual(aiRows[0].item.category, '专业课');
+  assert.strictEqual(aiRows[0].item.assessment, '考试课');
+  assert.strictEqual(aiRows[0].item.requirement, '必修');
+  assert.strictEqual(aiRows[0].item.id === '外部ID', false);
+  assert.strictEqual(aiRows[0].item.raw, undefined);
+  assert.deepStrictEqual(aiRows[1].item.course.weekNumbers, [2, 3, 4]);
+  assert.strictEqual(aiRows[1].item.course.weekdayIndex, 1);
+  assert.strictEqual(aiRows[1].item.course.startTime, '');
+  assert.strictEqual(aiRows[1].warnings.some((message) => message.includes('校区') || message.includes('标准时间')), false);
+  assert.strictEqual(aiRows[2].item.type, 'event');
+  assert.strictEqual(aiRows[2].item.event.date, '2024-03-03');
+  const nestedCourseRow = t.normalizeLocalScheduleImportItems({
+    type: 'course',
+    course: {
+      title: '嵌套字段课', courseCode: 'NEST-001', credit: 2, teacher: '嵌套老师', location: '教303',
+      weeks: '1周', weekday: '周一', sections: '第1-2节', startTime: '08:00', endTime: '09:40'
+    }
+  }, 0, parsedAiImport.context)[0];
+  assert.strictEqual(nestedCourseRow.item.title, '嵌套字段课');
+  assert.strictEqual(nestedCourseRow.item.courseCode, 'NEST-001');
+  assert.strictEqual(nestedCourseRow.item.credit, '2');
+  assert.strictEqual(nestedCourseRow.item.teacher, '嵌套老师');
+  assert.strictEqual(nestedCourseRow.item.location, '教303');
+  assert.deepStrictEqual([nestedCourseRow.item.course.startSection, nestedCourseRow.item.course.endSection], [1, 2]);
+  assert.strictEqual(nestedCourseRow.item.course.startTime, '');
+  assert.strictEqual(t.localScheduleTransferInferSections('08:00', '09:40', 'nanhu').start, 1);
+  const timeInferredRow = t.normalizeLocalScheduleImportItems({
+    type: 'course', title: '时间反推课', weeks: [1], weekday: '周一', startTime: '08:00', endTime: '09:40'
+  }, 0, parsedAiImport.context)[0];
+  assert.deepStrictEqual([timeInferredRow.item.course.startSection, timeInferredRow.item.course.endSection], [1, 2]);
+  assert.strictEqual(timeInferredRow.item.course.startTime, '');
+  assert.ok(timeInferredRow.warnings.some((message) => message.includes('反推')));
+  const mismatchedTimeRow = t.normalizeLocalScheduleImportItems({
+    type: 'course', title: '时间校验课', weeks: [1], weekday: '周一', startSection: 1, endSection: 2,
+    startTime: '10:00', endTime: '10:45'
+  }, 0, parsedAiImport.context)[0];
+  assert.strictEqual(mismatchedTimeRow.item.course.startTime, '');
+  assert.ok(mismatchedTimeRow.warnings.some((message) => message.includes('不一致')));
+  const inferredEvent = t.normalizeLocalScheduleImportItems({ title: '日期日程', date: '2024-02-29', startSection: 3, endSection: 4 }, 0, parsedAiImport.context)[0];
+  assert.strictEqual(inferredEvent.item.type, 'event');
+  assert.strictEqual(inferredEvent.item.event.date, '2024-02-29');
+
+  t.state.calendar.firstWeekStart = '';
+  const missingFirstWeekContext = t.localScheduleTransferContext({ context: { termCode: 'LOCAL-TERM', campus: 'nanhu' } });
+  const missingFirstWeek = t.normalizeLocalScheduleImportItems({ type: 'course', title: '无法换算', date: '2024-02-29', startSection: 1, endSection: 2 }, 0, missingFirstWeekContext)[0];
+  assert.ok(missingFirstWeek.errors.some((message) => message.includes('第一周周日')));
+  const importPreview = t.buildLocalScheduleImportPreview(JSON.stringify({
+    schema: 'zhizhang-schedule-import/v1', schemaVersion: 1,
+    context: { termCode: 'LOCAL-TERM', firstWeekSunday: '2024-02-25', campus: 'nanhu' },
+    items: [
+      { type: 'course', title: '批量重复', weeks: [1], weekday: '周一', startSection: 1, endSection: 2 },
+      { type: 'course', title: '批量重复', weeks: [1], weekday: '周一', startSection: 1, endSection: 2 }
+    ]
+  }));
+  assert.strictEqual(importPreview.valid.length, 1);
+  assert.strictEqual(importPreview.duplicateCount, 1);
+
   // Editing an item does not collide with itself.
   t.state.localSchedule.items = [localCourse];
   t.state.data.courses = [];
@@ -1597,6 +1780,8 @@ const t = global.__auditTest;
   t.state.studentId = savedLocalState.studentId;
   t.state.localSchedule = savedLocalState.localSchedule;
   t.state.calendar = savedLocalState.calendar;
+  t.state.campus = savedCampusState;
+  t.state.localScheduleTransfer = savedTransferState;
 
   console.log('audit smoke tests: PASS');
 })().catch((error) => {
