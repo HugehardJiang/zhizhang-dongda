@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.120` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.95` / `95` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.121` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.96` / `96` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 

@@ -671,6 +671,10 @@ const state = {
     loading: false,
     items: [],
     hiddenSchoolEntries: [],
+    dayMoves: [],
+    dayMovesOpen: false,
+    dayMoveDraft: null,
+    dayMoveError: "",
     profileKey: "",
     editorOpen: false,
     managerOpen: false,
@@ -7396,7 +7400,7 @@ function localScheduleConflictMarkup() {
 }
 
 function localScheduleModalMarkup() {
-  return `${localScheduleEditorMarkup()}${localScheduleManagerMarkup()}${localScheduleConflictMarkup()}${renderLocalScheduleTransferModal()}`;
+  return `${localScheduleEditorMarkup()}${localScheduleManagerMarkup()}${localScheduleConflictMarkup()}${renderLocalScheduleTransferModal()}${renderDayMovesModal()}`;
 }
 
 function hasActiveModalState() {
@@ -7410,6 +7414,7 @@ function hasActiveModalState() {
     || state.curriculum.courseDetail
     || state.localSchedule.editorOpen
     || state.localSchedule.managerOpen
+    || state.localSchedule.dayMovesOpen
     || state.localSchedule.conflict
     || state.campus.promptOpen
   );
@@ -7427,6 +7432,7 @@ function clearActiveModalState() {
   state.curriculum.courseDetail = null;
   state.localSchedule.editorOpen = false;
   state.localSchedule.managerOpen = false;
+  state.localSchedule.dayMovesOpen = false;
   state.localSchedule.conflict = null;
   state.localSchedule.editingId = "";
   state.localSchedule.draft = null;
@@ -7565,7 +7571,8 @@ function renderCourseDetailWithLocalOverlay() {
 
 function personalScheduleActions() {
   const exportActions = scheduleExportActions("personal")
-    .replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "");
+    .replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "")
+    + `<button class="button button-soft button-small" type="button" data-action="open-day-moves">调休 / 整天调课${dayMovesForTerm().length ? `（${dayMovesForTerm().length}）` : ""}</button>`;
   return `<div class="schedule-action-groups" aria-label="课表操作"><div class="schedule-action-group schedule-action-group-primary" role="group" aria-label="自定义安排"><span class="schedule-action-group-label">自定义安排</span><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button><button class="button button-soft button-small" type="button" data-action="open-local-manager">管理自定义安排</button></div><div class="schedule-action-group schedule-action-group-secondary" role="group" aria-label="课表导入导出"><span class="schedule-action-group-label">课表工具</span>${exportActions}${localScheduleTransferActions()}</div></div>`;
 }
 
@@ -7906,6 +7913,10 @@ function scheduleExportFilteredRows(rows, selectedWeek) {
   const week = Number(selectedWeek);
   if (!Number.isInteger(week) || week <= 0) return rows;
   return (rows || []).filter((course) => {
+    if (course.dayMoveExcludedDates?.length) {
+      const date = scheduleWeekDateForDay(week, courseDayIndex(course));
+      if (date && course.dayMoveExcludedDates.includes(localScheduleDate(date))) return false;
+    }
     if (course.localDate && normalizeCalendarDate(course.localDate)) {
       const info = academicDayInfo(normalizeCalendarDate(course.localDate));
       return info.week === null || info.week === week;
@@ -7936,8 +7947,8 @@ function localScheduleCsvEntries(scope = "personal") {
       return true;
     });
   }
-  const mapped = expandedScheduleOccurrenceRows(scheduleCsvSchoolRows());
-  const localItems = localScheduleItemsForTerm(state.termCode);
+  const mapped = expandedScheduleOccurrenceRows(mergedPersonalScheduleRows()).filter(row => !scheduleItemIsEvent(row));
+  const localItems = localScheduleItemsForTerm(state.termCode).filter(item => item.type === "event");
   const entries = [];
   let skipped = 0;
   const seen = new Set();
@@ -7949,6 +7960,9 @@ function localScheduleCsvEntries(scope = "personal") {
     entries.push(entry);
   };
   mapped.forEach((course) => {
+    // An unspecified week range with date exceptions is not representable in
+    // WakeUp CSV. Report it rather than exporting the cancelled occurrence.
+    if (course.dayMoveExcludedDates?.length) { skipped += 1; return; }
     const range = courseSectionRange(course);
     add({ courseName: displayValue(course.name, ""), weekday: courseDayIndex(course) >= 0 ? String(courseDayIndex(course) === 0 ? 7 : courseDayIndex(course)) : "", startSection: range ? String(range.start) : "", endSection: range ? String(range.end) : "", teacher: course.teacher || "", location: courseLocationText(course) || "", weekText: scheduleCsvWeekText(course) });
   });
@@ -8226,7 +8240,15 @@ async function clearAllLocalSchedule() {
     ? window.confirm("确定清除全部自定义安排？\n只删除你手动创建的数据，不影响教务系统课程。")
     : true;
   if (!confirmed) return;
-  await clearLocalSchedule(state.localSchedule.profileKey || localScheduleProfileKey());
+  // Day moves have their own delete controls; clearing custom items must not
+  // erase unrelated rules from the shared local envelope.
+  try {
+    await saveLocalSchedule({ ...localSchedulePayload(), items: [], hiddenSchoolEntries: [] });
+  } catch (error) {
+    setNotice(`清除失败：${error.message || "本地存储不可用"}`, "error");
+    render();
+    return;
+  }
   state.localSchedule.items = [];
   state.localSchedule.hiddenSchoolEntries = [];
   state.localSchedule.editorOpen = false;
@@ -8528,6 +8550,10 @@ function filterScheduleWeekRows(rows, scope = "personal") {
   const week = Number(selected);
   if (!Number.isInteger(week) || week <= 0) return rows;
   return rows.filter((course) => {
+    if (scope === "personal" && course.dayMoveExcludedDates?.length) {
+      const date = scheduleWeekDateForDay(week, courseDayIndex(course));
+      if (date && course.dayMoveExcludedDates.includes(localScheduleDate(date))) return false;
+    }
     const weeks = courseWeekNumbers(course);
     return !weeks.size || weeks.has(week);
   });
@@ -11208,6 +11234,10 @@ async function saveLocalSchedule(payload) {
   const profileKey = localScheduleProfileKey(payload.profileKey || payload.studentId);
   const key = localScheduleStorageKey(profileKey);
   if (IS_ANDROID_APP && typeof globalThis.AndroidApi?.saveLocalSchedule === "function") {
+    if (typeof globalThis.AndroidApi.saveLocalScheduleConfirmed === "function") {
+      if (!globalThis.AndroidApi.saveLocalScheduleConfirmed(serialized)) throw new Error("本机写入失败，请重试");
+      return true;
+    }
     globalThis.AndroidApi.saveLocalSchedule(serialized);
     return true;
   }
@@ -11382,6 +11412,7 @@ function localSchedulePayload() {
     studentId: String(studentId),
     savedAt: localScheduleNow(),
     items: (state.localSchedule.items || []).map((item) => normalizeLocalScheduleItem(item)),
+    dayMoves: normalizeDayMoves(state.localSchedule.dayMoves),
     hiddenSchoolEntries: (state.localSchedule.hiddenSchoolEntries || []).map((entry) => ({
       key: localScheduleTrim(entry.key, 240),
       termCode: localScheduleTrim(entry.termCode, 80),
@@ -11425,6 +11456,9 @@ async function hydrateLocalSchedule(profileKey = localScheduleProfileKey(), forc
   state.localSchedule.items = [];
   state.localSchedule.hiddenSchoolEntries = [];
   state.localSchedule.termOptions = [];
+  state.localSchedule.dayMoves = [];
+  state.localSchedule.dayMovesOpen = false;
+  state.localSchedule.dayMoveDraft = null;
   state.localSchedule.corrupted = false;
   if (payload) {
     if (payload.schema !== LOCAL_SCHEDULE_SCHEMA || Number(payload.schemaVersion || 0) !== 1) {
@@ -11433,6 +11467,7 @@ async function hydrateLocalSchedule(profileKey = localScheduleProfileKey(), forc
       state.localSchedule.items = Array.isArray(payload.items)
         ? payload.items.map((item) => normalizeLocalScheduleItem(item)).filter((item) => item.title)
         : [];
+      state.localSchedule.dayMoves = normalizeDayMoves(payload.dayMoves);
       state.localSchedule.hiddenSchoolEntries = Array.isArray(payload.hiddenSchoolEntries)
         ? payload.hiddenSchoolEntries.filter((entry) => entry && entry.key).map((entry) => ({ ...entry }))
         : [];
@@ -11603,7 +11638,118 @@ function legacySchoolScheduleOccurrenceKey(course) {
   return `school:${localScheduleStableHash(signature)}`;
 }
 
-function mergedPersonalScheduleRows(rows = state.data.courses) {
+// Date moves are a projection of original occurrences, never a rewrite of the
+// school cache. Apply every rule simultaneously so swaps cannot cascade.
+function normalizeDayMoves(value) {
+  const seen = new Set();
+  return (Array.isArray(value) ? value : []).flatMap((rule) => {
+    if (!rule || typeof rule !== "object") return [];
+    const from = localScheduleDate(rule.from);
+    const to = localScheduleDate(rule.to);
+    const termCode = localScheduleTrim(rule.termCode, 80);
+    const key = `${termCode}:${from}`;
+    if (!from || !to || from === to || !termCode || seen.has(key)) return [];
+    seen.add(key);
+    return [{ id: localScheduleTrim(rule.id, 120) || localScheduleId(), from, to, termCode }];
+  });
+}
+
+function dayMovesForTerm() {
+  return normalizeDayMoves(state.localSchedule.dayMoves).filter(rule => rule.termCode === state.termCode);
+}
+
+function dayMoveCalendarReady() {
+  const first = normalizeCalendarDate(state.calendar.firstWeekStart);
+  return first && first.getDay() === 0;
+}
+
+function applyDayMoves(rows, rules = dayMovesForTerm()) {
+  if (!rules.length || !dayMoveCalendarReady()) return rows;
+  const valid = rules.filter(rule => academicDayInfo(rule.from).week > 0 && academicDayInfo(rule.to).week > 0);
+  return rows.flatMap(row => {
+    if (scheduleItemIsEvent(row)) return [row];
+    const applicable = valid.filter(rule => filterCoursesForDate([row], rule.from).length);
+    if (!applicable.length) return [row];
+    const weeks = courseWeekNumbers(row);
+    const removedWeeks = new Set(applicable.map(rule => academicDayInfo(rule.from).week));
+    const remaining = [...weeks].filter(week => !removedWeeks.has(week));
+    const base = { ...row, courseRecordVersion: 1, occurrenceRecord: true, scheduleSegment: true };
+    const original = weeks.size
+      ? (remaining.length ? [{ ...base, weeks: formatWeeksValue(remaining.join(",")) }] : [])
+      : [{ ...base, dayMoveExcludedDates: applicable.map(rule => rule.from) }];
+    const moved = applicable.map(rule => ({
+      ...base,
+      weeks: `${academicDayInfo(rule.to).week}周`,
+      weekday: localScheduleWeekdayText(normalizeCalendarDate(rule.to).getDay()),
+      occurrenceId: `${row.occurrenceId || stableOccurrenceId(row)}:move:${rule.id}`,
+      dayMoveFrom: rule.from,
+      dayMoveDate: rule.to,
+      // Keep time/place/teacher unchanged; do not parse raw recurring detail again.
+      detail: [row.detail, `本地调休：${rule.from} → ${rule.to}`].filter(Boolean).join(" · ")
+    }));
+    return [...original, ...moved];
+  });
+}
+
+function renderDayMovesModal() {
+  if (!state.localSchedule.dayMovesOpen) return "";
+  const rules = dayMovesForTerm();
+  const draft = state.localSchedule.dayMoveDraft || {};
+  const records = rules.map(rule => `<div class="local-hidden-school-row"><div><strong>${escapeHtml(rule.from)} → ${escapeHtml(rule.to)}</strong><small>整天课程移动；目标日原有课程保留</small></div><button class="button button-danger button-small" type="button" data-action="delete-day-move" data-move-id="${escapeHtml(rule.id)}">删除并恢复</button></div>`).join("");
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="调休与整天调课"><div class="detail-modal-head"><div><h3>调休 / 整天调课</h3><p class="muted">当前学期：${escapeHtml(localScheduleTermName(state.termCode))}</p></div><button class="button button-ghost" type="button" data-action="close-day-moves">关闭</button></div><p class="muted">将原日期的教务课程和自定义课程整体移到目标日期，原日期不再上这些课。保留上课时间、地点和教师；目标日原有课程仍保留，可能发生冲突。一次性日程、考试不移动。规则仅保存在本机，联网刷新不会覆盖。</p><p class="muted">多条规则按原始课表同时执行，不连锁移动。交换两天时添加两条相反规则；删除规则即可恢复。</p>${!dayMoveCalendarReady() ? `<p class="local-form-error">请先在设置中填写正确的“第一周周日”，调休规则才能生效。</p>` : ""}<div class="local-form-grid"><label class="local-form-field"><span>原上课日期</span><input id="dayMoveFrom" type="date" value="${escapeHtml(draft.from || "")}" /></label><label class="local-form-field"><span>调整到</span><input id="dayMoveTo" type="date" value="${escapeHtml(draft.to || "")}" /></label></div>${state.localSchedule.dayMoveError ? `<p class="local-form-error" role="alert">${escapeHtml(state.localSchedule.dayMoveError)}</p>` : ""}<div class="schedule-export-actions"><button class="button button-primary" type="button" data-action="save-day-move" ${state.localSchedule.dayMoveSaving ? "disabled" : ""}>添加调课</button></div><section class="local-hidden-school-section"><h4>已添加 ${rules.length} 条</h4>${records || `<p class="muted">尚未添加调休规则。</p>`}</section></section></div>`;
+}
+
+async function handleDayMoveAction(action, button) {
+  const local = state.localSchedule;
+  if (action === "open-day-moves") {
+    clearActiveModalState();
+    local.dayMovesOpen = true;
+    local.dayMoveError = "";
+    local.dayMoveDraft = null;
+    render();
+    return;
+  }
+  if (action === "close-day-moves") { local.dayMovesOpen = false; render(); return; }
+  if (local.dayMoveSaving) return;
+  const previous = local.dayMoves || [];
+  let next;
+  if (action === "delete-day-move") {
+    next = previous.filter(rule => rule.id !== button.dataset.moveId || rule.termCode !== state.termCode);
+  } else {
+    const from = localScheduleDate(document.getElementById("dayMoveFrom")?.value);
+    const to = localScheduleDate(document.getElementById("dayMoveTo")?.value);
+    local.dayMoveDraft = { from, to };
+    let error = "";
+    if (!state.termCode) error = "请先选择学期。";
+    else if (!dayMoveCalendarReady()) error = "请先在设置中填写正确的第一周周日。";
+    else if (!from || !to) error = "请选择有效的原日期和目标日期。";
+    else if (from === to) error = "原日期和目标日期不能相同。";
+    else if ([from, to].some(date => { const week = academicDayInfo(date).week; return !week || week > 60; })) error = "请选择当前学期第一周起 60 周以内的日期。";
+    else if (dayMovesForTerm().some(rule => rule.from === from)) error = "该原日期已经调课，请先删除原规则再添加。";
+    else if (!filterCoursesForDate(basePersonalScheduleRows().filter(row => !scheduleItemIsEvent(row)), from).length) error = "原日期没有可移动的课程，请检查日期或先同步课表。";
+    if (error) { local.dayMoveError = error; render(); return; }
+    next = [...previous, { id: localScheduleId(), termCode: state.termCode, from, to }];
+  }
+  local.dayMoveSaving = true;
+  const profile = local.profileKey;
+  try {
+    // Do not expose the new rule until its persistence succeeds.
+    await saveLocalSchedule({ ...localSchedulePayload(), dayMoves: normalizeDayMoves(next) });
+    if (local.profileKey === profile) {
+      local.dayMoves = next;
+      local.dayMoveDraft = null;
+      local.dayMoveError = "";
+      setNotice(action === "delete-day-move" ? "已删除调课规则并恢复原课表。" : "调课已保存到本机。", "success");
+    }
+  } catch (error) {
+    if (local.profileKey === profile) local.dayMoveError = `保存失败，原课表未改变：${error.message || "本地存储不可用"}`;
+  } finally {
+    local.dayMoveSaving = false;
+    render();
+  }
+}
+
+function basePersonalScheduleRows(rows = state.data.courses) {
   const hiddenKeys = new Set((state.localSchedule.hiddenSchoolEntries || [])
     .filter((entry) => !entry.termCode || entry.termCode === state.termCode)
     .map((entry) => entry.key));
@@ -11613,6 +11759,10 @@ function mergedPersonalScheduleRows(rows = state.data.courses) {
   ].some(key => hiddenKeys.has(key)));
   const localRows = localScheduleItemsForTerm(state.termCode).map(localScheduleItemToCourseRow);
   return [...schoolRows, ...localRows];
+}
+
+function mergedPersonalScheduleRows(rows = state.data.courses) {
+  return applyDayMoves(basePersonalScheduleRows(rows));
 }
 
 function normalizedScheduleCourses(rows) {
@@ -11631,6 +11781,7 @@ function dedupeScheduleOccurrenceRows(rows) {
       range ? `${range.start}-${range.end}` : course.section,
       [...courseWeekNumbers(course)].sort((left, right) => left - right).join(","),
       course.localDate,
+      course.dayMoveFrom,
       extractClockText(course.time) || [course.startTime, course.endTime].filter(Boolean).join("-"),
       course.teacher,
       course.campus,
@@ -12007,6 +12158,8 @@ function filterCoursesForDate(rows, date) {
   const info = academicDayInfo(normalizedDate);
   return (rows || [])
     .filter((course) => {
+      if (course.dayMoveExcludedDates?.includes(localScheduleDate(normalizedDate))) return false;
+      if (course.dayMoveDate) return course.dayMoveDate === localScheduleDate(normalizedDate);
       if (scheduleItemIsEvent(course)) return course.localDate === localScheduleDate(normalizedDate);
       if (info.week === null) return false;
       if (courseDayIndex(course) !== info.weekdayIndex) return false;
@@ -12017,8 +12170,9 @@ function filterCoursesForDate(rows, date) {
       if (course?.source !== "local") return true;
       const item = (state.localSchedule.items || []).find((candidate) => candidate.id === course.localId);
       if (!item) return true;
-      if (item.excludedDates?.includes(localScheduleDate(normalizedDate))) return false;
-      const week = info.week;
+      const originalDate = course.dayMoveFrom || localScheduleDate(normalizedDate);
+      if (item.excludedDates?.includes(originalDate)) return false;
+      const week = course.dayMoveFrom ? academicDayInfo(course.dayMoveFrom).week : info.week;
       return !Number.isInteger(week) || !item.excludedWeeks?.includes(week);
     })
     .sort((left, right) => {
@@ -13473,6 +13627,10 @@ function scheduleExportFilteredRows(rows, selectedWeek) {
       const info = academicDayInfo(normalizeCalendarDate(course.localDate));
       return info.week === null || info.week === week;
     }
+    if (course.dayMoveExcludedDates?.length) {
+      const date = scheduleWeekDateForDay(week, courseDayIndex(course));
+      if (date && course.dayMoveExcludedDates.includes(localScheduleDate(date))) return false;
+    }
     const weeks = courseWeekNumbers(course);
     return !weeks.size || weeks.has(week);
   });
@@ -13524,7 +13682,9 @@ function renderCourseDetailModal() {
 
 function renderPersonal() {
   const cacheStatus = personalCacheStatusText();
-  return renderPersonalWithLocalOverlay() + (cacheStatus
+  const moves = dayMovesForTerm();
+  const moveNote = moves.length ? `<p class="schedule-note">${dayMoveCalendarReady() ? `本学期已应用 ${moves.length} 条本地调休；首页、日视图、周表和导出使用调整后的安排，下方教务课程记录及详情仍保留原始信息。` : "本地调休暂未生效：请先设置正确的第一周周日。"}<button class="button button-link" type="button" data-action="open-day-moves">管理调休</button></p>` : "";
+  return moveNote + renderPersonalWithLocalOverlay() + (cacheStatus
     ? `<p class="overview-cache-note" role="status">${escapeHtml(cacheStatus)}</p>` : "");
 }
 
@@ -14410,6 +14570,14 @@ elements.refresh.addEventListener("click", refresh);
 document.getElementById("openPortal").addEventListener("click", openPortal);
 
 elements.content.addEventListener("input", (event) => {
+  if (event.target.id === "dayMoveFrom" || event.target.id === "dayMoveTo") {
+    state.localSchedule.dayMoveDraft = {
+      from: document.getElementById("dayMoveFrom")?.value || "",
+      to: document.getElementById("dayMoveTo")?.value || ""
+    };
+    state.localSchedule.dayMoveError = "";
+    return;
+  }
   const outlineFilter = event.target.dataset.outlineFilter;
   if (outlineFilter && state.courseOutline?.list?.filters) {
     state.courseOutline.list.filters[outlineFilter] = event.target.value;
@@ -14727,6 +14895,7 @@ elements.content.addEventListener("click", async (event) => {
     return;
   }
   if (action === "open-schedule-image-export") return openScheduleImageExport(button.dataset.scheduleScope || "personal");
+  if (["open-day-moves", "close-day-moves", "save-day-move", "delete-day-move"].includes(action)) return handleDayMoveAction(action, button);
   if (action === "export-schedule-csv") return exportScheduleCsv(button.dataset.scheduleScope || "personal");
   if (action === "open-local-schedule-ai-prompt") return openLocalScheduleAiPrompt();
   if (action === "open-local-schedule-batch-import") return openLocalScheduleBatchImport();

@@ -116,7 +116,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.95";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.96";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -2176,12 +2176,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void saveLocalSchedulePayload(String payload) {
-        if (payload == null || payload.isEmpty() || preferences == null) return;
+    private synchronized boolean saveLocalSchedulePayload(String payload) {
+        if (payload == null || payload.isEmpty() || preferences == null) return false;
         byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length > LOCAL_SCHEDULE_MAX_BYTES) return;
+        if (bytes.length > LOCAL_SCHEDULE_MAX_BYTES) return false;
         String key = localScheduleKey(payload);
-        if (key.isEmpty()) return;
+        if (key.isEmpty()) return false;
         File directory = localScheduleDirectory();
         File target = localScheduleFile(key);
         File temporary = new File(directory, key + ".tmp");
@@ -2191,13 +2191,14 @@ public class MainActivity extends Activity {
             output.getFD().sync();
         } catch (Exception ignored) {
             temporary.delete();
-            return;
+            return false;
         }
         if (!replaceLocalScheduleFile(temporary, target)) {
             temporary.delete();
-            return;
+            return false;
         }
         preferences.edit().putString(LOCAL_SCHEDULE_LAST_KEY, key).apply();
+        return true;
     }
 
     private void clearLocalSchedulePayload(String profileKey) {
@@ -5643,6 +5644,11 @@ public class MainActivity extends Activity {
         @android.webkit.JavascriptInterface
         public void saveLocalSchedule(String payload) {
             networkExecutor.execute(() -> saveLocalSchedulePayload(payload));
+        }
+
+        @android.webkit.JavascriptInterface
+        public boolean saveLocalScheduleConfirmed(String payload) {
+            return saveLocalSchedulePayload(payload);
         }
 
         @android.webkit.JavascriptInterface
