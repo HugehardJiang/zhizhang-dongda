@@ -1134,20 +1134,6 @@ function renderRefreshProgress() {
   else render();
 }
 
-function updatePersonalTermSelect() {
-  if (!elements.termSelect) return;
-  if (!state.terms.length) {
-    elements.termSelect.innerHTML = `<option value="">暂无缓存学期</option>`;
-    elements.termSelect.disabled = true;
-    return;
-  }
-  elements.termSelect.innerHTML = state.terms
-    .map((term) => `<option value="${escapeHtml(term.code)}">${escapeHtml(term.name)}</option>`)
-    .join("");
-  elements.termSelect.value = state.termCode;
-  elements.termSelect.disabled = false;
-}
-
 function readPersonalCacheEnvelope(studentId = "") {
   const api = globalThis.AndroidApi;
   if (typeof api?.cacheBeginRead !== "function") return api?.loadPersonalCache?.() || "";
@@ -5103,28 +5089,6 @@ function courseIncludedEntries(course) {
   }];
 }
 
-function normalizedScheduleCourses(rows) {
-  return (rows || []).map((row) => row?.raw ? row : mapCourse(row));
-}
-
-function personalScheduleRows(rows = state.data.courses) {
-  const sourceRows = Array.isArray(rows) ? rows : [];
-  const detailRows = Array.isArray(state.data.scheduleDetail) ? state.data.scheduleDetail : [];
-  // 没有独立明细时，列表仍可能包含未排课记录；只把能识别星期的
-  // 列表行作为临时网格来源，课程记录本身仍由 state.data.courses 展示。
-  if (!detailRows.length) return sourceRows.filter(hasSchedulePlacement);
-  const allowedIndexes = new Set(sourceRows
-    .map((course) => state.data.courses.indexOf(course))
-    .filter((index) => index >= 0));
-  return detailRows.filter((course) => {
-    // 个人课程列表会包含“未安排上课次”的记录；它们没有星期，不能
-    // 被当成一条网格排课，也不应计入“网格 N 条排课”的统计。
-    if (courseDayIndex(course) < 0) return false;
-    if (Number.isInteger(course?.sourceCourseIndex)) return allowedIndexes.has(course.sourceCourseIndex);
-    return sourceRows.some((source) => courseIdentityMatches(source, course));
-  });
-}
-
 function courseFieldAvailability(rows, scope = "personal") {
   const courses = normalizedScheduleCourses(rows);
   const allScheduleScope = String(scope).startsWith("all");
@@ -7127,87 +7091,6 @@ function overviewDurationText(minutes) {
   return rest ? `${hours}小时${rest}分钟` : `${hours}小时`;
 }
 
-function overviewTodayCourses(rows, date = new Date()) {
-  return filterCoursesForDate(rows, date).sort((left, right) => {
-    const leftClock = overviewClockMinutes(left.time);
-    const rightClock = overviewClockMinutes(right.time);
-    return (leftClock ?? 9999) - (rightClock ?? 9999)
-      || (courseSectionRange(left)?.start || 99) - (courseSectionRange(right)?.start || 99);
-  });
-}
-
-function overviewNextCourse(rows, date = new Date()) {
-  const info = academicDayInfo(date);
-  if (info.week === null) return { course: null, state: "unknown" };
-  const todayRows = overviewTodayCourses(rows, date);
-  const now = date.getHours() * 60 + date.getMinutes();
-  const active = todayRows.find((course) => {
-    const range = overviewClockRange(course);
-    return range.start !== null && range.end !== null && now >= range.start && now < range.end;
-  });
-  if (active) return { course: active, state: "active", elapsed: now - overviewClockRange(active).start };
-  const upcoming = todayRows.find((course) => {
-    const start = overviewClockRange(course).start;
-    return start !== null && start >= now;
-  });
-  if (upcoming) return { course: upcoming, state: "next", until: overviewClockRange(upcoming).start - now };
-  if (todayRows.length) {
-    const tomorrow = overviewTodayCourses(rows, addCalendarDays(date, 1));
-    return { course: null, state: "ended", tomorrow: tomorrow[0] || null };
-  }
-  return { course: null, state: "none" };
-}
-
-function renderOverviewPriority(next) {
-  if (next.state === "unknown") {
-    return `<div class="overview-week-unknown"><strong>教学周未设置</strong><p>课表中可能包含不同周次；设置第一周日期后，才能准确判断今天的课程。</p><div class="overview-inline-actions"><button class="button button-link" type="button" data-action="view-settings">设置学周 →</button><button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div></div>`;
-  }
-  if (next.state === "none") {
-    return `<div class="overview-no-class"><strong>今天没有课程</strong><span>可以安心安排自己的时间。</span><button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
-  }
-  if (next.state === "ended") {
-    const tomorrow = next.tomorrow;
-    const tomorrowMarkup = tomorrow
-      ? `<div class="overview-tomorrow"><span>明日第一节</span><strong>${escapeHtml(tomorrow.name || "未命名课程")}</strong><small>${escapeHtml([overviewCourseTime(tomorrow), overviewCoursePlace(tomorrow)].filter(Boolean).join(" · "))}</small></div>`
-      : `<div class="overview-tomorrow is-muted"><span>明日安排</span><small>暂未读取到已排课程</small></div>`;
-    return `<div class="overview-ended"><strong>今天的课程已结束</strong><span>今天的课程已全部结束。</span>${tomorrowMarkup}</div>`;
-  }
-  const course = next.course;
-  const range = overviewClockRange(course);
-  const isActive = next.state === "active";
-  const stateLabel = isActive ? "正在上课" : "下一节课";
-  const stateMeta = isActive ? `已开始 ${overviewDurationText(next.elapsed)}` : `还有 ${overviewDurationText(next.until)}`;
-  return `<div class="overview-priority-main ${isActive ? "is-active" : ""}"><div class="overview-priority-time"><strong>${escapeHtml(range.startText || overviewCourseTime(course))}</strong><span>${escapeHtml(range.endText ? `至 ${range.endText}` : overviewCourseMeta(course))}</span></div><div class="overview-priority-copy"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></div><div class="overview-priority-status"><strong>${escapeHtml(stateLabel)}</strong><span>${escapeHtml(stateMeta)}</span></div></div>`;
-}
-
-function renderOverview() {
-  const dateLabel = overviewDateLabel();
-  const scheduleRows = personalScheduleRows(state.data.courses || []);
-  const next = overviewNextCourse(scheduleRows);
-  const todayRows = dateLabel.weekNumber === null ? [] : overviewTodayCourses(scheduleRows);
-  const todayMarkup = dateLabel.weekNumber === null
-    ? `<div class="overview-today-unknown">设置第一周日期后，这里会按教学周显示今天的课程。</div>`
-    : todayRows.length
-      ? `<div class="overview-timeline">${todayRows.map((course) => {
-        const range = overviewClockRange(course);
-        const active = next.state === "active" && next.course === course;
-        return `<button class="overview-timeline-row ${courseGlassToneClass(course)} ${active ? "is-active" : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time">${escapeHtml(range.startText || overviewCourseTime(course))}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span></button>`;
-      }).join("")}</div>`
-      : `<div class="overview-empty">今天没有课程。<button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
-  const exams = sortExamRows(state.data.exams.filter((exam) => !/已结束/.test(exam.status))).slice(0, 3);
-  const examMarkup = exams.length
-    ? `<div class="overview-list">${exams.map((exam) => `<div class="overview-list-row"><span class="overview-list-date">${escapeHtml(exam.date || "—")}</span><span class="overview-list-copy"><strong>${escapeHtml(exam.name)}</strong><span>${escapeHtml([exam.time, exam.place, exam.seat ? `${exam.seat}号` : ""].filter(Boolean).join(" · ") || "信息待发布")}</span></span><span class="overview-list-status">${escapeHtml(exam.countdown)}</span></div>`).join("")}</div>`
-    : `<div class="overview-empty">暂无近期考试</div>`;
-  const scoreMarkup = state.data.scores.length
-    ? `<div class="overview-list">${state.data.scores.slice(0, 3).map((score) => `<div class="overview-score-row"><strong>${escapeHtml(score.name)}</strong><span class="${scoreSemanticClass(score)}">${escapeHtml(score.score || "—")}</span></div>`).join("")}</div>`
-    : `<div class="overview-empty">暂无成绩</div>`;
-  const cacheNote = personalCacheStatusText() ? `<p class="overview-cache-note">${escapeHtml(personalCacheStatusText())}</p>` : "";
-  const weekContext = dateLabel.weekNumber === null
-    ? `<span class="overview-week-context">教学周未设置 <button class="button button-link" type="button" data-action="view-settings">设置 →</button></span>`
-    : `<span class="overview-week-context">${escapeHtml(dateLabel.week)}</span>`;
-  return `<div class="overview-page">${sectionHeading("总览", "")}<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>当前安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天的课程</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}</div>`;
-}
-
 function renderOverviewUtilities() {
   return "";
 }
@@ -7309,14 +7192,6 @@ function renderScores() {
   return `<div>${sectionHeading("成绩", "") }<div class="panel"><div class="gpa-summary"><div><span>平均绩点</span><strong>${escapeHtml(state.data.gpa)}</strong></div><p>${escapeHtml(meta.reported !== "—" && meta.reported !== state.data.gpa ? `原系统累计总绩点 ${meta.reported}` : `已修 ${meta.total || state.data.scores.length} 门课程`)}</p></div><details class="gpa-details"><summary>计算规则</summary><p>${escapeHtml(gpaNote)}</p></details><div class="toolbar"><input id="scoreFilter" data-filter="scores" value="${escapeHtml(state.filters.scores)}" placeholder="搜索课程名、课程号或类别" /><span class="muted">${rows.length} / ${state.data.scores.length} 条</span></div>${table}${mobileList}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`)}${renderNewScoreReminderModal()}${renderScoreDetailModal()}</div>`;
 }
 
-function renderExams() {
-  const rows = sortExamRows(filterRows(state.data.exams, ["name", "code", "date", "time", "place", "seat", "teacher", "type", "status"], state.filters.exams));
-  const upcoming = sortExamRows(state.data.exams.filter((row) => !/已结束/.test(row.status)))[0];
-  const nextText = upcoming ? `${upcoming.name} · ${upcoming.date} · ${upcoming.countdown}` : state.data.exams.length ? "本学期考试已结束" : "暂无考试安排";
-  const cards = rows.length ? `<div class="exam-list">${rows.map((row) => `<article class="exam-card ${examStatusClass(row.status)}"><div class="exam-date-block"><strong>${escapeHtml(row.dateDay || "—")}</strong><span>${escapeHtml(row.dateMonth ? `${row.dateMonth}月` : "待定")}</span><em>${escapeHtml(row.weekday || "")}</em></div><div class="exam-card-body"><div class="exam-card-head"><div><h4>${escapeHtml(row.name)}</h4><p>${escapeHtml(row.code)}${row.teacher ? ` · ${escapeHtml(row.teacher)}` : ""}</p></div><div class="exam-card-head-right"><span class="tag exam-type">${escapeHtml(row.type || "考试")}</span><span class="tag ${examStatusClass(row.status)}">${escapeHtml(row.status)}</span></div></div><div class="exam-facts"><div class="exam-fact"><span>考试时间</span><strong>${escapeHtml(row.start && row.end ? `${row.start}–${row.end}` : row.time)}</strong>${row.session ? `<small>${escapeHtml(row.session)}</small>` : ""}</div><div class="exam-fact"><span>考场 / 地点</span><strong>${escapeHtml(row.place || "地点待发布")}</strong></div><div class="exam-fact"><span>座位</span><strong>${escapeHtml(row.seat ? `${row.seat}号` : "座位待发布")}</strong></div><div class="exam-fact"><span>提醒</span><strong>${escapeHtml(row.countdown)}</strong></div></div></div></article>`).join("")}</div>` : emptyCard(state.filters.exams ? "没有匹配的考试" : "当前没有已发布考试安排", state.filters.exams ? "换一个课程名、日期、考场、座位或状态关键词。" : "考试信息以运行 → 考务管理中的发布结果为准。", `<button class="button button-ghost" type="button" data-action="open-portal">打开考务管理</button>`);
-  return `<div>${sectionHeading("考试信息", "来自运行 → 考务管理；已自动解析考试日期、星期、起止时间、场次、考场、座位和考试状态。")}<div class="panel"><div class="exam-summary-grid"><div class="exam-summary-card"><span>本学期考试</span><strong>${escapeHtml(state.data.exams.length)}</strong><small>已发布安排</small></div><div class="exam-summary-card"><span>最近一场</span><strong>${escapeHtml(upcoming ? upcoming.date : "—")}</strong><small>${escapeHtml(nextText)}</small></div><div class="exam-summary-card"><span>显示范围</span><strong>${escapeHtml(rows.length)} / ${escapeHtml(state.data.exams.length)}</strong><small>${state.filters.exams ? "已按关键词筛选" : "按考试时间排序"}</small></div></div><div class="toolbar"><input data-filter="exams" value="${escapeHtml(state.filters.exams)}" placeholder="搜索课程、日期、考场、座位或状态" /><span class="muted">显示 ${rows.length} / ${state.data.exams.length} 项</span></div>${cards}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}</div>`;
-}
-
 // 新的信息架构：考试页把下一场考试提升到首屏，历史考试默认折叠。
 // 保留原来的字段解析和考试状态，只改变呈现层。
 function renderExams() {
@@ -7406,15 +7281,6 @@ function extractClockText(value) {
   return `${matches[0]}-${matches[1]}`;
 }
 
-function courseIndexForScope(course, scope = "personal") {
-  if (scope === "all-detail") return (state.allDetail?.courses || []).indexOf(course);
-  if (scope === "all") return state.allRows.indexOf(course?.raw || course);
-  if (course?.courseId) return state.data.courses.findIndex(row => row.courseId === course.courseId);
-  return Number.isInteger(course?.sourceCourseIndex) && course.sourceCourseIndex >= 0
-    ? course.sourceCourseIndex
-    : state.data.courses.indexOf(course);
-}
-
 function courseRowsForScope(scope = "personal") {
   if (scope === "all-detail") return state.allDetail?.courses || [];
   if (scope === "all") return normalizedScheduleCourses(state.allRows.filter(isCourseDetailRow));
@@ -7430,22 +7296,6 @@ function courseAtScopeIndex(scope, index) {
     return state.data.courses[index] || state.data.scheduleDetail.find((course) => course.sourceCourseIndex === index) || null;
   }
   return courseRowsForScope(scope)[index] || null;
-}
-
-function courseActionAttributes(course, scope = "personal") {
-  const index = courseIndexForScope(course, scope);
-  const detailIndex = scope === "personal" ? state.data.scheduleDetail.indexOf(course) : -1;
-  if (index < 0 && detailIndex < 0) return "";
-  const sourceIndex = index >= 0 ? index : course.sourceCourseIndex;
-  return `type="button" data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
-}
-
-function courseDataAttributes(course, scope = "personal") {
-  const index = courseIndexForScope(course, scope);
-  const detailIndex = scope === "personal" ? state.data.scheduleDetail.indexOf(course) : -1;
-  if (index < 0 && detailIndex < 0) return "";
-  const sourceIndex = index >= 0 ? index : course.sourceCourseIndex;
-  return `data-action="show-course" data-course-scope="${scope}" data-course-index="${sourceIndex}"${detailIndex >= 0 ? ` data-course-detail-index="${detailIndex}"` : ""}`;
 }
 
 function localScheduleSourceBadge(itemOrRow) {
@@ -7464,15 +7314,6 @@ function courseGlassToneClass(course) {
   let hash = 0;
   for (const letter of identity) hash = (Math.imul(hash, 31) + letter.codePointAt(0)) >>> 0;
   return `course-glass-color-${palette[hash % palette.length]}`;
-}
-
-function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
-  const clockText = extractClockText(course.time) || localScheduleClockText(course);
-  const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
-  const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
-  const className = ["course-chip", extraClass, course.source === "local" ? "local-schedule-chip" : ""].filter(Boolean).join(" ");
-  const badge = (course.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
-  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span class="course-room">${escapeHtml(courseLocationText(course) || "地点待定")}</span>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
 }
 
 function localScheduleFilterText(row) {
@@ -7722,17 +7563,17 @@ function renderOverview() {
   return `<div class="overview-page">${sectionHeading("总览", "") }${renderNativeCampusCodeHint()}<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>当前安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今日时间线</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}${localNote}</div>${renderCourseDetailModal()}`;
 }
 
-function renderLocalScheduleDetailModal(row) {
+function renderLocalScheduleDetailModal(row, { beforeGrid = "" } = {}) {
   const item = (state.localSchedule.items || []).find((candidate) => candidate.id === row.localId);
   if (!item) return "";
   const display = localScheduleItemDisplayText(item);
   const scheduleDetails = item.type === "event"
     ? [["日期", localScheduleDateText(item.event.date)], ["时间", item.event.allDay ? "全天" : localScheduleClockText(item) || "时间待设置"], ["对应节次", localScheduleSectionText(item) || "未指定"]]
     : [["学期", item.termName || item.termCode || "—"], ["周次", formatWeeksValue(item.course.weekNumbers.join(",")) || "—"], ["星期", localScheduleWeekdayText(item.course.weekdayIndex)], ["节次", localScheduleSectionText(item) || "—"], ["时间", localScheduleClockText(item) || "—"]];
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-detail-modal" role="dialog" aria-modal="true" aria-label="自定义安排详情"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${escapeHtml(item.title || "未命名安排")}</h3><p>${localScheduleSourceBadge(item)} ${item.enabled ? "" : "已停用"}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid">${scheduleDetails.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}<div><span>地点</span><strong>${escapeHtml(item.location || "—")}</strong></div>${item.teacher ? `<div><span>教师</span><strong>${escapeHtml(item.teacher)}</strong></div>` : ""}</div>${item.note ? `<div class="detail-copy"><span>备注</span><p>${escapeHtml(item.note)}</p></div>` : ""}<div class="local-detail-actions"><button class="button button-primary" type="button" data-action="edit-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">编辑</button><button class="button button-ghost" type="button" data-action="copy-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">复制</button><button class="button button-danger" type="button" data-action="delete-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">删除</button></div></section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-detail-modal" role="dialog" aria-modal="true" aria-label="自定义安排详情"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${escapeHtml(item.title || "未命名安排")}</h3><p>${localScheduleSourceBadge(item)} ${item.enabled ? "" : "已停用"}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div>${beforeGrid}<div class="detail-grid">${scheduleDetails.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}<div><span>地点</span><strong>${escapeHtml(item.location || "—")}</strong></div>${item.teacher ? `<div><span>教师</span><strong>${escapeHtml(item.teacher)}</strong></div>` : ""}</div>${item.note ? `<div class="detail-copy"><span>备注</span><p>${escapeHtml(item.note)}</p></div>` : ""}<div class="local-detail-actions"><button class="button button-primary" type="button" data-action="edit-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">编辑</button><button class="button button-ghost" type="button" data-action="copy-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">复制</button><button class="button button-danger" type="button" data-action="delete-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">删除</button></div></section></div>`;
 }
 
-function renderCourseDetailWithLocalOverlay(course = state.selectedCourse) {
+function renderCourseDetailWithLocalOverlay(course = state.selectedCourse, { beforeGrid = "" } = {}) {
   if (course?.source === "local") return renderLocalScheduleDetailModal(course);
   if (!course) return "";
   const scope = state.selectedCourseScope || "personal";
@@ -7750,7 +7591,7 @@ function renderCourseDetailWithLocalOverlay(course = state.selectedCourse) {
   const sportDetails = sport
     ? `<div class="course-included-panel sport-project-panel"><div class="sport-project-head"><span>原系统体育课“列表”</span>${sportEntries.length ? `<em>${escapeHtml(`${sportEntries.length} 个项目/教学班`)}</em>` : ""}</div>${course.sportProjectLoading ? `<p class="sport-project-status">正在读取原系统弹窗中的项目名称、教师和排课信息…</p>` : ""}${course.sportProjectError ? `<p class="sport-project-status sport-project-error">${escapeHtml(course.sportProjectError)}</p>` : ""}${sportEntries.length ? `<ul>${sportEntries.map((entry) => { const entryPlace = courseLocationText(entry, true); return `<li><strong>${escapeHtml(entry.project || entry.name || entry.text || "体育课程")}</strong><span>${escapeHtml([entry.name !== entry.project && entry.name ? `课程：${entry.name}` : "", entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`, entry.weeks, entry.weekday, entry.section, entry.teacher && `教师：${entry.teacher}`, entryPlace && `地点：${entryPlace}`].filter(Boolean).join(" ｜ "))}</span></li>`; }).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统项目列表；原系统没有提供的字段会自动留空。</small></div>`
     : "";
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(coursePlaceText || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
+  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div>${beforeGrid}<div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(coursePlaceText || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
 }
 
 function compactTermName(value) {
@@ -7787,8 +7628,7 @@ function dayMoveDetail(course) {
 }
 
 function personalScheduleActions() {
-  const exportActions = scheduleExportActions("personal")
-    .replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "");
+  const exportActions = scheduleExportButtons("personal");
   return `<div class="schedule-primary-actions" aria-label="课表操作"><button class="button button-primary" type="button" data-action="open-local-editor">+ 添加</button><button class="button button-soft" type="button" data-action="open-day-moves">调休${dayMovesForTerm().length ? `（${dayMovesForTerm().length}）` : ""}</button><details class="schedule-tools"><summary class="button button-ghost">课表工具</summary><div class="schedule-tools-panel"><button class="button button-ghost" type="button" data-action="open-local-manager">管理自定义安排</button>${exportActions}${localScheduleTransferActions()}</div></details></div>`;
 }
 
@@ -8114,40 +7954,6 @@ function updatePersonalTermSelect() {
   elements.termSelect.disabled = false;
 }
 
-function scheduleExportRows(scope = "personal") {
-  const source = scope === "all-detail"
-    ? (state.allDetail?.courses || [])
-    : mergedPersonalScheduleRows(state.data.courses || []);
-  const normalized = normalizedScheduleCourses(source);
-  const expanded = scope === "all-detail" ? normalized.flatMap((course) => expandMappedCourse(course)) : normalized;
-  const seen = new Set();
-  return expanded.filter((course) => {
-    const range = courseSectionRange(course);
-    const key = [course.source || "school", course.localId || course.code, course.name, courseDayIndex(course), range ? `${range.start}-${range.end}` : course.section, [...courseWeekNumbers(course)].sort((a, b) => a - b).join(","), course.localDate, course.teacher, course.campus, course.location].map((value) => String(value ?? "").trim()).join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function scheduleExportFilteredRows(rows, selectedWeek) {
-  if (selectedWeek === "all") return rows;
-  const week = Number(selectedWeek);
-  if (!Number.isInteger(week) || week <= 0) return rows;
-  return (rows || []).filter((course) => {
-    if (course.dayMoveExcludedDates?.length) {
-      const date = scheduleWeekDateForDay(week, courseDayIndex(course));
-      if (date && course.dayMoveExcludedDates.includes(localScheduleDate(date))) return false;
-    }
-    if (course.localDate && normalizeCalendarDate(course.localDate)) {
-      const info = academicDayInfo(normalizeCalendarDate(course.localDate));
-      return info.week === null || info.week === week;
-    }
-    const weeks = courseWeekNumbers(course);
-    return !weeks.size || weeks.has(week);
-  });
-}
-
 function scheduleCsvSchoolRows() {
   const courses = Array.isArray(state.data.courses) ? state.data.courses : [];
   const source = schoolPersonalScheduleRows(courses);
@@ -8222,27 +8028,6 @@ function localExportScheduleCsv(scope = "personal") {
   const saved = downloadScheduleCsv(buildScheduleCsv(entries), scheduleCsvFileName(scope));
   if (saved && entries.skippedCount) setNotice(`CSV 已导出；${entries.skippedCount} 条仅含具体时间或缺少教学周/节次的一次性日程无法用 WakeUp 课程格式表示，因此未包含。`, "success");
   return saved;
-}
-
-function scheduleExportCourseBadge(course, scope = "personal") {
-  if (course?.source === "local") return course.localType === "event" ? "自定义日程" : "自定义课程";
-  if (scope === "personal") return scheduleExportIsPracticeCourse(course) ? "实验实践课程" : "普通课程";
-  return scheduleExportCategoryLabel(course);
-}
-
-function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
-  const range = courseSectionRange(course);
-  const section = range ? (range.start === range.end ? `第${range.start}节` : `第${range.start}-${range.end}节`) : "";
-  const clock = courseClockText(course);
-  const weekText = selectedWeek === "all" ? (course.weeks || (course.localDate ? localScheduleDateText(course.localDate) : "周次待识别")) : `第${selectedWeek}周`;
-  return {
-    title: course.name || "未命名安排",
-    schedule: [weekText, course.weekday || (course.localDate ? localScheduleDateText(course.localDate) : "星期待识别"), section, clock || (course.localAllDay ? "全天" : "")].filter(Boolean).join(" · "),
-    teacher: course.teacher || (course.source === "local" ? "自定义安排" : "教师待识别"),
-    location: courseLocationText(course) || "地点待识别",
-    code: course.source === "local" ? "本地安排" : course.code || "无课程号",
-    tags: [courseAssessmentValue(course), courseRequirementValue(course), course.source === "local" ? (course.localType === "event" ? "日程" : "自定义") : scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
-  };
 }
 
 function localScheduleInputValue(id) {
@@ -8482,29 +8267,23 @@ async function clearAllLocalSchedule() {
   render();
 }
 
-elements.content.addEventListener("click", async (event) => {
-  const button = event.target.closest?.("[data-action]");
-  if (!button) return;
-  const action = button.dataset.action;
-  if (!["open-local-editor", "open-local-manager", "close-local-editor", "local-editor-type", "save-local-schedule", "close-local-conflict", "resolve-local-conflict", "show-local-schedule", "edit-local-schedule", "copy-local-schedule", "delete-local-schedule", "toggle-local-schedule", "restore-hidden-school", "close-local-manager", "clear-local-schedule"].includes(action)) return;
-  event.stopImmediatePropagation?.();
-  if (action === "open-local-editor") return openLocalScheduleEditor();
-  if (action === "open-local-manager") {
+// 本地课表的点击动作；由内容区唯一的 click 分发器（见 contentActionHandlers）调用。
+const localScheduleActionHandlers = {
+  "open-local-editor": () => openLocalScheduleEditor(),
+  "open-local-manager": () => {
     state.localSchedule.managerOpen = true;
     state.localSchedule.editorOpen = false;
     state.localSchedule.conflict = null;
     render();
-    return;
-  }
-  if (action === "close-local-editor") {
+  },
+  "close-local-editor": () => {
     state.localSchedule.editorOpen = false;
     state.localSchedule.editingId = "";
     state.localSchedule.draft = null;
     state.localSchedule.editorError = "";
     render();
-    return;
-  }
-  if (action === "local-editor-type") {
+  },
+  "local-editor-type": (button) => {
     const nextType = button.dataset.localType === "event" ? "event" : "course";
     const previous = state.localSchedule.draft || localScheduleDraftFromItem(null, nextType);
     const next = localScheduleDraftFromItem(null, nextType);
@@ -8520,40 +8299,42 @@ elements.content.addEventListener("click", async (event) => {
     state.localSchedule.draft = next;
     state.localSchedule.editorError = "";
     render();
-    return;
-  }
-  if (action === "save-local-schedule") return saveLocalScheduleFromEditor();
-  if (action === "close-local-conflict") {
+  },
+  "save-local-schedule": () => saveLocalScheduleFromEditor(),
+  "close-local-conflict": () => {
     state.localSchedule.conflict = null;
     render();
-    return;
-  }
-  if (action === "resolve-local-conflict") {
+  },
+  "resolve-local-conflict": async (button) => {
     const choice = button.dataset.conflictChoice || "both";
     const candidate = state.localSchedule.conflict?.candidate;
     if (candidate) await commitLocalSchedule(candidate, choice);
-    return;
-  }
-  if (action === "show-local-schedule") {
-    const item = (state.localSchedule.items || []).find((candidate) => candidate.id === button.dataset.localScheduleId);
+  },
+  "show-local-schedule": (button) => {
+    const item = localScheduleItemForButton(button);
     if (!item) return;
     state.selectedCourse = resolveScheduleItemFromAction(button) || localScheduleItemToCourseRow(item);
     state.selectedCourseScope = "personal";
     state.localSchedule.managerOpen = false;
     render();
-    return;
-  }
-  const item = (state.localSchedule.items || []).find((candidate) => candidate.id === button.dataset.localScheduleId);
-  if (action === "edit-local-schedule" && item) return openLocalScheduleEditor(item, item.type);
-  if (action === "copy-local-schedule" && item) {
+  },
+  "edit-local-schedule": (button) => {
+    const item = localScheduleItemForButton(button);
+    if (item) return openLocalScheduleEditor(item, item.type);
+  },
+  "copy-local-schedule": (button) => {
+    const item = localScheduleItemForButton(button);
+    if (!item) return;
     const copy = localScheduleDraftFromItem(item, item.type);
     copy.id = localScheduleId();
     copy.title = `${copy.title}（副本）`;
     copy.createdAt = localScheduleNow();
     copy.updatedAt = copy.createdAt;
     return openLocalScheduleEditor(copy, copy.type);
-  }
-  if (action === "delete-local-schedule" && item) {
+  },
+  "delete-local-schedule": async (button) => {
+    const item = localScheduleItemForButton(button);
+    if (!item) return;
     const confirmed = typeof window.confirm === "function" ? window.confirm(`删除“${item.title}”？\n删除后无法自动恢复。`) : true;
     if (!confirmed) return;
     state.localSchedule.items = state.localSchedule.items.filter((candidate) => candidate.id !== item.id);
@@ -8562,42 +8343,34 @@ elements.content.addEventListener("click", async (event) => {
     await persistLocalSchedule();
     setNotice(`已删除“${item.title}”。`, "success");
     render();
-    return;
-  }
-  if (action === "toggle-local-schedule" && item) {
+  },
+  "toggle-local-schedule": async (button) => {
+    const item = localScheduleItemForButton(button);
+    if (!item) return;
     item.enabled = !item.enabled;
     item.updatedAt = localScheduleNow();
     await persistLocalSchedule();
     setNotice(item.enabled ? "自定义安排已启用。" : "自定义安排已停用。", "success");
     render();
-    return;
-  }
-  if (action === "restore-hidden-school") {
+  },
+  "restore-hidden-school": async (button) => {
     const key = button.dataset.hiddenSchoolKey || "";
     const termCode = button.dataset.hiddenSchoolTerm || "";
     state.localSchedule.hiddenSchoolEntries = state.localSchedule.hiddenSchoolEntries.filter((entry) => entry.key !== key || (termCode && entry.termCode !== termCode));
     await persistLocalSchedule();
     setNotice("已恢复显示这条教务排课。", "success");
     render();
-    return;
-  }
-  if (action === "close-local-manager") {
+  },
+  "close-local-manager": () => {
     state.localSchedule.managerOpen = false;
     render();
-    return;
-  }
-  if (action === "clear-local-schedule") return clearAllLocalSchedule();
-});
+  },
+  "clear-local-schedule": () => clearAllLocalSchedule()
+};
 
-elements.content.addEventListener("change", (event) => {
-  if (event.target.id !== "localManagerFilter") return;
-  event.stopImmediatePropagation?.();
-  state.localSchedule.filter = event.target.value || "all";
-  render();
-});
-
-
-
+function localScheduleItemForButton(button) {
+  return (state.localSchedule.items || []).find((candidate) => candidate.id === button.dataset.localScheduleId);
+}
 
 function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
   const clockText = extractClockText(course.time) || localScheduleClockText(course);
@@ -8678,24 +8451,6 @@ function academicDayInfo(date) {
     week: diffDays >= 0 ? Math.floor(diffDays / 7) + 1 : null,
     diffDays
   };
-}
-
-function filterCoursesForDate(rows, date) {
-  const info = academicDayInfo(date);
-  // 没有第一周日期时无法区分同一星期几的不同周次；宁可明确提示设置，
-  // 也不能把整学期同一天的课程误当成“今天”的课程。
-  if (info.week === null) return [];
-  return rows
-    .filter((course) => courseDayIndex(course) === info.weekdayIndex)
-    .filter((course) => {
-      const weeks = courseWeekNumbers(course);
-      return !weeks.size || weeks.has(info.week);
-    })
-    .sort((left, right) => {
-      const leftSection = courseSectionRange(left)?.start || 99;
-      const rightSection = courseSectionRange(right)?.start || 99;
-      return leftSection - rightSection || String(left.name).localeCompare(String(right.name), "zh-CN");
-    });
 }
 
 function scheduleWeekValue(scope = "personal") {
@@ -9044,32 +8799,6 @@ function scheduleSectionsOverlap(left, right) {
   };
 }
 
-function compareCourseScheduleOverlap(left, right) {
-  const leftDay = courseDayIndex(left);
-  const rightDay = courseDayIndex(right);
-  const dayKnown = leftDay >= 0 && rightDay >= 0;
-  if (dayKnown && leftDay !== rightDay) return { status: "none", reason: "weekday-separated", reasons: [] };
-
-  const leftWeeks = courseWeekNumbers(left);
-  const rightWeeks = courseWeekNumbers(right);
-  const weeksKnown = leftWeeks.size > 0 && rightWeeks.size > 0;
-  if (weeksKnown && ![...leftWeeks].some((week) => rightWeeks.has(week))) {
-    return { status: "none", reason: "week-separated", reasons: [] };
-  }
-
-  const section = scheduleSectionsOverlap(left, right);
-  if (section.status === "none") return { status: "none", reason: section.reason, reasons: [] };
-  const reasons = [];
-  if (!dayKnown) reasons.push("星期");
-  if (!weeksKnown) reasons.push("周次");
-  reasons.push(...(section.reasons || []));
-  return {
-    status: dayKnown && weeksKnown && section.status === "confirmed" ? "confirmed" : "possible",
-    reason: section.reason,
-    reasons
-  };
-}
-
 function courseTransferScheduleText(course) {
   const range = courseSectionRange(course);
   const section = range ? courseSectionLabel(course) : displayValue(course?.section, "节次待识别");
@@ -9231,35 +8960,6 @@ function renderScheduleGrid(rows, scope = "personal") {
   return `${scheduleDensityControls()}<div class="schedule-grid-scroll density-${scheduleGridDensity()}" data-schedule-scope="${escapeHtml(scope)}"><div class="schedule-grid${transitionClass}" style="--section-count:${sectionCount}">${header}${labels}${tracks}</div></div>${unplacedBlock}`;
 }
 
-function scheduleExportRows(scope = "personal") {
-  const source = scope === "all-detail"
-    ? (state.allDetail?.courses || [])
-    : personalScheduleRows(state.data.courses || []);
-  const normalized = normalizedScheduleCourses(source);
-  // 全校详情接口有时把同一门课的多个排课段放在一条记录里；导出时先拆成
-  // 独立课程卡片，避免一个卡片内部再出现难以阅读的复合时间地点串。
-  const expanded = scope === "all-detail"
-    ? normalized.flatMap((course) => expandMappedCourse(course))
-    : normalized;
-  const seen = new Set();
-  return expanded.filter((course) => {
-    const range = courseSectionRange(course);
-    const key = [
-      course.code,
-      course.name,
-      courseDayIndex(course),
-      range ? `${range.start}-${range.end}` : course.section,
-      [...courseWeekNumbers(course)].sort((left, right) => left - right).join(","),
-      course.teacher,
-      course.campus,
-      course.location
-    ].map((value) => String(value ?? "").trim()).join("|");
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 const SCHEDULE_CSV_HEADERS = ["课程名称", "星期", "开始节数", "结束节数", "老师", "地点", "周数"];
 
 function scheduleCsvSourceRows(scope = "personal") {
@@ -9300,50 +9000,6 @@ function scheduleCsvWeekText(course) {
   const canonical = candidates.map((value) => canonicalWeeksText(value)).find(Boolean);
   if (canonical) return canonical;
   return candidates.map((value) => formatWeeksValue(value)).find(Boolean) || "";
-}
-
-function scheduleCsvEntries(scope = "personal") {
-  const seen = new Set();
-  return scheduleCsvMappedRows(scope)
-    .map((course) => {
-      const name = displayValue(course?.name, "");
-      const dayIndex = courseDayIndex(course);
-      const range = courseSectionRange(course);
-      const teacher = hasDisplayValue(course?.teacher) ? String(course.teacher).trim() : "";
-      const location = courseLocationText(course);
-      const entry = {
-        courseName: name,
-        weekday: dayIndex >= 0 ? String(dayIndex === 0 ? 7 : dayIndex) : "",
-        startSection: range ? String(range.start) : "",
-        endSection: range ? String(range.end) : "",
-        teacher,
-        location,
-        weekText: scheduleCsvWeekText(course)
-      };
-      return entry;
-    })
-    .filter((entry) => entry.courseName)
-    .filter((entry) => {
-      const key = [
-        entry.courseName,
-        entry.weekday,
-        entry.startSection,
-        entry.endSection,
-        entry.teacher,
-        entry.location,
-        entry.weekText
-      ].join("\u001f");
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-}
-
-function scheduleCsvHasRows(scope = "personal") {
-  return scheduleCsvSourceRows(scope).some((row) => {
-    const name = row?.name || valueOf(row, ["courseName", "KCM", "KCMC", "course", "name"], "");
-    return hasDisplayValue(name);
-  });
 }
 
 function scheduleCsvEscape(value) {
@@ -9423,30 +9079,15 @@ function downloadScheduleCsv(csv, fileName) {
   }
 }
 
-function exportScheduleCsv(scope = "personal") {
-  const entries = scheduleCsvEntries(scope);
-  if (!entries.length) {
-    setNotice("当前没有可导出的课表记录，请先查询或刷新课表。", "error");
-    return false;
-  }
-  return downloadScheduleCsv(buildScheduleCsv(entries), scheduleCsvFileName(scope));
-}
-
-function scheduleExportFilteredRows(rows, selectedWeek) {
-  if (selectedWeek === "all") return rows;
-  const week = Number(selectedWeek);
-  if (!Number.isInteger(week) || week <= 0) return rows;
-  return rows.filter((course) => {
-    const weeks = courseWeekNumbers(course);
-    return !weeks.size || weeks.has(week);
-  });
-}
-
-function scheduleExportActions(scope, backAction = "") {
+function scheduleExportButtons(scope, backAction = "") {
   const csvAction = scheduleCsvHasRows(scope)
     ? `<button class="button button-ghost button-small" type="button" data-action="export-schedule-csv" data-schedule-scope="${scope}">导出 CSV</button>`
     : "";
-  return `<div class="button-row schedule-export-action-row"><button class="button button-primary button-small" type="button" data-action="open-schedule-image-export" data-schedule-scope="${scope}">导出图片</button>${csvAction}${backAction}</div>`;
+  return `<button class="button button-primary button-small" type="button" data-action="open-schedule-image-export" data-schedule-scope="${scope}">导出图片</button>${csvAction}${backAction}`;
+}
+
+function scheduleExportActions(scope, backAction = "") {
+  return `<div class="button-row schedule-export-action-row">${scheduleExportButtons(scope, backAction)}</div>`;
 }
 
 function renderScheduleExportModal() {
@@ -9571,14 +9212,6 @@ function scheduleExportCourseTheme(course, scope = "personal") {
   const nonZero = ranked.filter((item) => item[1] > 0);
   if (nonZero.length > 1 && nonZero[0][1] === nonZero[1][1]) return "mixed";
   return ranked[0][0];
-}
-
-function scheduleExportCourseBadge(course, scope = "personal") {
-  if (scope === "personal") return scheduleExportIsPracticeCourse(course) ? "实验实践课程" : "普通课程";
-  // 全校课表的徽标只展示原系统下方课程列表返回的“课程类别”。
-  // 如果接口确实没有该字段，就隐藏徽标，不用课程名称或考核方式推测，
-  // 避免把“专业基础课”等类别误写成“专业必修课”。
-  return scheduleExportCategoryLabel(course);
 }
 
 function scheduleExportPalette(course, scope = "personal") {
@@ -9712,21 +9345,6 @@ function makeScheduleExportGroup(courses, range, title) {
     name: title || scheduleExportGroupTitle("同一时段", courses),
     section,
     exportEntries: entries
-  };
-}
-
-function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
-  const range = courseSectionRange(course);
-  const section = courseSectionLabel(course) || (range ? `第${range.start}-${range.end}节` : "节次待识别");
-  const clock = extractClockText(course.time);
-  const weekText = selectedWeek === "all" ? (course.weeks || "周次待识别") : `第${selectedWeek}周`;
-  return {
-    title: course.name || "未命名课程",
-    schedule: [weekText, course.weekday || "星期待识别", section, clock].filter(Boolean).join(" · "),
-    teacher: course.teacher || "教师待识别",
-    location: courseLocationText(course) || "地点待识别",
-    code: course.code || "无课程号",
-    tags: [courseAssessmentValue(course), courseRequirementValue(course), scope === "all-detail" ? courseCategoryValue(course) : ""].filter(Boolean).join(" · ")
   };
 }
 
@@ -10484,185 +10102,9 @@ function analyzeCourseImport() {
   render();
 }
 
-function renderCourseDetailModal() {
-  const course = state.selectedCourse;
-  if (!course) return "";
-  const scope = state.selectedCourseScope || "personal";
-  const rows = courseRowsForScope(scope);
-  const availability = courseFieldAvailability(rows, scope);
-  const rawText = course.raw && typeof course.raw === "object" ? JSON.stringify(course.raw, null, 2) : "";
-  const sport = courseIsSport(course);
-  const catalogCode = courseCatalogCodeValue(course);
-  const sportEntries = sport && !course.sportProjectLoading ? courseIncludedEntries(course) : [];
-  const coursePlaceText = courseLocationText(course, true);
-  const catalogField = sport && catalogCode ? `<div><span>课程代码</span><strong>${escapeHtml(catalogCode)}</strong></div>` : "";
-  const assessmentField = availability.assessment ? `<div><span>考核方式</span><strong>${escapeHtml(courseAssessmentValue(course) || "—")}</strong></div>` : "";
-  const requirementField = availability.requirement ? `<div><span>课程性质</span><strong>${escapeHtml(courseRequirementValue(course) || "—")}</strong></div>` : "";
-  const categoryField = availability.category ? `<div><span>课程类别</span><strong>${escapeHtml(courseCategoryValue(course) || "—")}</strong></div>` : "";
-  const sportDetails = sport
-    ? `<div class="course-included-panel sport-project-panel"><div class="sport-project-head"><span>原系统体育课“列表”</span>${sportEntries.length ? `<em>${escapeHtml(`${sportEntries.length} 个项目/教学班`)}</em>` : ""}</div>${course.sportProjectLoading ? `<p class="sport-project-status">正在读取原系统弹窗中的项目名称、教师和排课信息…</p>` : ""}${course.sportProjectError ? `<p class="sport-project-status sport-project-error">${escapeHtml(course.sportProjectError)}</p>` : ""}${sportEntries.length ? `<ul>${sportEntries.map((entry) => {
-      const title = entry.project || entry.name || entry.text || "体育课程";
-      const courseLabel = entry.project && entry.name && entry.name !== entry.project ? `课程：${entry.name}` : "";
-      const codes = [entry.catalogCode && `课程号 ${entry.catalogCode}`, entry.teachingCode && `教学班 ${entry.teachingCode}`].filter(Boolean).join(" · ");
-      const schedule = [entry.weeks, entry.weekday, entry.section].filter(Boolean).join(" · ");
-      const entryPlaceText = courseLocationText(entry, true);
-      const teacherPlace = [entry.teacher && `教师：${entry.teacher}`, entryPlaceText && `地点：${entryPlaceText}`].filter(Boolean).join(" · ");
-      const labels = [courseLabel, codes, schedule, teacherPlace, entry.assessment, entry.requirement].filter(Boolean).join(" ｜ ");
-      return `<li><strong>${escapeHtml(title)}</strong>${labels ? `<span>${escapeHtml(labels)}</span>` : ""}</li>`;
-    }).join("")}</ul>` : ""}<small>点击体育课程名称后读取原系统 cxpxbxx.do 返回的项目名称、教学班、教师、周次/节次及考核方式；原系统没有提供的字段会自动留空。</small></div>`
-    : "";
-  return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(coursePlaceText || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
-}
-
 function renderScheduleDisplayControls() {
   const mode = state.scheduleDisplay.personal === "week" ? "week" : "days";
   return `<div class="schedule-display-switch" role="tablist" aria-label="课表视图"><span>课表视图</span><button class="button button-small ${mode === "days" ? "button-primary" : "button-ghost"}" type="button" data-action="schedule-days">今天 / 明天</button><button class="button button-small ${mode === "week" ? "button-primary" : "button-ghost"}" type="button" data-action="schedule-week">周表</button></div>`;
-}
-
-function renderDailySchedule(rows, scope = "personal") {
-  const availability = courseFieldAvailability(rows, scope);
-  const today = localDateOnly(new Date());
-  const dates = [today, addCalendarDays(today, 1)];
-  const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
-  const calendarHint = firstWeekDate
-    ? `第一周从 ${calendarDateText(firstWeekDate)}（周日）开始，课程已按学周过滤。`
-    : "尚未设置第一周的周日，无法准确判断今天和明天的课程；请先设置教学周。";
-  const cards = dates.map((date, index) => {
-    const info = academicDayInfo(date);
-    const courses = filterCoursesForDate(rows, date);
-    const period = index === 0 ? "今天" : "明天";
-    const weekText = info.week ? `第${info.week}周` : "教学周未设置";
-    const courseMarkup = info.week === null
-      ? `<div class="daily-empty"><strong>教学周未设置</strong><span>设置第一周周日后才能准确显示这天的课程。</span><button class="button button-link" type="button" data-action="view-settings">设置学周 →</button></div>`
-      : courses.length
-      ? courses.map((course) => {
-        const sectionText = [courseSectionLabel(course), extractClockText(course.time)].filter(Boolean).join(" · ") || "节次待识别";
-        const placeText = courseLocationText(course) || "地点待识别";
-        return `<button class="daily-course-card" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><div class="daily-course-title"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(sectionText)}</span></div><div class="daily-course-tags">${courseTagsMarkup(course, availability)}</div><p class="daily-course-teacher">${escapeHtml(course.teacher || "教师待识别")}</p><p class="daily-course-location">${escapeHtml(placeText)}</p><small class="daily-course-meta">${escapeHtml(course.weeks || "周次待识别")} · ${escapeHtml(course.code || "无课程号")}</small></button>`;
-      }).join("")
-      : `<div class="daily-empty"><strong>这天没有课程</strong><span>可以安心安排自己的时间</span></div>`;
-    return `<section class="daily-day-card ${index === 0 ? "is-today" : ""}"><header class="daily-day-header"><div><span class="daily-day-badge">${period}</span><h4>${SUNDAY_FIRST_DAY_NAMES[info.weekdayIndex]} · ${calendarDateText(date)}</h4></div><span class="tag ${info.week ? "pass" : "warn"}">${weekText}</span></header><div class="daily-course-list">${courseMarkup}</div></section>`;
-  }).join("");
-  return `<div class="daily-schedule"><div class="daily-schedule-note"><span class="hero-dot" aria-hidden="true"></span><span>${escapeHtml(calendarHint)}</span><button class="button button-ghost button-small" type="button" data-action="view-settings">设置学周</button></div><div class="daily-schedule-grid">${cards}</div></div>`;
-}
-
-function renderSettings() {
-  const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
-  const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
-  const currentText = firstWeekDate
-    ? `${calendarDateText(firstWeekDate)} · ${SUNDAY_FIRST_DAY_NAMES[firstWeekDate.getDay()]}`
-    : "尚未设置";
-  const configuredLoginMethod = IS_ANDROID_APP
-    ? androidLoginMethod()
-    : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
-  const loginSettings = `<div class="settings-divider"></div><div class="settings-intro settings-login-intro"><span class="eyebrow">LOGIN</span><h3>教务系统默认登录方式</h3><p>账号密码和微信扫码登录仍然都保留。下次打开原系统登录页时，${IS_ANDROID_APP ? "手机端会优先显示这里选择的方式；微信扫码会先保存二维码图片，再打开微信供你从相册扫描" : "电脑端会自动切到这里选择的原系统标签"}。</p></div><label class="settings-field"><span>默认方式</span><select id="loginMethodSelect"><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>账号密码登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信扫码登录</option></select><small>应用不会保存账号、密码或验证码。</small></label>`;
-  const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
-  const cacheSettings = IS_ANDROID_APP
-    ? `<div class="settings-divider"></div><div class="settings-intro settings-login-intro"><span class="eyebrow">OFFLINE CACHE</span><h3>个人教务数据缓存</h3><p>${escapeHtml(cacheStatus)}。成绩、考试、个人课表和总览会在成功读取后自动更新；教务系统暂时不可用时，应用仍会展示上次缓存。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私说明</strong><span>查询缓存按学号隔离，不包含密码、验证码、Cookie 或令牌；Android 内置登录凭据另行由 Keystore 加密保存。</span></div>`
-    : "";
-  return `<div>${sectionHeading("设置", "为手机端课表设置学周起点。东北大学每周从周日开始，请选择第一周的周日。", `<button class="button button-ghost" type="button" data-action="view-personal">返回课表</button>`)}<div class="panel settings-panel"><div class="settings-intro"><span class="eyebrow">CALENDAR</span><h3>第一周的第一天</h3><p>这个日期用于把课程列表中的“第几周、星期几、节次”换算成日历日期。保存后，个人课表日视图仍显示今天和明天；切换到周表时会默认定位当前周，也可以切回整个学期或其他周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">当前保存的日期不是周日，请重新选择后保存，否则可能造成整周错位。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存设置</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div><div class="settings-callout"><strong>显示规则</strong><span>日视图显示今天和明天；个人周表按开学日期默认定位当前周，并可切换全部周次或指定周；全校课表详情保持原先的全部周次显示逻辑。</span></div>${loginSettings}${cacheSettings}</div></div>`;
-}
-
-function renderSettings() {
-  const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
-  const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
-  const currentText = firstWeekDate ? `${calendarDateText(firstWeekDate)} · ${SUNDAY_FIRST_DAY_NAMES[firstWeekDate.getDay()]}` : "尚未设置";
-  const configuredLoginMethod = IS_ANDROID_APP
-    ? androidLoginMethod()
-    : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
-  const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
-  const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
-  const cacheBlock = IS_ANDROID_APP ? `<section class="settings-section"><div class="settings-intro"><h3>数据缓存</h3><p>${escapeHtml(cacheStatus)}。成功读取后自动更新，离线时仍可查看上次结果。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私</strong><span>查询缓存不包含密码、验证码、Cookie 或令牌；内置登录凭据另行由 Android Keystore 加密保存。</span></div></section>` : "";
-  return `<div>${sectionHeading("设置", "")}<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位当前学周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>内置登录默认开启可信设备与后台自动重登；原网页账密和二维码入口始终保留。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option></select><small>学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}</div></div>`;
-}
-
-function renderPersonal() {
-  const filterKeys = ["name", "code", "teacher", "location", "time", "weeks", "weekday", "category", "nature", "requirement", "assessment", "examType"];
-  const rows = filterRows(state.data.courses, filterKeys, state.filters.personal);
-  const scheduleRows = filterRows(personalScheduleRows(rows), filterKeys, state.filters.personal);
-  if (state.scheduleDisplay.personal !== "week") {
-    const records = rows.length
-      ? `<details class="course-records-details"><summary>查看本学期全部课程记录（${rows.length} 条）</summary>${renderCourseRowsTable(rows, false, "personal")}</details>`
-      : renderCourseCards(rows, "personal");
-    return `<div>${sectionHeading("课表", "手机端默认显示今天和明天；点击任意课程可查看教师、周次、节次、时间和地点。需要查看整周时切换到周表。", scheduleExportActions("personal"))}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点或周次" /><span class="tag ${state.data.scheduleSource === "网格" ? "pass" : ""}">${escapeHtml(state.data.scheduleSource === "网格" ? "数据来源：课表网格" : state.data.scheduleSource === "列表" ? "数据来源：课程列表已整理" : "数据来源：未读取到课表")}</span><span class="muted">显示 ${rows.length} / ${state.data.courses.length} 门课${scheduleRows.length !== rows.length ? ` · ${scheduleRows.length} 条排课` : ""}</span></div>${renderScheduleDisplayControls()}${renderDailySchedule(scheduleRows, "personal")}${records}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}</div>`;
-  }
-  const weekRows = filterScheduleWeekRows(scheduleRows, "personal");
-  const grid = renderScheduleGrid(weekRows, "personal");
-  const selectedWeek = scheduleWeekValue("personal");
-  const gridNotice = rows.length && !grid
-    ? selectedWeek === "all"
-      ? `<div class="schedule-note">该学期的课程列表已经返回，但没有识别出可铺入网格的星期；下面仍会展示完整的课程列表和原始时间地点。</div>`
-      : `<div class="schedule-note">第${escapeHtml(selectedWeek)}周没有可显示的课程，下面仍保留本学期完整课程列表。</div>`
-    : "";
-  const sourceText = state.data.scheduleSource === "网格"
-    ? "数据来源：课表网格（优先）"
-    : state.data.scheduleSource === "列表"
-      ? "数据来源：课程列表（已整理为周课表网格）"
-      : "数据来源：未读取到课表数据";
-  const sourceClass = state.data.scheduleSource === "网格" ? "pass" : "";
-  return `<div>${sectionHeading("课表", "周表按周日、周一……周六排列；优先读取原系统网格，网格为空时按课程列表中的周次、星期和节次重新铺成周课表。可切换全部周次或指定单周，点击任意课程可查看详情。", scheduleExportActions("personal"))}<div class="panel"><div class="toolbar"><input data-filter="personal" value="${escapeHtml(state.filters.personal)}" placeholder="搜索课程、教师、时间、地点或周次" /><span class="tag ${sourceClass}">${escapeHtml(sourceText)}</span><span class="muted">显示 ${rows.length} / ${state.data.courses.length} 门课${scheduleRows.length !== rows.length ? ` · 网格 ${scheduleRows.length} 条排课` : ""}</span></div>${renderScheduleDisplayControls()}${renderScheduleWeekControls(scheduleRows, "personal")}${grid}${gridNotice}${rows.length ? `<details class="course-records-details" open><summary>本学期全部课程记录（${rows.length} 门课 · ${scheduleRows.length} 条排课）</summary>${renderCourseRowsTable(rows, false, "personal")}</details>` : renderCourseCards(rows, "personal")}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button>`)}${renderCourseDetailModal()}${renderScheduleExportModal()}</div>`;
-}
-
-function renderAll() {
-  // declaration placeholder; the final implementation below is used after
-  // the legacy renderers have been parsed.
-  return "";
-}
-
-function renderAllRows() {
-  if (state.allRetrying) return loadingCard(`正在查询全校课表接口…${state.allAttempt ? `（第 ${state.allAttempt}/${ALL_SCHEDULE_RETRY_LIMIT} 次）` : ""}`);
-  if (state.allPendingMessage && !state.allRows.length && state.allError) return `<div class="empty-card"><h3>该学期课表可能尚未发布</h3><p>${escapeHtml(state.allPendingMessage)}。稍后可以再次查询。</p><button class="button button-primary" type="button" data-action="search-all">再次查询</button></div>`;
-  if (state.allError) return `<div class="error-card"><h3>全校课表没有返回结果</h3><p>${escapeHtml(state.allError)}</p><button class="button button-ghost" type="button" data-action="open-portal">原系统</button></div>`;
-  if (!state.allRows.length) return emptyCard("还没有查询全校课表", "选择查询类型并输入关键词。", "");
-  const courseRows = state.allRows.filter(isCourseDetailRow);
-  if (courseRows.length) return renderSelectableCourseRowsTable(courseRows, true, "all");
-  const fields = state.allRows.flatMap(allRowFields).map((item) => item.label);
-  const headers = [...new Set(fields)].slice(0, 8);
-  const pageSize = Math.max(1, Number(state.allPageSize) || 10);
-  const totalPages = Math.max(1, Math.ceil(state.allRows.length / pageSize));
-  const page = Math.min(Math.max(1, Number(state.allPage) || 1), totalPages);
-  const start = (page - 1) * pageSize;
-  const visibleRows = state.allRows.slice(start, start + pageSize);
-  const actionMarkup = (row, index) => {
-    const identity = allScheduleDetailIdentity(row);
-    const scheduleFlag = valueOf(row, ["SFPK_DISPLAY", "SFPK"], "");
-    if (scheduleFlag !== "" && !isTruthyFlag(scheduleFlag)) return `<span class="muted">未排课</span>`;
-    return identity.code ? `<button class="button button-soft button-small" type="button" data-action="show-all-detail" data-row-index="${index}">查看课表</button>` : `<span class="muted">—</span>`;
-  };
-  const body = visibleRows.map((row, visibleIndex) => {
-    const index = start + visibleIndex;
-    const items = allRowFields(row);
-    return `<tr>${headers.map((header) => `<td>${escapeHtml(items.find((item) => item.label === header)?.value || "—")}</td>`).join("")}<td>${actionMarkup(row, index)}</td></tr>`;
-  }).join("");
-  const mobile = visibleRows.map((row, visibleIndex) => {
-    const index = start + visibleIndex;
-    const items = allRowFields(row);
-    const identity = allScheduleDetailIdentity(row);
-    const title = identity.name || items[0]?.value || "查询结果";
-    const summary = items.filter((item) => item.value && item.value !== title).slice(0, 3).map((item) => `${item.label}：${item.value}`).join(" · ");
-    return `<article class="all-mobile-row"><div><strong>${escapeHtml(title)}</strong><span>${escapeHtml(summary || "")}</span></div>${actionMarkup(row, index)}</article>`;
-  }).join("");
-  return `<div class="course-transfer-toolbar course-transfer-toolbar-hint"><div class="course-transfer-copy"><strong>全校课表结果</strong><span>打开一条记录查看完整课表。</span></div><button class="button button-ghost" type="button" data-action="open-course-import">导入文本</button></div><div class="table-wrap all-desktop-table"><table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}<th>课表</th></tr></thead><tbody>${body}</tbody></table></div><div class="all-mobile-list">${mobile}</div>${renderAllPagination(state.allRows.length, page, totalPages)}<p class="muted table-footnote">${start + 1}-${Math.min(start + pageSize, state.allRows.length)} / ${state.allRows.length} 条</p>`;
-}
-
-function renderAll() {
-  const orderedTypes = [...state.scheduleTypes].sort((a, b) => Number(scheduleTypeKind(b) === "class") - Number(scheduleTypeKind(a) === "class"));
-  const options = orderedTypes.map((type) => `<option value="${escapeHtml(type.code)}">${escapeHtml(type.name)}</option>`).join("");
-  const classMode = isClassScheduleType();
-  const filterFields = classMode
-    ? `<label>班级代码<input id="allCode" value="${escapeHtml(state.filters.allCode)}" placeholder="如 13022601" /></label><label>班级名称<input id="allName" value="${escapeHtml(state.filters.allName)}" placeholder="如 自动化" /></label>`
-    : `<label>关键词<input id="allKeyword" value="${escapeHtml(state.filters.allKeyword)}" placeholder="代码、名称、教师或教室" /></label>`;
-  const allTermOptions = state.allTerms.length
-    ? state.allTerms.map((term) => `<option value="${escapeHtml(term.code)}">${escapeHtml(term.name)}</option>`).join("")
-    : `<option value="">正在读取学期…</option>`;
-  const permissionHint = state.allScheduleHiddenTypes.length
-    ? `<p class="muted all-schedule-permission-hint">原系统当前开放：${escapeHtml(state.scheduleTypes.map((type) => type.name).join("、"))}。其他类型没有查询权限，已按原系统规则隐藏。</p>`
-    : "";
-  return `<div>${sectionHeading("全校课表", "")}<div class="all-query-toolbar"><div class="all-query-context"><label>学期<select id="allTermSelect" ${state.allTerms.length ? "" : "disabled"}>${allTermOptions}</select></label><label>查询类型<select id="allMode">${options}</select></label></div><div class="inline-form">${filterFields}<button class="button button-primary" type="button" data-action="search-all">查询</button></div></div>${state.allTermError ? `<p class="muted">${escapeHtml(state.allTermError)}</p>` : ""}${state.scheduleTypeError ? `<p class="muted">${escapeHtml(state.scheduleTypeError)}</p>` : ""}${permissionHint}<div class="panel all-results-panel">${renderAllRows()}</div>${renderAllDetail()}${renderAllUtilities()}${renderCourseTransferModal()}</div>`;
-}
-
-function renderAllUtilities() {
-  return renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`);
 }
 
 function allRowFields(row) {
@@ -10943,26 +10385,6 @@ function renderAllRows() {
   return `<div class="course-transfer-toolbar course-transfer-toolbar-hint"><div class="course-transfer-copy"><strong>全校课表结果</strong><span>打开一条记录查看完整课表。</span></div><button class="button button-ghost" type="button" data-action="open-course-import">导入文本</button></div><div class="table-wrap all-desktop-table"><table><thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}${actionHeader}</tr></thead><tbody>${body}</tbody></table></div><div class="all-mobile-list">${mobile}</div>${renderAllPagination(state.allRows.length, page, totalPages)}<p class="muted table-footnote">当前显示第 ${page} 页 ${start + 1}-${Math.min(start + pageSize, state.allRows.length)} 条${state.allTotal ? `，接口总记录数 ${escapeHtml(state.allTotal)}` : ""}。</p>`;
 }
 
-function renderAll() {
-  const orderedTypes = [...state.scheduleTypes].sort((a, b) => Number(scheduleTypeKind(b) === "class") - Number(scheduleTypeKind(a) === "class"));
-  const options = orderedTypes.map((type) => `<option value="${escapeHtml(type.code)}">${escapeHtml(type.name)}</option>`).join("");
-  const typeError = state.scheduleTypeError ? `<p class="muted">动态类型接口读取失败，已保留全校大课表入口：${escapeHtml(state.scheduleTypeError)}</p>` : "";
-  const allTermOptions = state.allTerms.length
-    ? state.allTerms.map((term) => `<option value="${escapeHtml(term.code)}">${escapeHtml(term.name)}</option>`).join("")
-    : `<option value="">正在读取课表学期…</option>`;
-  const allTermError = state.allTermError ? `<p class="muted">课表模块学期列表读取失败，已使用通用学期列表：${escapeHtml(state.allTermError)}</p>` : "";
-  const classMode = isClassScheduleType();
-  const filterFields = classMode
-    ? `<label>班级代码<input id="allCode" value="${escapeHtml(state.filters.allCode)}" placeholder="如：13022601" /></label><label>班级名称<input id="allName" value="${escapeHtml(state.filters.allName)}" placeholder="如：自动化" /></label>`
-    : `<label>关键词<input id="allKeyword" value="${escapeHtml(state.filters.allKeyword)}" placeholder="代码 / 名称 / 教师 / 教室" /></label>`;
-  const classHint = classMode ? "当前为班级课表，筛选字段与原系统一致：班级代码、班级名称；查询会自动读取原系统全部分页。" : "当前模式使用关键词匹配名称、代码、教师或教室，查询会自动读取原系统全部分页。";
-  return `<div>${sectionHeading("全校课表", "课表模块单独维护学期；这里的学期会直接传给全校课表接口，不跟随顶部总览学期。查询结果可直接点“查看课表”进入美化后的课程网格。")}<div class="panel"><div class="inline-form"><label>查询类型<select id="allMode">${options}</select></label>${filterFields}<button class="button button-primary" type="button" data-action="search-all">查询</button></div><p class="muted">${classHint}</p>${typeError}</div><div class="panel">${renderAllRows()}</div>${renderAllDetail()}${renderAllUtilities(allTermOptions, allTermError)}${renderCourseTransferModal()}</div>`;
-}
-
-function renderAllUtilities(allTermOptions, allTermError = "") {
-  return `<div class="section-utilities"><div class="section-utility-actions"><button class="button button-ghost" type="button" data-action="open-portal">打开原查询</button></div><div class="academic-term-picker"><label><span>课表查询学期</span><select id="allTermSelect" ${state.allTerms.length ? "" : "disabled"}>${allTermOptions}</select></label></div>${allTermError}</div>`;
-}
-
 function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgressMap()) {
   const records = (state.curriculum.courses || []).map((course) => ({ course, completion: curriculumCourseCompletion(course) }));
   const claimedScoreKeys = new Set(records.map((record, index) => record.completion.score
@@ -11018,19 +10440,6 @@ function curriculumProgressOverviewMarkup(plan, progressMap = curriculumProgress
   const failedMarkup = meta.failedTermCount ? `<p class="curriculum-progress-warning"><strong>成绩读取不完整</strong><span>有 ${meta.failedTermCount} 个学期成绩读取失败，请先刷新成绩页，避免把未读取课程误判为未完成。</span></p>` : "";
   const compositionItem = (label, earned, target) => `<div class="curriculum-composition-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(formatCurriculumCredit(earned))}${target > 0 ? ` / ${escapeHtml(formatCurriculumCredit(target))}` : ""} 学分</strong><small>${target > 0 ? "已获 / 要求" : "已获得"}</small></div>`;
   return `<section class="panel curriculum-progress-panel"><div class="curriculum-progress-head"><div><h3>毕业进度</h3><p class="muted">${escapeHtml(categoryNote)}；${escapeHtml(coverageText)}。</p></div><span class="curriculum-progress-coverage">${escapeHtml(coverageText)}</span></div><div class="curriculum-progress-total"><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><span> / ${escapeHtml(formatCurriculumCredit(targetCredits))} 学分</span><em>${Math.round(percent)}%</em></div><div class="curriculum-progress-bar" role="progressbar" aria-valuenow="${Math.round(percent)}" aria-valuemin="0" aria-valuemax="100" aria-label="毕业学分进度"><span style="width:${percent.toFixed(1)}%"></span></div><div class="curriculum-progress-grid"><div class="curriculum-progress-card curriculum-progress-card-earned"><span>已获得</span><strong>${escapeHtml(formatCurriculumCredit(earnedCredits))}</strong><small>培养方案学分</small></div><div class="curriculum-progress-card curriculum-progress-card-remaining"><span>剩余</span><strong>${escapeHtml(formatCurriculumCredit(remainingCredits))}</strong><small>达到最低要求</small></div><div class="curriculum-progress-card"><span>已完成课程</span><strong>${escapeHtml(`${earnedRecords.length} / ${records.length}`)}</strong><small>按已通过成绩匹配</small></div><div class="curriculum-progress-card"><span>课组</span><strong>${escapeHtml(state.curriculum.groups.length)}</strong><small>当前方案层级</small></div></div><div class="curriculum-credit-composition"><div class="curriculum-credit-composition-head"><strong>学分构成</strong><span>只展示已有数据，不改变原系统判定</span></div><div class="curriculum-composition-grid">${compositionItem("必修", requiredCredits, requiredTarget)}${compositionItem("选修", electiveCredits, electiveTarget)}<div class="curriculum-composition-item"><span>方案最低要求</span><strong>${escapeHtml(formatCurriculumCredit(targetCredits))} 学分</strong><small>原系统方案字段</small></div></div></div>${remainingMarkup}${failedMarkup}</section>`;
-}
-
-// 这些最终定义位于所有旧页面 renderer 之后，确保同一套业务状态在桌面和
-// Android 移动壳层都使用新的信息架构。
-function renderSettings() {
-  const firstWeekDate = normalizeCalendarDate(state.calendar.firstWeekStart);
-  const invalidWeekday = firstWeekDate && firstWeekDate.getDay() !== 0;
-  const currentText = firstWeekDate ? `${calendarDateText(firstWeekDate)} · ${SUNDAY_FIRST_DAY_NAMES[firstWeekDate.getDay()]}` : "尚未设置";
-  const configuredLoginMethod = IS_ANDROID_APP ? androidLoginMethod() : (readStoredSetting("zhizhang.loginMethod") === "wechat" ? "wechat" : "password");
-  const cacheStatus = personalCacheStatusText() || "尚未缓存个人教务数据";
-  const curriculumMore = IS_ANDROID_APP ? "" : `<div class="settings-row settings-link-row"><div><strong>培养计划</strong><small>查看培养方案、课组和课程完成情况</small></div><button class="button button-ghost" type="button" data-action="view-curriculum">打开</button></div>`;
-  const cacheBlock = IS_ANDROID_APP ? `<section class="settings-section"><div class="settings-intro"><h3>数据缓存</h3><p>${escapeHtml(cacheStatus)}。成功读取后自动更新，离线时仍可查看上次结果。</p></div><div class="settings-actions"><button class="button button-ghost" type="button" data-action="clear-personal-cache">清除本机缓存</button></div><div class="settings-callout"><strong>隐私</strong><span>查询缓存不包含密码、验证码、Cookie 或令牌；内置登录凭据另行由 Android Keystore 加密保存。</span></div></section>` : "";
-  return `<div>${sectionHeading("设置", "")}<div class="panel settings-panel"><section class="settings-section"><div class="settings-intro"><h3>课表</h3><p>设置第一周的周日，日视图和周表会据此定位当前学周。</p></div><label class="settings-field"><span>第一周周日</span><input id="firstWeekStartInput" type="date" value="${escapeHtml(state.calendar.firstWeekStart)}" /><small>当前：${escapeHtml(currentText)}。必须选择周日。</small></label>${invalidWeekday ? `<div class="schedule-note">保存的日期不是周日，请重新选择。</div>` : ""}<div class="settings-actions"><button class="button button-primary" type="button" data-action="save-calendar-settings">保存</button><button class="button button-ghost" type="button" data-action="clear-calendar-settings">清除日期</button></div></section><section class="settings-section"><div class="settings-intro"><h3>账户</h3><p>内置登录默认开启可信设备与后台自动重登；原网页账密和二维码入口始终保留。</p></div><label class="settings-field"><span>默认登录方式</span><select id="loginMethodSelect"><option value="builtin" ${configuredLoginMethod === "builtin" ? "selected" : ""}>内置登录（默认）</option><option value="password" ${configuredLoginMethod === "password" ? "selected" : ""}>原网页账密登录</option><option value="wechat" ${configuredLoginMethod === "wechat" ? "selected" : ""}>微信二维码登录</option></select><small>学号和密码只使用 Android Keystore 加密保存在本机；验证码不保存。</small></label></section><section class="settings-section"><div class="settings-intro"><h3>更多工具</h3><p>低频功能集中在这里。</p></div><div class="settings-row settings-link-row"><div><strong>全校课表</strong><small>查询班级、教师和教室</small></div><button class="button button-ghost" type="button" data-action="view-all">打开</button></div>${curriculumMore}<div class="settings-row settings-link-row"><div><strong>原教务系统</strong><small>登录、查看原页面或处理未发布数据</small></div><button class="button button-ghost" type="button" data-action="open-portal">打开</button></div></section>${cacheBlock}</div></div>`;
 }
 
 function renderAll() {
@@ -14190,8 +13599,8 @@ function renderCourseOutline() {
   return state.courseOutline.detail ? renderCourseOutlineDetail() : renderCourseOutlineList();
 }
 
-// Final presentation-layer overrides. The legacy export helpers are kept for
-// full-school pages; personal exports must use the merged school + local rows.
+// Personal exports use the merged school + local rows; full-school detail
+// exports use the detail courses directly.
 function scheduleExportRows(scope = "personal") {
   const source = scope === "all-detail" ? (state.allDetail?.courses || []) : mergedPersonalScheduleRows(state.data.courses || []);
   return expandedScheduleOccurrenceRows(source);
@@ -14248,18 +13657,18 @@ function scheduleExportEntryText(course, selectedWeek, scope = "personal") {
   };
 }
 
-// Keep the local overlay renderer at the end of the file so legacy renderer
-// declarations above cannot accidentally replace the merged schedule UI.
+// Page renderers below route through the local-overlay implementations so
+// school courses, local items and day moves share one merged schedule UI.
 function renderDailySchedule(rows, scope = "personal") {
   return renderDailyScheduleWithLocalOverlay(rows, scope);
 }
 
 function renderCourseDetailModal() {
-  const markup = state.selectedCourse?.source === "local"
-    ? renderLocalScheduleDetailModal(state.selectedCourse)
-    : renderCourseDetailWithLocalOverlay(state.selectedCourse?.dayMoveOriginal
-      ? { ...state.selectedCourse, ...state.selectedCourse.dayMoveOriginal } : state.selectedCourse);
-  return markup.replace('<div class="detail-grid">', `${dayMoveDetail(state.selectedCourse)}<div class="detail-grid">`);
+  const selected = state.selectedCourse;
+  const beforeGrid = dayMoveDetail(selected);
+  if (selected?.source === "local") return renderLocalScheduleDetailModal(selected, { beforeGrid });
+  const course = selected?.dayMoveOriginal ? { ...selected, ...selected.dayMoveOriginal } : selected;
+  return renderCourseDetailWithLocalOverlay(course, { beforeGrid });
 }
 
 function renderPersonal() {
@@ -15214,6 +14623,11 @@ elements.content.addEventListener("input", (event) => {
 });
 
 elements.content.addEventListener("change", (event) => {
+  if (event.target.id === "localManagerFilter") {
+    state.localSchedule.filter = event.target.value || "all";
+    render();
+    return;
+  }
   if (event.target.id === "toastNotificationsEnabled") {
     const enabled = Boolean(event.target.checked);
     setToastNotificationsEnabled(enabled);
@@ -15382,6 +14796,350 @@ elements.content.addEventListener("change", (event) => {
   }
 });
 
+function saveCampusSettingAction(button, event, action) {
+  const select = document.getElementById(action === "save-campus-prompt" ? "campusPromptSelect" : "campusSettingSelect");
+  const code = normalizeCampusCode(select?.value);
+  if (action === "save-campus-prompt" && !code) {
+    setNotice("请先选择南湖校区或浑南校区。", "error");
+    return;
+  }
+  state.campus.code = persistCampusCode(code);
+  state.campus.promptOpen = false;
+  setNotice(code ? `已设置默认校区：${campusLabel(code)}。` : "已清除默认校区。", "success");
+  render();
+}
+
+function switchPersonalScheduleDisplay(display) {
+  state.scheduleDisplay.personal = display;
+  state.selectedCourse = null;
+  scheduleGridGesture = null;
+  scheduleGridEdgeArm = null;
+  render();
+}
+
+function resetPersonalCalendarAndShowSchedule(value, message) {
+  state.calendar.firstWeekStart = value;
+  writeStoredSetting("zhizhang.firstWeekStart", value);
+  // 开学日期改变后，之前手动选择的周次已经没有确定的学周语义；
+  // 下一次进入周表应重新按新日期定位当前周。用户之后手动选择的
+  // “全部周次”或其他周次仍会继续保留，直到再次切换学期/改日期。
+  state.scheduleWeek.personal = "";
+  state.scheduleWeekTransition.personal = "";
+  scheduleGridGesture = null;
+  scheduleGridEdgeArm = null;
+  state.scheduleDisplay.personal = "days";
+  prepareCampusPromptForPersonalView("personal", state.view);
+  state.view = "personal";
+  setNotice(message, "success");
+  render();
+}
+
+const CALENDAR_CLEARED_NOTICE = "已清除学周设置；设置教学周后才能准确显示今天和明天的课程。";
+
+function reloadCurriculumAction() {
+  return IS_ANDROID_APP ? loadCurriculumPlans() : startCurriculumBootstrap();
+}
+
+function dayMoveActionHandler(button, event, action) {
+  return handleDayMoveAction(action, button);
+}
+
+// 内容区所有 data-action 按钮的唯一入口。处理函数签名为 (button, event, action)；
+// 未在表中登记的动作交给 handleContentNavigation（页面切换与默认重绘）。
+const contentActionHandlers = {
+  ...localScheduleActionHandlers,
+  "save-campus-setting": saveCampusSettingAction,
+  "save-campus-prompt": saveCampusSettingAction,
+  "dismiss-campus-prompt": () => {
+    state.campus.promptOpen = false;
+    render();
+  },
+  "open-webvpn-tool": () => {
+    state.webvpnTool.open = true;
+    updateWebVpnTool(state.webvpnTool.input);
+    render();
+  },
+  "close-webvpn-tool": () => {
+    state.webvpnTool.open = false;
+    render();
+  },
+  "webvpn-use-site": (button) => {
+    updateWebVpnTool(button.dataset.webvpnUrl || "");
+    render();
+  },
+  "generate-webvpn-url": () => {
+    const input = document.getElementById("webvpnUrlInput");
+    updateWebVpnTool(input?.value || state.webvpnTool.input);
+    render();
+  },
+  "copy-webvpn-url": () => copyGeneratedWebVpnUrl(),
+  "copy-login-diagnostics": () => copyAndroidLoginDiagnostics(),
+  "open-webvpn-url": () => openGeneratedWebVpnUrl(),
+  "open-portal": () => openPortal(),
+  "start-curriculum-bootstrap": () => startCurriculumBootstrap(),
+  "open-curriculum-portal": () => startCurriculumBootstrap(),
+  "open-course-outline-original": () => openCourseOutlineOriginal(),
+  "search-course-outline": () => searchCourseOutline(),
+  "clear-course-outline": () => {
+    state.courseOutline.list.filters = { code: "", name: "", unit: "", level: "", grade: "" };
+    return loadCourseOutlineList({ pageNumber: 1, force: true });
+  },
+  "refresh-course-outline-list": () => loadCourseOutlineList({ force: true }),
+  "course-outline-page": (button) => {
+    const page = Number(button.dataset.outlinePage);
+    if (page > 0) return loadCourseOutlineList({ pageNumber: page, force: true });
+  },
+  "show-course-outline-detail": (button) => {
+    const row = state.courseOutline.list.rows[Number(button.dataset.outlineRowIndex)];
+    return loadCourseOutlineDetail(row);
+  },
+  "back-course-outline": () => {
+    courseOutlineDetailRequestSequence += 1;
+    state.courseOutline.detail = null;
+    render();
+  },
+  "refresh-course-outline-detail": () => {
+    if (state.courseOutline.detail?.row) return loadCourseOutlineDetail(state.courseOutline.detail.row);
+  },
+  "retry-course-outline-endpoint": (button) => retryCourseOutlineEndpoint(button.dataset.outlineEndpoint || ""),
+  "copy-course-outline": () => copyCourseOutline(),
+  "download-course-outline": () => downloadCourseOutline(),
+  "print-course-outline": () => {
+    if (typeof window.print === "function") window.print();
+  },
+  "open-schedule-image-export": (button) => openScheduleImageExport(button.dataset.scheduleScope || "personal"),
+  "schedule-density": (button) => {
+    writeStoredSetting("zhizhang.scheduleDensity", button.dataset.density === "overview" ? "overview" : "readable");
+    render();
+  },
+  "open-day-moves": dayMoveActionHandler,
+  "close-day-moves": dayMoveActionHandler,
+  "save-day-move": dayMoveActionHandler,
+  "delete-day-move": dayMoveActionHandler,
+  "export-schedule-csv": (button) => exportScheduleCsv(button.dataset.scheduleScope || "personal"),
+  "open-local-schedule-ai-prompt": () => openLocalScheduleAiPrompt(),
+  "open-local-schedule-batch-import": () => openLocalScheduleBatchImport(),
+  "copy-local-schedule-ai-prompt": async () => {
+    const transfer = localScheduleTransferState();
+    const prompt = transfer.promptText || localScheduleAiPrompt();
+    if (!prompt) return;
+    await copyLocalScheduleTransferText(prompt, "AI 批量导入 Prompt 已复制。现在可以把课表图片发给其他 AI。");
+    render();
+  },
+  "select-local-schedule-ai-prompt": () => selectLocalScheduleAiPrompt(),
+  "analyze-local-schedule-import": () => analyzeLocalScheduleImport(),
+  "confirm-local-schedule-import": () => confirmLocalScheduleImport(),
+  "open-local-schedule-settings": () => {
+    clearLocalScheduleTransfer();
+    state.view = "settings";
+    render();
+  },
+  "close-local-schedule-transfer": () => {
+    clearLocalScheduleTransfer();
+    render();
+  },
+  "close-schedule-export": () => {
+    state.scheduleExport = null;
+    render();
+  },
+  "toggle-course-name-sort": (button) => {
+    const scope = button.dataset.courseTransferScope || "all";
+    const current = courseTransferSortMode(scope);
+    const next = current === "source" ? "asc" : current === "asc" ? "desc" : "source";
+    state.courseTransfer.sortMode[scope] = next;
+    render();
+  },
+  "start-course-selection": (button) => {
+    const scope = button.dataset.courseTransferScope || "all";
+    state.courseTransfer.selectionScope = scope;
+    state.courseTransfer.selectionMode = true;
+    state.courseTransfer.selectedKeys.clear();
+    clearCourseTransferModal();
+    render();
+  },
+  "cancel-course-selection": () => {
+    state.courseTransfer.selectionMode = false;
+    state.courseTransfer.selectionScope = "";
+    state.courseTransfer.selectedKeys.clear();
+    clearCourseTransferModal();
+    render();
+  },
+  "export-selected-courses": (button) => openCourseExport(button.dataset.courseTransferScope || state.courseTransfer.selectionScope || "all"),
+  "open-course-import": () => {
+    state.courseTransfer.mode = "import";
+    state.courseTransfer.text = "";
+    state.courseTransfer.error = "";
+    state.courseTransfer.notice = "";
+    state.courseTransfer.result = null;
+    render();
+  },
+  "copy-course-export": () => copyCourseExport(),
+  "download-course-export": () => downloadCourseExport(),
+  "analyze-course-import": () => analyzeCourseImport(),
+  "close-course-transfer": () => {
+    clearCourseTransferModal();
+    render();
+  },
+  // 勾选框由 change 事件处理；点击本身不重绘，避免打断勾选。
+  "toggle-course-selection": () => {},
+  "toggle-course-selection-all": () => {},
+  "confirm-schedule-image-export": () => exportScheduleImage(),
+  "refresh": () => refresh(),
+  "view-settings": () => {
+    state.selectedCourse = null;
+    state.selectedCourseScope = "personal";
+    state.view = "settings";
+    render();
+  },
+  "clear-personal-cache": () => clearPersonalCache(),
+  "save-current-term": () => saveManualCurrentTerm(),
+  "sync-current-term": () => syncCurrentTermFromSchool(),
+  "schedule-days": () => switchPersonalScheduleDisplay("days"),
+  "schedule-week": () => {
+    // 只有第一次进入个人周表，或切换了学期后尚未主动选择过周次时，
+    // 才按开学日期定位当前周。用户主动选择“全部周次/其他周次”后保留选择。
+    if (!state.scheduleWeek.personal) state.scheduleWeek.personal = defaultPersonalScheduleWeek();
+    switchPersonalScheduleDisplay("week");
+  },
+  "save-calendar-settings": () => {
+    const input = document.getElementById("firstWeekStartInput");
+    const value = input?.value || "";
+    const date = normalizeCalendarDate(value);
+    if (value && (!date || date.getDay() !== 0)) {
+      setNotice("第一周的第一天必须是周日，请重新选择日期。", "error");
+      return;
+    }
+    resetPersonalCalendarAndShowSchedule(value, value ? "学周设置已保存，课表已按周日重新计算。" : CALENDAR_CLEARED_NOTICE);
+  },
+  "clear-calendar-settings": () => resetPersonalCalendarAndShowSchedule("", CALENDAR_CLEARED_NOTICE),
+  "close-course": () => {
+    sportProjectRequestSequence += 1;
+    state.selectedCourse = null;
+    state.selectedCourseScope = "personal";
+    render();
+  },
+  "close-score-detail": () => {
+    state.scoreDetail = null;
+    render();
+  },
+  "acknowledge-new-scores": () => acknowledgeCurrentScoreReminder(),
+  "show-score-detail": (button) => openScoreDetail(Number(button.dataset.scoreIndex)),
+  "retry-score-detail": () => openScoreDetail(state.data.scores.indexOf(state.scoreDetail?.row)),
+  "close-curriculum-course": () => {
+    curriculumTextbookRequestSequence += 1;
+    state.curriculum.courseDetail = null;
+    render();
+  },
+  "export-curriculum-pdf": () => exportCurriculumPdf(),
+  "show-curriculum-course": (button) => {
+    const key = button.dataset.courseKey || "";
+    const row = state.curriculum.courses.find((course) => curriculumCourseKey(course) === key);
+    if (!row) return;
+    curriculumTextbookRequestSequence += 1;
+    const detail = { row, loading: false, error: "", textbook: curriculumTextbookState(row) };
+    const cached = curriculumTextbookCache.get(detail.textbook.cacheKey);
+    if (cached) applyCurriculumTextbookCache(detail.textbook, cached);
+    state.curriculum.courseDetail = detail;
+    render();
+    if (!cached) loadCurriculumCourseTextbook(detail).catch(() => undefined);
+  },
+  "select-curriculum-textbook-candidate": (button) => selectCurriculumTextbookCandidate(button.dataset.curriculumTextbookKey || ""),
+  "retry-curriculum-textbook": () => retryCurriculumTextbookLookup(true),
+  "refresh-curriculum-textbook": () => retryCurriculumTextbookLookup(true),
+  "choose-another-curriculum-textbook": () => chooseAnotherCurriculumTextbook(),
+  "retry-curriculum": reloadCurriculumAction,
+  "refresh-curriculum": reloadCurriculumAction,
+  "curriculum-expand-all": () => setAllCurriculumTreeNodes(true),
+  "curriculum-collapse-all": () => setAllCurriculumTreeNodes(false),
+  "close-all-detail": () => {
+    allScheduleDetailRequestSequence += 1;
+    state.selectedCourse = null;
+    state.selectedCourseScope = "personal";
+    state.allDetail = null;
+    render();
+  },
+  "show-course": (button) => {
+    const scope = button.dataset.courseScope || "personal";
+    const index = Number(button.dataset.courseIndex);
+    const detailIndex = Number(button.dataset.courseDetailIndex);
+    state.selectedCourse = resolveScheduleItemFromAction(button) || (scope === "personal" && Number.isInteger(detailIndex) && detailIndex >= 0
+      ? state.data.scheduleDetail[detailIndex] || courseAtScopeIndex(scope, index)
+      : courseAtScopeIndex(scope, index));
+    state.selectedCourseScope = scope;
+    if (state.selectedCourse && courseIsSport(state.selectedCourse)) {
+      return loadSportProjectsForCourse(state.selectedCourse, scope);
+    }
+    render();
+  },
+  "all-page": (button) => {
+    const page = Number(button.dataset.page);
+    if (page > 0) {
+      state.allPage = page;
+      state.allDetail = null;
+      state.selectedCourse = null;
+      render();
+    }
+  },
+  "show-all-detail": (button) => queryAllScheduleDetail(Number(button.dataset.rowIndex)),
+  "search-all": () => {
+    const mode = document.getElementById("allMode");
+    if (mode) state.allTypeCode = mode.value;
+    const term = document.getElementById("allTermSelect");
+    const keyword = document.getElementById("allKeyword");
+    const code = document.getElementById("allCode");
+    const name = document.getElementById("allName");
+    if (term) state.allTermCode = term.value;
+    state.filters.allKeyword = keyword?.value || "";
+    state.filters.allCode = code?.value || "";
+    state.filters.allName = name?.value || "";
+    return queryAllSchedule();
+  }
+};
+
+function setAllCurriculumTreeNodes(open) {
+  state.curriculum.expanded = Object.fromEntries(curriculumTreeKeys(state.curriculum.groups).map((key) => [key, open]));
+  render();
+}
+
+const CONTENT_VIEW_ACTIONS = ["view-scores", "view-curriculum", "view-course-outline", "view-exams", "view-personal", "view-all"];
+
+// 页面切换动作，以及任何未登记的动作：切换视图（如有）后重绘，并补齐目标页需要的首次加载。
+async function handleContentNavigation(action) {
+  if (CONTENT_VIEW_ACTIONS.includes(action)) {
+    state.selectedCourse = null;
+    state.selectedCourseScope = "personal";
+  }
+  if (action === "view-scores") state.view = "scores";
+  if (action === "view-curriculum" && !IS_ANDROID_APP) {
+    state.view = "curriculum";
+    invalidateCurriculum();
+    state.curriculum.bootstrap = { status: "idle", message: "", error: "", tabId: null, reading: false };
+  }
+  if (action === "view-course-outline" && !IS_ANDROID_APP) {
+    state.view = "course-outline";
+    state.courseOutline.detail = null;
+  }
+  if (action === "view-exams") state.view = "exams";
+  if (action === "view-personal") {
+    prepareCampusPromptForPersonalView("personal", state.view);
+    state.view = "personal";
+  }
+  if (action === "view-all") state.view = "all";
+  render();
+  if (action === "view-scores" && !state.loading) {
+    await refresh();
+  }
+  if (state.view === "course-outline" && !state.courseOutline.list.loaded && !state.courseOutline.list.loading) {
+    loadCourseOutlineList();
+  }
+  if (state.view === "all") {
+    const tasks = [];
+    if (!state.scheduleTypesLoaded) tasks.push(loadScheduleTypes());
+    if (!state.allTermsLoaded) tasks.push(loadAllTerms());
+    if (tasks.length) await Promise.all(tasks);
+  }
+}
+
 elements.content.addEventListener("click", async (event) => {
   const treeSummary = event.target.closest?.(".curriculum-tree-summary");
   if (treeSummary) {
@@ -15409,383 +15167,9 @@ elements.content.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]");
   if (!button) return;
   const action = button.dataset.action;
-  if (action === "save-campus-setting" || action === "save-campus-prompt") {
-    const select = document.getElementById(action === "save-campus-prompt" ? "campusPromptSelect" : "campusSettingSelect");
-    const code = normalizeCampusCode(select?.value);
-    if (action === "save-campus-prompt" && !code) {
-      setNotice("请先选择南湖校区或浑南校区。", "error");
-      return;
-    }
-    state.campus.code = persistCampusCode(code);
-    state.campus.promptOpen = false;
-    setNotice(code ? `已设置默认校区：${campusLabel(code)}。` : "已清除默认校区。", "success");
-    render();
-    return;
-  }
-  if (action === "dismiss-campus-prompt") {
-    state.campus.promptOpen = false;
-    render();
-    return;
-  }
-  if (action === "open-webvpn-tool") {
-    state.webvpnTool.open = true;
-    updateWebVpnTool(state.webvpnTool.input);
-    render();
-    return;
-  }
-  if (action === "close-webvpn-tool") {
-    state.webvpnTool.open = false;
-    render();
-    return;
-  }
-  if (action === "webvpn-use-site") {
-    updateWebVpnTool(button.dataset.webvpnUrl || "");
-    render();
-    return;
-  }
-  if (action === "generate-webvpn-url") {
-    const input = document.getElementById("webvpnUrlInput");
-    updateWebVpnTool(input?.value || state.webvpnTool.input);
-    render();
-    return;
-  }
-  if (action === "copy-webvpn-url") return copyGeneratedWebVpnUrl();
-  if (action === "copy-login-diagnostics") return copyAndroidLoginDiagnostics();
-  if (action === "open-webvpn-url") return openGeneratedWebVpnUrl();
-  if (action === "open-portal") return openPortal();
-  if (action === "start-curriculum-bootstrap" || action === "open-curriculum-portal") return startCurriculumBootstrap();
-  if (action === "open-course-outline-original") return openCourseOutlineOriginal();
-  if (action === "search-course-outline") return searchCourseOutline();
-  if (action === "clear-course-outline") {
-    state.courseOutline.list.filters = { code: "", name: "", unit: "", level: "", grade: "" };
-    return loadCourseOutlineList({ pageNumber: 1, force: true });
-  }
-  if (action === "refresh-course-outline-list") return loadCourseOutlineList({ force: true });
-  if (action === "course-outline-page") {
-    const page = Number(button.dataset.outlinePage);
-    if (page > 0) return loadCourseOutlineList({ pageNumber: page, force: true });
-    return;
-  }
-  if (action === "show-course-outline-detail") {
-    const row = state.courseOutline.list.rows[Number(button.dataset.outlineRowIndex)];
-    return loadCourseOutlineDetail(row);
-  }
-  if (action === "back-course-outline") {
-    courseOutlineDetailRequestSequence += 1;
-    state.courseOutline.detail = null;
-    render();
-    return;
-  }
-  if (action === "refresh-course-outline-detail") {
-    if (state.courseOutline.detail?.row) return loadCourseOutlineDetail(state.courseOutline.detail.row);
-    return;
-  }
-  if (action === "retry-course-outline-endpoint") return retryCourseOutlineEndpoint(button.dataset.outlineEndpoint || "");
-  if (action === "copy-course-outline") return copyCourseOutline();
-  if (action === "download-course-outline") return downloadCourseOutline();
-  if (action === "print-course-outline") {
-    if (typeof window.print === "function") window.print();
-    return;
-  }
-  if (action === "open-schedule-image-export") return openScheduleImageExport(button.dataset.scheduleScope || "personal");
-  if (action === "schedule-density") {
-    writeStoredSetting("zhizhang.scheduleDensity", button.dataset.density === "overview" ? "overview" : "readable");
-    render();
-    return;
-  }
-  if (["open-day-moves", "close-day-moves", "save-day-move", "delete-day-move"].includes(action)) return handleDayMoveAction(action, button);
-  if (action === "export-schedule-csv") return exportScheduleCsv(button.dataset.scheduleScope || "personal");
-  if (action === "open-local-schedule-ai-prompt") return openLocalScheduleAiPrompt();
-  if (action === "open-local-schedule-batch-import") return openLocalScheduleBatchImport();
-  if (action === "copy-local-schedule-ai-prompt") {
-    const transfer = localScheduleTransferState();
-    const prompt = transfer.promptText || localScheduleAiPrompt();
-    if (!prompt) return;
-    await copyLocalScheduleTransferText(prompt, "AI 批量导入 Prompt 已复制。现在可以把课表图片发给其他 AI。");
-    render();
-    return;
-  }
-  if (action === "select-local-schedule-ai-prompt") return selectLocalScheduleAiPrompt();
-  if (action === "analyze-local-schedule-import") return analyzeLocalScheduleImport();
-  if (action === "confirm-local-schedule-import") return confirmLocalScheduleImport();
-  if (action === "open-local-schedule-settings") {
-    clearLocalScheduleTransfer();
-    state.view = "settings";
-    render();
-    return;
-  }
-  if (action === "close-local-schedule-transfer") {
-    clearLocalScheduleTransfer();
-    render();
-    return;
-  }
-  if (action === "close-schedule-export") {
-    state.scheduleExport = null;
-    render();
-    return;
-  }
-  if (action === "toggle-course-name-sort") {
-    const scope = button.dataset.courseTransferScope || "all";
-    const current = courseTransferSortMode(scope);
-    const next = current === "source" ? "asc" : current === "asc" ? "desc" : "source";
-    state.courseTransfer.sortMode[scope] = next;
-    render();
-    return;
-  }
-  if (action === "start-course-selection") {
-    const scope = button.dataset.courseTransferScope || "all";
-    state.courseTransfer.selectionScope = scope;
-    state.courseTransfer.selectionMode = true;
-    state.courseTransfer.selectedKeys.clear();
-    clearCourseTransferModal();
-    render();
-    return;
-  }
-  if (action === "cancel-course-selection") {
-    state.courseTransfer.selectionMode = false;
-    state.courseTransfer.selectionScope = "";
-    state.courseTransfer.selectedKeys.clear();
-    clearCourseTransferModal();
-    render();
-    return;
-  }
-  if (action === "export-selected-courses") {
-    return openCourseExport(button.dataset.courseTransferScope || state.courseTransfer.selectionScope || "all");
-  }
-  if (action === "open-course-import") {
-    state.courseTransfer.mode = "import";
-    state.courseTransfer.text = "";
-    state.courseTransfer.error = "";
-    state.courseTransfer.notice = "";
-    state.courseTransfer.result = null;
-    render();
-    return;
-  }
-  if (action === "copy-course-export") return copyCourseExport();
-  if (action === "download-course-export") return downloadCourseExport();
-  if (action === "analyze-course-import") return analyzeCourseImport();
-  if (action === "close-course-transfer") {
-    clearCourseTransferModal();
-    render();
-    return;
-  }
-  if (action === "toggle-course-selection" || action === "toggle-course-selection-all") return;
-  if (action === "confirm-schedule-image-export") return exportScheduleImage();
-  if (action === "refresh") return refresh();
-  if (action === "view-settings") {
-    state.selectedCourse = null;
-    state.selectedCourseScope = "personal";
-    state.view = "settings";
-    render();
-    return;
-  }
-  if (action === "clear-personal-cache") return clearPersonalCache();
-  if (action === "save-current-term") return saveManualCurrentTerm();
-  if (action === "sync-current-term") return syncCurrentTermFromSchool();
-  if (action === "schedule-days") {
-    state.scheduleDisplay.personal = "days";
-    state.selectedCourse = null;
-    scheduleGridGesture = null;
-    scheduleGridEdgeArm = null;
-    render();
-    return;
-  }
-  if (action === "schedule-week") {
-    // 只有第一次进入个人周表，或切换了学期后尚未主动选择过周次时，
-    // 才按开学日期定位当前周。用户主动选择“全部周次/其他周次”后保留选择。
-    if (!state.scheduleWeek.personal) state.scheduleWeek.personal = defaultPersonalScheduleWeek();
-    state.scheduleDisplay.personal = "week";
-    state.selectedCourse = null;
-    scheduleGridGesture = null;
-    scheduleGridEdgeArm = null;
-    render();
-    return;
-  }
-  if (action === "save-calendar-settings") {
-    const input = document.getElementById("firstWeekStartInput");
-    const value = input?.value || "";
-    const date = normalizeCalendarDate(value);
-    if (value && (!date || date.getDay() !== 0)) {
-      setNotice("第一周的第一天必须是周日，请重新选择日期。", "error");
-      return;
-    }
-    state.calendar.firstWeekStart = value;
-    writeStoredSetting("zhizhang.firstWeekStart", value);
-    // 开学日期改变后，之前手动选择的周次已经没有确定的学周语义；
-    // 下一次进入周表应重新按新日期定位当前周。用户之后手动选择的
-    // “全部周次”或其他周次仍会继续保留，直到再次切换学期/改日期。
-    state.scheduleWeek.personal = "";
-    state.scheduleWeekTransition.personal = "";
-    scheduleGridGesture = null;
-    scheduleGridEdgeArm = null;
-    state.scheduleDisplay.personal = "days";
-    prepareCampusPromptForPersonalView("personal", state.view);
-    state.view = "personal";
-    setNotice(value ? "学周设置已保存，课表已按周日重新计算。" : "已清除学周设置；设置教学周后才能准确显示今天和明天的课程。", "success");
-    render();
-    return;
-  }
-  if (action === "clear-calendar-settings") {
-    state.calendar.firstWeekStart = "";
-    writeStoredSetting("zhizhang.firstWeekStart", "");
-    state.scheduleWeek.personal = "";
-    state.scheduleWeekTransition.personal = "";
-    scheduleGridGesture = null;
-    scheduleGridEdgeArm = null;
-    state.scheduleDisplay.personal = "days";
-    prepareCampusPromptForPersonalView("personal", state.view);
-    state.view = "personal";
-    setNotice("已清除学周设置；设置教学周后才能准确显示今天和明天的课程。", "success");
-    render();
-    return;
-  }
-  if (action === "close-course") {
-    sportProjectRequestSequence += 1;
-    state.selectedCourse = null;
-    state.selectedCourseScope = "personal";
-    render();
-    return;
-  }
-  if (action === "close-score-detail") {
-    state.scoreDetail = null;
-    render();
-    return;
-  }
-  if (action === "acknowledge-new-scores") {
-    acknowledgeCurrentScoreReminder();
-    return;
-  }
-  if (action === "show-score-detail") {
-    return openScoreDetail(Number(button.dataset.scoreIndex));
-  }
-  if (action === "retry-score-detail") {
-    const index = state.data.scores.indexOf(state.scoreDetail?.row);
-    return openScoreDetail(index);
-  }
-  if (action === "close-curriculum-course") {
-    curriculumTextbookRequestSequence += 1;
-    state.curriculum.courseDetail = null;
-    render();
-    return;
-  }
-  if (action === "export-curriculum-pdf") {
-    return exportCurriculumPdf();
-  }
-  if (action === "show-curriculum-course") {
-    const key = button.dataset.courseKey || "";
-    const row = state.curriculum.courses.find((course) => curriculumCourseKey(course) === key);
-    if (!row) return;
-    curriculumTextbookRequestSequence += 1;
-    const detail = { row, loading: false, error: "", textbook: curriculumTextbookState(row) };
-    const cached = curriculumTextbookCache.get(detail.textbook.cacheKey);
-    if (cached) applyCurriculumTextbookCache(detail.textbook, cached);
-    state.curriculum.courseDetail = detail;
-    render();
-    if (!cached) loadCurriculumCourseTextbook(detail).catch(() => undefined);
-    return;
-  }
-  if (action === "select-curriculum-textbook-candidate") {
-    return selectCurriculumTextbookCandidate(button.dataset.curriculumTextbookKey || "");
-  }
-  if (action === "retry-curriculum-textbook" || action === "refresh-curriculum-textbook") {
-    return retryCurriculumTextbookLookup(true);
-  }
-  if (action === "choose-another-curriculum-textbook") {
-    return chooseAnotherCurriculumTextbook();
-  }
-  if (action === "retry-curriculum") {
-    return IS_ANDROID_APP ? loadCurriculumPlans() : startCurriculumBootstrap();
-  }
-  if (action === "refresh-curriculum") {
-    return IS_ANDROID_APP ? loadCurriculumPlans() : startCurriculumBootstrap();
-  }
-  if (action === "curriculum-expand-all" || action === "curriculum-collapse-all") {
-    const open = action === "curriculum-expand-all";
-    state.curriculum.expanded = Object.fromEntries(curriculumTreeKeys(state.curriculum.groups).map((key) => [key, open]));
-    render();
-    return;
-  }
-  if (action === "close-all-detail") {
-    allScheduleDetailRequestSequence += 1;
-    state.selectedCourse = null;
-    state.selectedCourseScope = "personal";
-    state.allDetail = null;
-    render();
-    return;
-  }
-  if (action === "show-course") {
-    const scope = button.dataset.courseScope || "personal";
-    const index = Number(button.dataset.courseIndex);
-    const detailIndex = Number(button.dataset.courseDetailIndex);
-    state.selectedCourse = resolveScheduleItemFromAction(button) || (scope === "personal" && Number.isInteger(detailIndex) && detailIndex >= 0
-      ? state.data.scheduleDetail[detailIndex] || courseAtScopeIndex(scope, index)
-      : courseAtScopeIndex(scope, index));
-    state.selectedCourseScope = scope;
-    if (state.selectedCourse && courseIsSport(state.selectedCourse)) {
-      return loadSportProjectsForCourse(state.selectedCourse, scope);
-    }
-    render();
-    return;
-  }
-  if (action === "all-page") {
-    const page = Number(button.dataset.page);
-    if (page > 0) {
-      state.allPage = page;
-      state.allDetail = null;
-      state.selectedCourse = null;
-      render();
-    }
-    return;
-  }
-  if (action === "show-all-detail") {
-    return queryAllScheduleDetail(Number(button.dataset.rowIndex));
-  }
-  if (["view-scores", "view-curriculum", "view-course-outline", "view-exams", "view-personal", "view-all"].includes(action)) {
-    state.selectedCourse = null;
-    state.selectedCourseScope = "personal";
-  }
-  if (action === "view-scores") state.view = "scores";
-  if (action === "view-curriculum" && !IS_ANDROID_APP) {
-    state.view = "curriculum";
-    invalidateCurriculum();
-    state.curriculum.bootstrap = { status: "idle", message: "", error: "", tabId: null, reading: false };
-  }
-  if (action === "view-course-outline" && !IS_ANDROID_APP) {
-    state.view = "course-outline";
-    state.courseOutline.detail = null;
-  }
-  if (action === "view-exams") state.view = "exams";
-  if (action === "view-personal") {
-    prepareCampusPromptForPersonalView("personal", state.view);
-    state.view = "personal";
-  }
-  if (action === "view-all") state.view = "all";
-  if (action === "search-all") {
-    const mode = document.getElementById("allMode");
-    if (mode) state.allTypeCode = mode.value;
-    const term = document.getElementById("allTermSelect");
-    const keyword = document.getElementById("allKeyword");
-    const code = document.getElementById("allCode");
-    const name = document.getElementById("allName");
-    if (term) state.allTermCode = term.value;
-    state.filters.allKeyword = keyword?.value || "";
-    state.filters.allCode = code?.value || "";
-    state.filters.allName = name?.value || "";
-    return queryAllSchedule();
-  }
-  render();
-  if (action === "view-scores" && !state.loading) {
-    await refresh();
-  }
-  if (state.view === "course-outline" && !state.courseOutline.list.loaded && !state.courseOutline.list.loading) {
-    loadCourseOutlineList();
-  }
-  if (state.view === "all") {
-    const tasks = [];
-    if (!state.scheduleTypesLoaded) tasks.push(loadScheduleTypes());
-    if (!state.allTermsLoaded) tasks.push(loadAllTerms());
-    if (tasks.length) await Promise.all(tasks);
-  }
+  const handler = Object.prototype.hasOwnProperty.call(contentActionHandlers, action) ? contentActionHandlers[action] : null;
+  if (handler) return handler(button, event, action);
+  return handleContentNavigation(action);
 });
 
 const SCHEDULE_GRID_SWIPE_THRESHOLD = 52;

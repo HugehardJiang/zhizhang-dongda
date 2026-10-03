@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.128` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.109` / `109` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.129` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.110` / `110` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -152,7 +152,7 @@ saveImage / saveCsv
 
 ## 5. `dashboard.js` 分区（按行号，以当前文件为准）
 
-文件约 **10986 行**，**单文件、无模块打包**。同名 `function` 后声明覆盖先声明；改渲染时搜**最后一次**定义。
+文件约 **1.5 万行**，**单文件、无模块打包**，下表行号可能已漂移。顶层 `function` 禁止重名（`tests/no_duplicate_functions_test.js` 会拦截）；不要再用“在文件后部重新声明同名函数”的方式覆盖旧实现，直接改原函数。
 
 | 行号约 | 块 | 改这里当… |
 | --- | --- | --- |
@@ -169,12 +169,12 @@ saveImage / saveCsv
 | 4538+ | `calculateAverageGpa` | 25 级排除通识选修和二级分制；24 级及以前全计 |
 | 4985+ | `loadTermData` | 一次刷新并行拉成绩/考试/课表/GPA；空成功响应不覆盖缓存 |
 | 5127+ | 全校课表类型、分页、详情 | 独立 `allRetrying`，不要借用 `state.loading` |
-| 5463–9258 | 各页 `render*`、导出 PNG/CSV、课程传输 | 中间有重复函数，以文件后部为准 |
+| 5463–9258 | 各页 `render*`、导出 PNG/CSV、课程传输 | 页面 renderer 经 `*WithLocalOverlay` 合并本地层 |
 | **9259–9308** | **`render()`** | 路由总入口：按 `state.view` 填 `#content` |
 | 9384–9437 | `refresh()` | 先缓存/本地安排，再打网；代次号作废旧请求 |
 | **10864–13315** | **本地课表 overlay** | schema `zhizhang-local-schedule/v1`；**禁止写入 `state.data.courses`** |
 | **13317–14088** | **本地课表批量导入** | schema `zhizhang-schedule-import/v1`；AI Prompt 使用当前校区时间和第一周周日；预览后原子写入本地层，不改教务缓存或原有导出 |
-| 14089–文末 | DOM 事件、`data-action`、`__refreshDashboard` | 交互都从 `#content` 委托 |
+| 14089–文末 | DOM 事件、`data-action`、`__refreshDashboard` | `#content` 只有一个 click 分发器：新按钮在 `contentActionHandlers`（本地课表在 `localScheduleActionHandlers`）登记 `(button, event, action)` 处理函数；页面切换和未登记动作走 `handleContentNavigation`。不要再加带 `stopImmediatePropagation` 的 click 监听 |
 
 `state.view` 取值：`overview` | `personal` | `exams` | `scores` | `all` | `curriculum` | `settings`。
 

@@ -24,7 +24,7 @@ code += `\nglobalThis.t = { state, applyDayMoves, filterCoursesForDate, normaliz
   mergedPersonalScheduleRows, scheduleExportRows, scheduleExportFilteredRows, filterScheduleWeekRows,
   localScheduleCsvEntries, renderDayMovesModal, handleDayMoveAction, normalizeLocalScheduleItem,
   compactTermName, scheduleDensityControls, courseActionAttributes, resolveScheduleItemFromAction,
-  renderCourseDetailModal, courseChipMarkup, personalScheduleActions,
+  renderCourseDetailModal, courseChipMarkup, personalScheduleActions, scheduleExportActions,
   noRender() { render = () => {}; } };`;
 vm.runInNewContext(code, context);
 const t = context.t, s = t.state;
@@ -96,6 +96,7 @@ for (const row of moved.filter(row => row.dayMoveDate)) {
   const markup = t.renderCourseDetailModal();
   assert.ok(markup.includes(`原上课日期：${move.from}`));
   assert.ok(markup.includes(`实际上课：${move.to}`));
+  assert.ok(markup.indexOf('class="day-move-detail"') < markup.indexOf('class="detail-grid"'));
   assert.ok(t.courseChipMarkup(row).includes('已调课'));
   assert.ok(t.courseChipMarkup(row).includes('class="course-room"'));
 }
@@ -105,6 +106,8 @@ assert.equal(t.compactTermName('2026-2027 秋季'), '26–27 秋');
 assert.equal(t.compactTermName('自定义学期'), '自定义学期');
 assert.ok(t.scheduleDensityControls().includes('清晰大字'));
 assert.ok(t.personalScheduleActions().includes('<details class="schedule-tools">'));
+assert.ok(!t.personalScheduleActions().includes('schedule-export-action-row'));
+assert.ok(t.scheduleExportActions('personal').startsWith('<div class="button-row schedule-export-action-row">'));
 const csv = t.localScheduleCsvEntries();
 assert.ok(csv.some(row => row.courseName === '周一课程' && row.weekday === '6' && row.weekText === '3周'));
 assert.ok(csv.some(row => row.courseName === '自定义课' && row.weekday === '6'));

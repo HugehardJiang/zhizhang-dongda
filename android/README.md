@@ -51,7 +51,7 @@ export PATH="$JAVA_HOME/bin:$PATH"
 构建产物位于：
 
 ```text
-app/build/outputs/apk/release/执掌东大-Android-0.1.109-release.apk
+app/build/outputs/apk/release/执掌东大-Android-0.1.110-release.apk
 ```
 
 根目录的 `dashboard.html`、`dashboard.css`、`dashboard.js` 会在构建前自动同步到 Android assets，因此接口解析和界面逻辑与浏览器插件共用一套代码。
@@ -79,3 +79,5 @@ app/build/outputs/apk/release/执掌东大-Android-0.1.109-release.apk
 0.1.108：四个主页面共享持续保留的连接状态卡，成功后原位更新，阶段文字与真实登录节点、七组教务读取任务同步。状态卡独立于页面重绘，登录进度不再重建列表；固定高度与单行省略避免完成、异常或诊断按钮引起底部跳动。
 
 0.1.109：连接状态卡与页面内容共用左右切换容器，退出页保留小型状态快照，进入页保留实时进度和按钮节点。整页裁剪避免长列表切换时将底部状态卡提前挤入视口；快速连续切换会清理旧动画。
+
+0.1.110：查询台内部重构，不改变界面与功能：删除被同名函数覆盖的旧实现，课程详情的调课说明改为参数传入而非字符串替换，内容区点击统一由一个动作表分发；新增重复函数声明与点击分发回归测试。
