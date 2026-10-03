@@ -19,10 +19,16 @@ function createClassList() {
 }
 
 function createElementStub() {
+  const listeners = new Map();
+  const attributes = new Map();
   const element = {
     value: "", textContent: "", innerHTML: "", className: "", disabled: false, hidden: false, src: "",
     dataset: {}, selectedOptions: [], classList: createClassList(), children: [], parentElement: null,
-    addEventListener() {}, setAttribute() {}, remove() {}, focus() {}, select() {}, setSelectionRange() {}, click() {}, insertAdjacentHTML() {},
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    dispatch(type) { listeners.get(type)?.({ target: element }); },
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.get(name); },
+    remove() {}, focus() {}, select() {}, setSelectionRange() {}, click() {}, insertAdjacentHTML() {},
     replaceChildren(...children) {
       this.children.forEach((child) => { child.parentElement = null; });
       this.children = children;
@@ -64,6 +70,7 @@ global.window = global;
 global.AndroidApi = {
   request() {},
   setEcodePanelHidden(hidden) { nativeCalls.push(Boolean(hidden)); },
+  getStatusBarInset() { return 26.25; },
   getLoginMethod() { return "builtin"; },
   getLoginError() { return ""; },
   getLoginDiagnostics() { return "执掌东大 Android 登录诊断报告\n测试报告"; },
@@ -122,8 +129,9 @@ global.AndroidApi = {
     });
   }
 };
+const nativeInsetStyles = new Map();
 global.document = {
-  documentElement: { classList: createClassList() },
+  documentElement: { classList: createClassList(), style: { setProperty(key, value) { nativeInsetStyles.set(key, value); } } },
   getElementById(id) {
     if (!elements.has(id)) elements.set(id, createElementStub());
     return elements.get(id);
@@ -178,6 +186,7 @@ globalThis.__mobileShellAudit = {
   bootstrapLocalDashboard,
   syncModal: syncNativeEcodeOverlayLock,
   prepare: globalThis.__prepareNativeEcode,
+  renderNativeCampusCodeHint,
   card: androidEcodeElements.card
 };
 `;
@@ -303,9 +312,9 @@ audit.state.personalCache.available = true;
 audit.state.connected = false;
 const loginEntry = audit.renderAndroidLoginEntry();
 assert.ok(loginEntry.includes(completeLoginError));
-assert.ok(loginEntry.includes('手动登录 / 其他方式'));
+assert.ok(loginEntry.includes('登录方式'));
 assert.ok(loginEntry.includes('data-action="copy-login-diagnostics"'));
-assert.ok(loginEntry.includes('复制详细报错'));
+assert.ok(loginEntry.includes('复制登录诊断'));
 audit.copyAndroidLoginDiagnostics();
 assert.ok(nativeCalls.includes('copy-login-diagnostics'));
 
@@ -363,6 +372,7 @@ assert.ok(code.includes('MOBILE_NAV_VIEW_ALIASES'));
 assert.ok(code.includes('all: "settings"'));
 assert.ok(dashboardCss.includes('overscroll-behavior: contain; touch-action: pan-y;'));
 assert.ok(dashboardCss.includes('.schedule-action-groups'));
+assert.match(dashboardCss, /\.density-overview \.course-chip-tags\s*\{\s*display:\s*none\s*!important/);
 assert.ok(dashboardCss.includes('.schedule-action-group-secondary'));
 assert.ok(dashboardCss.includes('grid-template-columns: repeat(2, minmax(0, 1fr))'));
 assert.ok(dashboardCss.includes('.settings-switch-track::after'));
@@ -465,6 +475,40 @@ assert.ok(!fs.existsSync(path.join(
 )));
 
 audit.prepare();
+assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN_AT_TOP");
+assert.strictEqual(document.documentElement.classList.contains("has-visible-campus-code"), false);
+assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), true);
+assert.strictEqual(nativeCalls.at(-1), true);
+assert.ok(audit.renderNativeCampusCodeHint().includes("校园码已收起，点顶部图标或下拉查看"));
+assert.ok(!audit.renderNativeCampusCodeHint().includes(" hidden"));
+assert.strictEqual(nativeInsetStyles.get("--native-status-bar-inset"), "26.25px");
+for (const inset of [-10, NaN, Infinity, "invalid"]) {
+  global.__setNativeStatusBarInset(inset);
+  assert.strictEqual(nativeInsetStyles.get("--native-status-bar-inset"), "0px");
+}
+global.__setNativeStatusBarInset(26.25);
+
+// Preparation and route changes must preserve the startup collapse, and the
+// toolbar must provide an explicit reveal/hide action besides the pull gesture.
+for (const view of ["personal", "scores", "exams", "settings"]) {
+  audit.state.view = view;
+  audit.render();
+  audit.prepare();
+  assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN_AT_TOP");
+  assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), true);
+}
+const campusCodeButton = elements.get("campusCodeButton");
+assert.strictEqual(campusCodeButton.hidden, false);
+campusCodeButton.dispatch("click");
+assert.strictEqual(campusCodeButton.getAttribute("aria-expanded"), "true");
+assert.strictEqual(document.documentElement.classList.contains("has-visible-campus-code"), true);
+assert.ok(audit.renderNativeCampusCodeHint().includes(" hidden"));
+assert.strictEqual(nativeCalls.at(-1), false);
+campusCodeButton.dispatch("click");
+assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), true);
+assert.strictEqual(campusCodeButton.getAttribute("aria-expanded"), "false");
+assert.strictEqual(document.documentElement.classList.contains("has-visible-campus-code"), false);
+campusCodeButton.dispatch("click");
 assert.strictEqual(audit.state.mobileShell.campusHeaderState, "VISIBLE");
 assert.strictEqual(card.classList.contains("android-ecode-placeholder-hidden"), false);
 
@@ -570,6 +614,47 @@ assert.strictEqual(audit.state.mobileShell.campusHeaderState, "HIDDEN");
   assert.strictEqual(audit.state.data.scores[0].name, "离线缓存课程");
   assert.strictEqual(audit.state.localSchedule.items[0].title, "离线本地安排");
   assert.ok(elements.get("content").innerHTML.includes("离线"));
+  // Refreshing cached results keeps real rows; cold loading gets page-specific
+  // placeholders, while a completed empty response must remain an empty state.
+  audit.state.fatalError = "";
+  audit.state.view = "scores";
+  audit.state.loading = true;
+  audit.render();
+  assert.ok(elements.get("content").innerHTML.includes("离线缓存课程"));
+  assert.ok(!elements.get("content").innerHTML.includes("page-skeleton"));
+  const cachedScores = audit.state.data.scores;
+  const diskCache = audit.state.personalCache.termSnapshots;
+  const memoryCache = audit.state.personalCache.workingSnapshots;
+  audit.state.data.scores = [];
+  audit.render();
+  assert.ok(elements.get("content").innerHTML.includes("离线缓存课程"), "restore scores before a pending network refresh");
+  assert.ok(!elements.get("content").innerHTML.includes("skeleton-scores"));
+  // Skeletons are reserved for a genuinely uncached domain.
+  audit.state.personalCache.termSnapshots = {};
+  audit.state.personalCache.workingSnapshots = {};
+  audit.state.data.scores = [];
+  audit.render();
+  assert.ok(elements.get("content").innerHTML.includes("skeleton-scores"));
+  audit.state.loading = false;
+  audit.render();
+  assert.ok(!elements.get("content").innerHTML.includes("page-skeleton"));
+  audit.state.data.scores = cachedScores;
+  audit.state.personalCache.termSnapshots = diskCache;
+  audit.state.personalCache.workingSnapshots = memoryCache;
+  const currentTerm = audit.state.termCode;
+  audit.state.personalCache.termSnapshots[currentTerm].exams = [{name: "离线考试安排", date:"2026-10-10", status:"待考试", place:"缓存考场"}];
+  audit.state.data.exams = [];
+  audit.state.view = "exams";
+  audit.state.loading = true;
+  audit.render();
+  assert.ok(elements.get("content").innerHTML.includes("离线考试安排"));
+  assert.ok(!elements.get("content").innerHTML.includes("skeleton-exams"));
+  // Another term's snapshot is never used to fill the current page.
+  audit.state.termCode = "UNCACHED-TERM";
+  audit.state.data.exams = [];
+  audit.render();
+  assert.ok(elements.get("content").innerHTML.includes("skeleton-exams"));
+  assert.ok(!elements.get("content").innerHTML.includes("离线考试安排"));
   console.log("mobile shell smoke tests: PASS");
 })().catch((error) => {
   console.error(error);

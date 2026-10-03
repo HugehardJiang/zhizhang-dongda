@@ -466,13 +466,18 @@ globalThis.__nativeApiResponse = (requestId, status, body) => {
 
 const state = {
   // Android 顶部校园码属于 Mobile Shell，不属于某个具体页面；只在
-  // WebView 真正重新创建时回到 VISIBLE，SPA 页面 render 不得重置它。
+  // WebView 创建时默认收起，只有用户点击入口或顶部下拉才展开。
   mobileShell: {
-    campusHeaderState: CAMPUS_HEADER_VISIBLE
+    campusHeaderState: CAMPUS_HEADER_HIDDEN_AT_TOP
   },
   androidLogin: {
     status: androidLoginError() ? "failed" : "",
-    message: androidLoginError()
+    message: androidLoginError(),
+    phase: "",
+    phaseMessage: "",
+    syncMessage: "",
+    syncCompleted: 0,
+    syncTotal: 0
   },
   view: "overview",
   terms: [],
@@ -686,6 +691,7 @@ const state = {
     corrupted: false,
     lastCsvSkipped: 0
   },
+  examHistoryOpen: false,
   scoreDetail: null,
   // 只在内存里保存尚未确认的成绩明细；本地持久化仅保存不可逆指纹，
   // 并按学号与学期双重隔离，避免切换历史学期时交叉提醒。
@@ -706,17 +712,38 @@ const state = {
 
 globalThis.__androidLoginStatus = (status, message) => {
   if (!IS_ANDROID_APP) return;
-  state.androidLogin.status = String(status || "");
-  state.androidLogin.message = String(message || "");
-  if (state.androidLogin.status === "success") {
-    state.fatalError = "";
-    setNotice(state.androidLogin.message || "后台登录成功，正在刷新数据…", "success");
-  } else if (state.androidLogin.status === "retrying") {
-    setNotice(state.androidLogin.message || "正在后台重新登录…", "");
-  } else if (state.androidLogin.status === "failed") {
-    setNotice(state.androidLogin.message || "后台自动登录失败，请手动登录。", "error");
+  const nextStatus = String(status || "");
+  const nextMessage = nextStatus === "ready" ? "" : String(message || "");
+  const hadFatalError = Boolean(state.fatalError);
+  state.androidLogin.status = nextStatus;
+  state.androidLogin.message = nextMessage;
+  if (nextStatus !== "retrying") {
+    state.androidLogin.phase = "";
+    state.androidLogin.phaseMessage = "";
   }
-  render();
+  if (nextStatus === "ready") {
+    state.fatalError = "";
+    // Clear only the obsolete login toast; retain export/refresh notifications.
+    if (elements.toastRegion?.children?.[0]?.dataset?.category === "login") showToast("");
+  } else if (nextStatus === "success") {
+    state.fatalError = "";
+    setNotice(nextMessage || "后台登录成功，正在刷新数据…", "success", "login");
+  } else if (nextStatus === "retrying") {
+    setNotice(nextMessage || "正在后台重新登录…", "", "login");
+  } else if (nextStatus === "failed") {
+    setNotice(nextMessage || "后台自动登录失败，请手动登录。", "error", "login");
+  }
+  // Progress changes only this persistent footer, never rebuilds a long page.
+  syncAndroidLoginEntry();
+  if (hadFatalError && !state.fatalError) render();
+};
+
+globalThis.__androidLoginProgress = (phase, message) => {
+  if (!IS_ANDROID_APP) return;
+  state.androidLogin.status = phase === "waiting" ? "waiting" : phase === "checking" ? "checking" : "retrying";
+  state.androidLogin.phase = String(phase || "connecting");
+  state.androidLogin.phaseMessage = String(message || "正在确认学校登录…");
+  syncAndroidLoginEntry();
 };
 
 let filterRenderTimer = 0;
@@ -1044,7 +1071,7 @@ function personalCacheStatusText() {
 }
 
 function applyCachedTermSnapshot(termCode, fallback = null) {
-  const snapshot = state.personalCache.termSnapshots?.[termCode] || fallback;
+  const snapshot = state.personalCache.workingSnapshots?.[termCode] || state.personalCache.termSnapshots?.[termCode] || fallback;
   if (!snapshot || typeof snapshot !== "object") return false;
   const base = emptyPersonalData();
   const projection = linkScheduleRecords(
@@ -1067,6 +1094,44 @@ function applyCachedTermSnapshot(termCode, fallback = null) {
   state.personalCache.available = true;
   state.personalCache.studentId = state.personalCache.studentId || state.studentId;
   return true;
+}
+
+function restoreMissingPersonalCache(view = state.view) {
+  if (!["overview", "personal", "scores", "exams"].includes(view)) return;
+  if (IS_ANDROID_APP && !state.personalCache.hydrated) hydratePersonalCache();
+  if (state.studentId && state.personalCache.studentId && state.studentId !== state.personalCache.studentId) return;
+  const cached = state.personalCache.workingSnapshots?.[state.termCode]
+    || state.personalCache.termSnapshots?.[state.termCode];
+  if (!cached) return;
+  // Restore before the first route render/request. Never replace live rows
+  // with older disk rows, and never borrow another term/account's snapshot.
+  for (const domain of ["scores", "exams"]) {
+    if (!state.data[domain].length && Array.isArray(cached[domain]) && cached[domain].length) {
+      state.data[domain] = cached[domain];
+    }
+  }
+  if (!state.data.allScores.length && state.personalCache.allScores?.length) state.data.allScores = state.personalCache.allScores;
+  if (state.data.gpa === "—" && cached.gpa && cached.gpa !== "—") {
+    state.data.gpa = cached.gpa;
+    state.data.gpaMeta = { ...state.data.gpaMeta, ...(cached.gpaMeta || {}) };
+  }
+}
+
+function hasCachedPersonalDomain(domain) {
+  if (state.studentId && state.personalCache.studentId && state.studentId !== state.personalCache.studentId) return false;
+  const cached = state.personalCache.workingSnapshots?.[state.termCode] || state.personalCache.termSnapshots?.[state.termCode];
+  return Boolean(cached && Array.isArray(cached[domain]) && (cached[domain].length
+    || cached.updatedAtByDomain?.[domain] || !cached.updatedAtByDomain));
+}
+
+function renderRefreshProgress() {
+  const hasContent = !state.fatalError && !document.querySelector?.(".modal-backdrop") && (
+    state.view === "scores" ? (state.data.scores.length || hasCachedPersonalDomain("scores")) : state.view === "exams" ? (state.data.exams.length || hasCachedPersonalDomain("exams"))
+    : ["overview", "personal"].includes(state.view) && (state.data.courses.length || localScheduleItemsForTerm(state.termCode).length));
+  // Refreshing existing rows changes only the progress indicator. Keep the
+  // DOM, scroll position and focused controls until new data actually arrives.
+  if (hasContent && renderedPageView === state.view) syncPageLoadingIndicator();
+  else render();
 }
 
 function updatePersonalTermSelect() {
@@ -1240,6 +1305,33 @@ const androidEcodeElements = {
   unavailable: document.getElementById("androidEcodeUnavailable")
 };
 
+globalThis.__setNativeStatusBarInset = (inset) => {
+  const value = Number(inset);
+  const safeInset = Number.isFinite(value) ? Math.max(0, value) : 0;
+  document.documentElement.style?.setProperty?.("--native-status-bar-inset", `${safeInset}px`);
+  syncNativeEcodePanelTop();
+};
+if (IS_ANDROID_APP) {
+  try { globalThis.__setNativeStatusBarInset(globalThis.AndroidApi?.getStatusBarInset?.() || 0); } catch { /* 原生旧版本使用零安全区。 */ }
+}
+
+const nativeCampusCodeButton = document.getElementById("campusCodeButton");
+if (nativeCampusCodeButton) {
+  nativeCampusCodeButton.hidden = !IS_ANDROID_APP;
+  nativeCampusCodeButton.addEventListener("click", () => {
+    if (!IS_ANDROID_APP || nativeEcodeModalOpen()) return;
+    resetCampusHeaderPullGesture();
+    setCampusHeaderState(state.mobileShell.campusHeaderState === CAMPUS_HEADER_VISIBLE
+      ? CAMPUS_HEADER_HIDDEN : CAMPUS_HEADER_VISIBLE);
+  });
+}
+
+function renderNativeCampusCodeHint() {
+  if (!IS_ANDROID_APP) return "";
+  const hidden = state.mobileShell.campusHeaderState === CAMPUS_HEADER_VISIBLE;
+  return `<p id="nativeCampusCodeHint" class="native-ecode-hint"${hidden ? " hidden" : ""}>校园码已收起，点顶部图标或下拉查看</p>`;
+}
+
 globalThis.__setEcodeSnapshot = (snapshot) => {
   document.documentElement.classList.add("android-shell");
   if (!androidEcodeElements.card) return;
@@ -1259,8 +1351,7 @@ globalThis.__setEcodeSnapshot = (snapshot) => {
 globalThis.__prepareNativeEcode = () => {
   document.documentElement.classList.add("android-shell");
   if (!androidEcodeElements.card) return;
-  // Android 顶部直接显示官方 E 码通 WebView；这里仅保留同等高度的
-  // 占位，让官方页面可以随主页面一起上滑，不再重复渲染二维码。
+  // 原生层只负责二维码与文字，网页负责状态栏、固定顶栏及抽屉的整块玻璃。
   androidEcodeElements.card.classList.add("android-ecode-placeholder");
   // 先应用 Mobile Shell 的现有状态，再解除 hidden 属性，避免页面重新
   // 初始化或路由切换时短暂闪出一个默认可见的校园码 Header。
@@ -1268,12 +1359,76 @@ globalThis.__prepareNativeEcode = () => {
   androidEcodeElements.card.hidden = false;
   androidEcodeElements.card.setAttribute("aria-hidden", "true");
   bindNativeEcodeScroll();
+  syncNativeEcodePanelTop();
 };
 
+function syncNativeEcodePanelTop() {
+  const toolbar = document.querySelector(".app-toolbar");
+  if (!toolbar?.getBoundingClientRect || !globalThis.AndroidApi?.setEcodePanelTop) return;
+  try { globalThis.AndroidApi.setEcodePanelTop(toolbar.getBoundingClientRect().bottom); } catch { /* older shell */ }
+}
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("resize", syncNativeEcodePanelTop, { passive: true });
+}
+
+let nativeCampusContentAnimation = null;
+let nativeCampusFooterAnimation = null;
+let nativeCampusRenderPending = false;
+
+function cancelNativeCampusContentMotion() {
+  nativeCampusContentAnimation?.cancel();
+  nativeCampusFooterAnimation?.cancel();
+  nativeCampusFooterAnimation = null;
+  nativeCampusContentAnimation = null;
+  nativeCampusRenderPending = false;
+}
+
 function applyNativeEcodePlaceholderState() {
-  if (!androidEcodeElements.card) return;
+  if (!IS_ANDROID_APP || !androidEcodeElements.card) return;
   const hidden = state.mobileShell.campusHeaderState !== CAMPUS_HEADER_VISIBLE;
+  const root = document.documentElement;
+  const changed = root.classList.contains("has-visible-campus-code") !== !hidden;
+  const modalOpen = nativeEcodeModalOpen();
+  const canAnimate = changed && !modalOpen && interfaceMotionEnabled()
+    && globalThis.CSS?.supports?.("translate", "0 1px")
+    && elements.content.getBoundingClientRect && elements.content.animate;
+  // Capture the actual visual position, including an interrupted animation
+  // and scrollTop. The viewport itself never changes size or moves.
+  const previousTop = canAnimate ? elements.content.getBoundingClientRect().top : 0;
+  if (changed || modalOpen) cancelNativeCampusContentMotion();
+  root.classList.toggle("has-visible-campus-code", !hidden);
   androidEcodeElements.card.classList.toggle("android-ecode-placeholder-hidden", hidden);
+  const hint = document.getElementById("nativeCampusCodeHint");
+  if (hint) hint.hidden = !hidden;
+  if (nativeCampusCodeButton) {
+    nativeCampusCodeButton.setAttribute("aria-expanded", String(!hidden));
+    nativeCampusCodeButton.setAttribute("aria-label", hidden ? "展开校园码" : "收起校园码");
+  }
+  if (!canAnimate) return;
+  // A single layout change updates the top reservation. Scroll anchoring is
+  // disabled; if the browser clamps scrollTop at the bottom, this measurement
+  // already includes that clamp, instead of assuming a constant 112px shift.
+  const delta = previousTop - elements.content.getBoundingClientRect().top;
+  if (!Number.isFinite(delta) || Math.abs(delta) < .5) return;
+  const animation = elements.content.animate([{translate:`0 ${delta}px`}, {translate:"0 0"}],
+    {duration:340, easing:"cubic-bezier(.22,1,.36,1)", fill:"both"});
+  nativeCampusContentAnimation = animation;
+  const footer = document.getElementById("androidSessionSlot");
+  if (footer && !footer.hidden && footer.animate) {
+    nativeCampusFooterAnimation = footer.animate([{translate:`0 ${delta}px`}, {translate:"0 0"}],
+      {duration:340, easing:"cubic-bezier(.22,1,.36,1)", fill:"both"});
+    nativeCampusFooterAnimation.finished.catch(() => {});
+  }
+  animation.finished.then(() => {
+    if (nativeCampusContentAnimation !== animation) return;
+    nativeCampusContentAnimation = null;
+    animation.cancel();
+    nativeCampusFooterAnimation?.cancel();
+    nativeCampusFooterAnimation = null;
+    const pending = nativeCampusRenderPending;
+    nativeCampusRenderPending = false;
+    if (pending) render();
+  }).catch(() => {});
 }
 
 function setNativeEcodePlaceholderHidden(hidden) {
@@ -1310,6 +1465,7 @@ function syncNativeEcodeOverlayLock() {
   // 模态层拥有自己的滚动容器。打开期间，外层 Mobile Shell 不得把
   // 任何拖动解释为页面顶部下拉；同时隐藏原生校园码，避免它盖住弹窗。
   resetCampusHeaderPullGesture();
+  cancelNativeCampusContentMotion();
   setCampusHeaderState(CAMPUS_HEADER_HIDDEN);
 }
 
@@ -6371,20 +6527,33 @@ async function loadTermData(requestId = refreshRequestSequence) {
   state.loading = true;
   state.errors = [];
   state.scoreDetail = null;
-  render();
+  restoreMissingPersonalCache();
+  renderRefreshProgress();
 
   const allScoreTermCodes = [...new Set(state.terms.map((term) => term.code).filter(Boolean))];
   let cachedTerm = state.personalCache.workingSnapshots?.[termCode] || state.personalCache.termSnapshots?.[termCode] || null;
 
-  const results = await Promise.allSettled([
-    getHome("student/scores.do", { termCode }),
-    loadFullScores(termCode),
-    loadAllScoreRows(allScoreTermCodes),
-    getScore("api/wdcj/queryPjxfjd.do"),
-    getHome("student/exams.do", { termCode }),
-    getHome("student/courses.do", { termCode }),
-    postNativeScheduleDetail(termCode)
-  ]);
+  const tasks = [
+    ["成绩摘要", () => getHome("student/scores.do", { termCode })],
+    ["成绩明细", () => loadFullScores(termCode)],
+    ["历年成绩", () => loadAllScoreRows(allScoreTermCodes)],
+    ["绩点", () => getScore("api/wdcj/queryPjxfjd.do")],
+    ["考试安排", () => getHome("student/exams.do", { termCode })],
+    ["课程列表", () => getHome("student/courses.do", { termCode })],
+    ["排课网格", () => postNativeScheduleDetail(termCode)]
+  ];
+  let completed = 0;
+  updateAndroidSyncProgress("正在读取课程、成绩和考试安排…", 0, tasks.length);
+  const report = (label, succeeded) => {
+    if (requestId !== refreshRequestSequence || state.termCode !== termCode) return;
+    completed += 1;
+    updateAndroidSyncProgress(completed === tasks.length ? "读取完成，正在整理结果与本机缓存…"
+      : `${label}${succeeded ? "已读取" : "暂未读取"}，继续同步其他信息…`, completed, tasks.length);
+  };
+  const results = await Promise.allSettled(tasks.map(([label, load]) => Promise.resolve(load()).then(
+    (value) => { report(label, true); return value; },
+    (error) => { report(label, false); throw error; }
+  )));
 
   if (requestId !== refreshRequestSequence || state.termCode !== termCode) return false;
   const [scoreResult, fullScoreResult, allScoreResult, gpaResult, examResult, courseResult, scheduleResult] = results;
@@ -6811,6 +6980,7 @@ function showToast(text = "", type = "success", category = "default") {
   window.clearTimeout(toastTimer);
   const toast = document.createElement("div");
   toast.className = `toast toast-${type || "info"}`;
+  toast.dataset.category = category;
   toast.setAttribute("role", type === "error" ? "alert" : "status");
   toast.textContent = text;
   elements.toastRegion.replaceChildren(toast);
@@ -7021,7 +7191,7 @@ function renderOverview() {
       ? `<div class="overview-timeline">${todayRows.map((course) => {
         const range = overviewClockRange(course);
         const active = next.state === "active" && next.course === course;
-        return `<button class="overview-timeline-row ${active ? "is-active" : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time">${escapeHtml(range.startText || overviewCourseTime(course))}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span></button>`;
+        return `<button class="overview-timeline-row ${courseGlassToneClass(course)} ${active ? "is-active" : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time">${escapeHtml(range.startText || overviewCourseTime(course))}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span></button>`;
       }).join("")}</div>`
       : `<div class="overview-empty">今天没有课程。<button class="button button-link" type="button" data-action="view-personal">查看完整课表</button></div>`;
   const exams = sortExamRows(state.data.exams.filter((exam) => !/已结束/.test(exam.status))).slice(0, 3);
@@ -7035,7 +7205,7 @@ function renderOverview() {
   const weekContext = dateLabel.weekNumber === null
     ? `<span class="overview-week-context">教学周未设置 <button class="button button-link" type="button" data-action="view-settings">设置 →</button></span>`
     : `<span class="overview-week-context">${escapeHtml(dateLabel.week)}</span>`;
-  return `<div class="overview-page">${sectionHeading("总览", "")}<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>今日安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天的课程</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}</div>`;
+  return `<div class="overview-page">${sectionHeading("总览", "")}<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>当前安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天的课程</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}</div>`;
 }
 
 function renderOverviewUtilities() {
@@ -7152,16 +7322,18 @@ function renderExams() {
 function renderExams() {
   const rows = sortExamRows(filterRows(state.data.exams, ["name", "code", "date", "time", "place", "seat", "teacher", "type", "status"], state.filters.exams));
   const upcoming = sortExamRows(state.data.exams.filter((row) => !/已结束/.test(row.status)))[0];
-  const card = (row) => `<article class="exam-card ${examStatusClass(row.status)}"><div class="exam-date-block"><strong>${escapeHtml(row.dateDay || "—")}</strong><span>${escapeHtml(row.dateMonth ? `${row.dateMonth}月` : "待定")}</span><em>${escapeHtml(row.weekday || "")}</em></div><div class="exam-card-body"><div class="exam-card-head"><div><h4>${escapeHtml(row.name)}</h4><p>${escapeHtml(row.code)}${row.teacher ? ` · ${escapeHtml(row.teacher)}` : ""}</p></div><div class="exam-card-head-right"><span class="tag exam-type">${escapeHtml(row.type || "考试")}</span><span class="tag ${examStatusClass(row.status)}">${escapeHtml(row.status)}</span></div></div><div class="exam-facts"><div class="exam-fact"><span>时间</span><strong>${escapeHtml(row.start && row.end ? `${row.start}–${row.end}` : row.time)}</strong>${row.session ? `<small>${escapeHtml(row.session)}</small>` : ""}</div><div class="exam-fact"><span>地点</span><strong>${escapeHtml(row.place || "地点待发布")}</strong></div><div class="exam-fact"><span>座位</span><strong>${escapeHtml(row.seat ? `${row.seat}号` : "座位待发布")}</strong></div><div class="exam-fact"><span>倒计时</span><strong>${escapeHtml(row.countdown)}</strong></div></div></div></article>`;
+  const card = (row) => `<article class="exam-card ${examStatusClass(row.status)}"><div class="exam-date-block"><strong>${escapeHtml(row.dateDay || "—")}</strong><span>${escapeHtml(row.dateMonth ? `${row.dateMonth}月` : "待定")}</span><em>${escapeHtml(row.weekday || "")}</em></div><div class="exam-card-body"><div class="exam-card-head"><div><h4>${escapeHtml(row.name)}</h4><p>${escapeHtml(row.code)}${row.teacher ? ` · ${escapeHtml(row.teacher)}` : ""}</p></div><div class="exam-card-head-right"><span class="tag exam-type">${escapeHtml(row.type || "考试")}</span><span class="tag ${examStatusClass(row.status)}">${escapeHtml(row.status)}</span></div></div><div class="exam-facts"><div class="exam-fact"><span>时间</span><strong>${escapeHtml(row.start && row.end ? `${row.start}–${row.end}` : row.time)}</strong>${row.session ? `<small>${escapeHtml(row.session)}</small>` : ""}</div><div class="exam-fact"><span>地点</span><strong>${escapeHtml(row.place || "地点待发布")}</strong></div><div class="exam-fact"><span>座位</span><strong>${escapeHtml(row.seat ? `${row.seat}号` : "座位待发布")}</strong></div><div class="exam-fact"><span>${/已结束/.test(row.status) ? "状态" : "提醒"}</span><strong>${escapeHtml(/已结束/.test(row.status) ? "已结束" : row.countdown || row.status || "待发布")}</strong></div></div></div></article>`;
   const filteredUpcoming = rows.filter((row) => !/已结束/.test(row.status));
   const ended = rows.filter((row) => /已结束/.test(row.status));
   const nextMarkup = upcoming
     ? `<section class="overview-section"><div class="overview-section-header"><h3>下一场</h3></div><div class="exam-next"><div class="exam-next-date"><strong>${escapeHtml(upcoming.dateDay || "—")}</strong>${escapeHtml(upcoming.dateMonth ? `${upcoming.dateMonth}月` : "日期待发布")}<br />${escapeHtml(upcoming.weekday || "")}</div><div class="exam-next-copy"><h4>${escapeHtml(upcoming.name)}</h4><p>${escapeHtml([upcoming.time, upcoming.place, upcoming.seat ? `座位 ${upcoming.seat}` : ""].filter(Boolean).join(" · ") || "信息待发布")}</p></div><span class="exam-next-countdown">${escapeHtml(upcoming.countdown)}</span></div></section>`
     : "";
   const cards = filteredUpcoming.length ? `<div class="exam-list">${filteredUpcoming.map(card).join("")}</div>` : "";
-  const endedMarkup = ended.length ? `<details class="ended-exams"><summary>已结束 ${ended.length}</summary><div class="exam-list">${ended.map(card).join("")}</div></details>` : "";
+  const endedMarkup = ended.length ? `<details class="ended-exams"${state.examHistoryOpen ? " open" : ""}><summary>已结束 · ${ended.length} 场</summary><div class="exam-list">${ended.map(card).join("")}</div></details>` : "";
+  const completed = !upcoming && ended.length && !state.filters.exams
+    ? `<div class="exam-completed-summary"><strong>本学期考试已结束</strong><span>共 ${ended.length} 场，可展开查看历史安排。</span></div>` : "";
   const empty = !rows.length ? emptyCard(state.filters.exams ? "没有匹配的考试" : "暂无考试", state.filters.exams ? "换一个课程名、日期或考场关键词。" : "当前学期没有已发布安排。", `<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`) : "";
-  return `<div>${sectionHeading("考试", "")}<div class="panel"><div class="toolbar"><input data-filter="exams" value="${escapeHtml(state.filters.exams)}" placeholder="搜索课程、日期、考场或座位" /><span class="muted">${rows.length} / ${state.data.exams.length} 项</span></div>${nextMarkup}${cards}${endedMarkup}${empty}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`)}</div>`;
+  return `<div>${sectionHeading("考试", "")}<div class="panel"><div class="toolbar"><input data-filter="exams" value="${escapeHtml(state.filters.exams)}" placeholder="搜索课程、日期、考场或座位" /><span class="muted">${rows.length} / ${state.data.exams.length} 项</span></div>${nextMarkup}${cards}${completed}${endedMarkup}${empty}</div>${renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`)}</div>`;
 }
 
 function parseDay(value) {
@@ -7281,13 +7453,26 @@ function localScheduleSourceBadge(itemOrRow) {
   return `<span class="local-source-badge local-source-${type === "event" ? "event" : "course"}">${type === "event" ? "日程" : "自定义"}</span>`;
 }
 
+// A course keeps the same tint across weeks and views. Local schedules retain
+// the user's chosen colour; official courses use a bounded, stable palette.
+function courseGlassToneClass(course) {
+  const palette = ["blue", "teal", "green", "violet", "orange", "rose"];
+  if (course.source === "local") {
+    return `course-glass-color-${palette.includes(course.localColorKey) ? course.localColorKey : "blue"}`;
+  }
+  const identity = String(course.code || course.name || "course").trim();
+  let hash = 0;
+  for (const letter of identity) hash = (Math.imul(hash, 31) + letter.codePointAt(0)) >>> 0;
+  return `course-glass-color-${palette[hash % palette.length]}`;
+}
+
 function courseChipMarkup(course, scope = "personal", extraClass = "", style = "", availability = null) {
   const clockText = extractClockText(course.time) || localScheduleClockText(course);
   const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
   const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
   const className = ["course-chip", extraClass, course.source === "local" ? "local-schedule-chip" : ""].filter(Boolean).join(" ");
-  const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
-  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
+  const badge = (course.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
+  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span class="course-room">${escapeHtml(courseLocationText(course) || "地点待定")}</span>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
 }
 
 function localScheduleFilterText(row) {
@@ -7463,9 +7648,9 @@ function renderDailyScheduleWithLocalOverlay(rows, scope = "personal") {
       ? courses.map((course) => {
         const sectionText = [courseSectionLabel(course) === "节次待识别" ? "" : courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" · ") || (course.localAllDay ? "全天" : "时间待识别");
         const placeText = courseLocationText(course) || "地点待识别";
-        const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+        const badge = (course.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
         const conflict = localScheduleRowHasConflict(course, rows);
-        return `<button class="daily-course-card ${course.source === "local" ? `local-schedule-card local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><div class="daily-course-title"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(sectionText)}</span></div><div class="daily-course-tags">${badge}${courseTagsMarkup(course, availability)}</div><p class="daily-course-teacher">${escapeHtml(course.teacher || (course.localType === "event" ? "自定义日程" : "教师待识别"))}</p><p class="daily-course-location">${escapeHtml(placeText)}</p><small class="daily-course-meta">${escapeHtml(course.localDate ? `${course.localDate}${course.localAllDay ? " · 全天" : ""}` : `${course.weeks || "周次待识别"} · ${course.code || "无课程号"}`)}${conflict ? " · ⚠ 时间冲突" : ""}</small></button>`;
+        return `<button class="daily-course-card ${courseGlassToneClass(course)} ${course.source === "local" ? `local-schedule-card local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><div class="daily-course-title"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span>${escapeHtml(sectionText)}</span></div><div class="daily-course-tags">${badge}${courseTagsMarkup(course, availability)}</div><p class="daily-course-teacher">${escapeHtml(course.teacher || (course.localType === "event" ? "自定义日程" : "教师待识别"))}</p><p class="daily-course-location">${escapeHtml(placeText)}</p><small class="daily-course-meta">${escapeHtml(course.localDate ? `${course.localDate}${course.localAllDay ? " · 全天" : ""}` : `${course.weeks || "周次待识别"} · ${course.code || "无课程号"}`)}${conflict ? " · ⚠ 时间冲突" : ""}</small></button>`;
       }).join("")
       : info.week === null
         ? `<div class="daily-empty"><strong>教学周未设置</strong><span>一次性日程仍会显示；设置第一周周日后才能加入重复课程。</span><button class="button button-link" type="button" data-action="view-settings">设置学周 →</button></div>`
@@ -7500,7 +7685,7 @@ function renderOverviewPriority(next) {
   const isEvent = course?.source === "local" && course?.localType === "event";
   const stateLabel = isActive ? (isEvent ? "正在进行" : "正在上课") : next.state === "started" ? "已开始" : isEvent ? "下一项安排" : "下一节课";
   const stateMeta = isActive ? `已开始 ${overviewDurationText(next.elapsed)}` : next.until !== undefined ? `还有 ${overviewDurationText(next.until)}` : "时间已到";
-  const badge = isEvent || course?.source === "local" ? localScheduleSourceBadge(course) : "";
+  const badge = (isEvent || course?.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
   return `<button class="overview-priority-main ${isActive ? "is-active" : ""} ${isEvent ? "local-priority" : ""}" ${courseActionAttributes(course, "personal")} aria-label="查看${escapeHtml(course?.name || "当前安排")}详情"><div class="overview-priority-time"><strong>${escapeHtml(range.startText || (course?.localAllDay ? "全天" : overviewCourseTime(course)))}</strong><span>${escapeHtml(range.endText ? `至 ${range.endText}` : overviewCourseMeta(course))}</span></div><div class="overview-priority-copy"><strong>${escapeHtml(course?.name || "未命名安排")} ${badge}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></div><div class="overview-priority-status"><strong>${escapeHtml(stateLabel)}</strong><span>${escapeHtml(stateMeta)}</span></div></button>`;
 }
 
@@ -7513,11 +7698,11 @@ function renderOverview() {
     ? `<div class="overview-timeline">${todayRows.map((course) => {
       const range = localScheduleClockRange(course);
       const active = next.state === "active" && next.course === course;
-      const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
+      const badge = (course.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
       const conflict = localScheduleRowHasConflict(course, scheduleRows);
       const startTime = range.startText || (course.localAllDay ? "全天" : overviewCourseTime(course));
       const endTime = range.endText || "";
-      return `<button class="overview-timeline-row ${active ? "is-active" : ""} ${course.source === "local" ? `local-overview-row local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time"><b>${escapeHtml(startTime)}</b>${endTime ? `<small>至 ${escapeHtml(endTime)}</small>` : ""}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-card"><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名安排")} ${badge}${conflict ? `<em class="overview-conflict-mark">⚠ 冲突</em>` : ""}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span><span class="overview-timeline-arrow" aria-hidden="true">›</span></span></button>`;
+      return `<button class="overview-timeline-row ${courseGlassToneClass(course)} ${active ? "is-active" : ""} ${course.source === "local" ? `local-overview-row local-schedule-color-${escapeHtml(course.localColorKey || "blue")}` : ""}" ${courseActionAttributes(course, "personal")}><span class="overview-timeline-time"><b>${escapeHtml(startTime)}</b>${endTime ? `<small>至 ${escapeHtml(endTime)}</small>` : ""}</span><span class="overview-timeline-marker" aria-hidden="true"></span><span class="overview-timeline-card"><span class="overview-timeline-copy"><strong>${escapeHtml(course.name || "未命名安排")} ${badge}${conflict ? `<em class="overview-conflict-mark">⚠ 冲突</em>` : ""}</strong><span>${escapeHtml(overviewCoursePlace(course))}</span><small>${escapeHtml(overviewCourseMeta(course))}</small></span><span class="overview-timeline-arrow" aria-hidden="true">›</span></span></button>`;
     }).join("")}</div>`
     : dateLabel.weekNumber === null
       ? `<div class="overview-today-unknown">设置第一周日期后，这里会按教学周显示重复课程；本地一次性日程不受影响。</div>`
@@ -7534,7 +7719,7 @@ function renderOverview() {
   const weekContext = dateLabel.weekNumber === null
     ? `<span class="overview-week-context">教学周未设置 <button class="button button-link" type="button" data-action="view-settings">设置 →</button></span>`
     : `<span class="overview-week-context">${escapeHtml(dateLabel.week)}</span>`;
-  return `<div class="overview-page">${sectionHeading("总览", "") }<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>今日安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今天安排</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}${localNote}</div>${renderCourseDetailModal()}`;
+  return `<div class="overview-page">${sectionHeading("总览", "") }${renderNativeCampusCodeHint()}<header class="overview-date"><div class="overview-date-main"><strong>${escapeHtml(dateLabel.date)}</strong><span>${escapeHtml(dateLabel.weekday)}</span></div>${weekContext}</header><section class="overview-section overview-priority-section"><div class="overview-section-header"><h3>当前安排</h3><button class="button button-link" type="button" data-action="view-personal">查看课表</button></div>${renderOverviewPriority(next)}</section><section class="overview-section overview-today-section"><div class="overview-section-header"><h3>今日时间线</h3><button class="button button-link" type="button" data-action="view-personal">完整课表</button></div>${todayMarkup}</section><div class="overview-columns"><section class="overview-section"><div class="overview-section-header"><h3>近期考试</h3><button class="button button-link" type="button" data-action="view-exams">查看全部</button></div>${examMarkup}</section><section class="overview-section"><div class="overview-section-header"><h3>最新成绩</h3><button class="button button-link" type="button" data-action="view-scores">查看全部</button></div>${scoreMarkup}</section></div>${cacheNote}${localNote}</div>${renderCourseDetailModal()}`;
 }
 
 function renderLocalScheduleDetailModal(row) {
@@ -7547,9 +7732,8 @@ function renderLocalScheduleDetailModal(row) {
   return `<div class="modal-backdrop" role="presentation"><section class="detail-modal local-detail-modal" role="dialog" aria-modal="true" aria-label="自定义安排详情"><div class="detail-modal-head"><div><p class="eyebrow">LOCAL SCHEDULE</p><h3>${escapeHtml(item.title || "未命名安排")}</h3><p>${localScheduleSourceBadge(item)} ${item.enabled ? "" : "已停用"}</p></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid">${scheduleDetails.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || "—")}</strong></div>`).join("")}<div><span>地点</span><strong>${escapeHtml(item.location || "—")}</strong></div>${item.teacher ? `<div><span>教师</span><strong>${escapeHtml(item.teacher)}</strong></div>` : ""}</div>${item.note ? `<div class="detail-copy"><span>备注</span><p>${escapeHtml(item.note)}</p></div>` : ""}<div class="local-detail-actions"><button class="button button-primary" type="button" data-action="edit-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">编辑</button><button class="button button-ghost" type="button" data-action="copy-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">复制</button><button class="button button-danger" type="button" data-action="delete-local-schedule" data-local-schedule-id="${escapeHtml(item.id)}">删除</button></div></section></div>`;
 }
 
-function renderCourseDetailWithLocalOverlay() {
-  if (state.selectedCourse?.source === "local") return renderLocalScheduleDetailModal(state.selectedCourse);
-  const course = state.selectedCourse;
+function renderCourseDetailWithLocalOverlay(course = state.selectedCourse) {
+  if (course?.source === "local") return renderLocalScheduleDetailModal(course);
   if (!course) return "";
   const scope = state.selectedCourseScope || "personal";
   const rows = courseRowsForScope(scope);
@@ -7569,11 +7753,43 @@ function renderCourseDetailWithLocalOverlay() {
   return `<div class="modal-backdrop" role="presentation"><section class="detail-modal" role="dialog" aria-modal="true" aria-label="课程详情"><div class="detail-modal-head"><div><p class="eyebrow">COURSE DETAIL</p><h3>${escapeHtml(course.name || "未命名课程")}</h3></div><button class="button button-ghost detail-modal-close" type="button" data-action="close-course">关闭</button></div><div class="detail-grid"><div><span>课程号 / 教学班号</span><strong>${escapeHtml(course.code || "—")}</strong></div>${catalogField}<div><span>周次</span><strong>${escapeHtml(course.weeks || "—")}</strong></div><div><span>星期</span><strong>${escapeHtml(course.weekday || "—")}</strong></div><div><span>节次 / 时间</span><strong>${escapeHtml([courseSectionLabel(course), courseClockText(course)].filter(Boolean).join(" / ") || "—")}</strong></div><div><span>授课教师</span><strong>${escapeHtml(course.teacher || "—")}</strong></div><div><span>上课地点</span><strong>${escapeHtml(coursePlaceText || "—")}</strong></div>${categoryField}${assessmentField}${requirementField}<div><span>学分</span><strong>${escapeHtml(course.credit || "—")}</strong></div></div>${sportDetails}<div class="detail-copy"><span>原系统时间地点</span><p>${escapeHtml(course.detail || course.time || "—")}</p></div>${rawText ? `<details class="raw-details"><summary>查看原始字段</summary><pre>${escapeHtml(rawText)}</pre></details>` : ""}</section></div>`;
 }
 
+function compactTermName(value) {
+  const text = String(value || "");
+  const years = text.match(/(20\d{2})\D+(20\d{2})/);
+  if (!years) return text;
+  const suffix = text.slice(years.index + years[0].length);
+  const term = /秋/.test(text) ? "秋" : /春/.test(text) ? "春" : /夏/.test(text) ? "夏"
+    : /(?:第一|第1|[-_/ ]1(?:\D|$))/.test(suffix) ? "①"
+    : /(?:第二|第2|[-_/ ]2(?:\D|$))/.test(suffix) ? "②" : "";
+  return `${years[1].slice(2)}–${years[2].slice(2)}${term ? ` ${term}` : ""}`;
+}
+
+function scheduleGridDensity() {
+  return readStoredSetting("zhizhang.scheduleDensity") === "overview" ? "overview" : "readable";
+}
+
+function scheduleDensityControls() {
+  const density = scheduleGridDensity();
+  return `<div class="schedule-density-controls" role="group" aria-label="周表显示模式">${[["overview", "整周概览"], ["readable", "清晰大字"]].map(([value, label]) => `<button class="button button-small ${density === value ? "button-primary" : "button-ghost"}" type="button" data-action="schedule-density" data-density="${value}" aria-pressed="${density === value}">${label}</button>`).join("")}<small>${density === "overview" ? "概览显示课程和地点，点击查看教师等详情" : "左右滑动查看各天，点击课程查看详情"}</small></div>`;
+}
+
+function movedCourseAttributes(course) {
+  return course.dayMoveDate ? ` data-moved-occurrence="${escapeHtml(course.occurrenceId)}"` : "";
+}
+
+function dayMoveBadge(course) {
+  return course?.dayMoveDate ? `<span class="day-move-badge">已调课</span>` : "";
+}
+
+function dayMoveDetail(course) {
+  if (!course?.dayMoveDate) return "";
+  return `<section class="day-move-detail" aria-label="调课信息"><strong>已调课 · 以实际日期为准</strong><p>原上课日期：${escapeHtml(course.dayMoveFrom)}</p><p>实际上课：${escapeHtml(course.dayMoveDate)}（${escapeHtml(course.weekday)}）</p><p>${escapeHtml([courseSectionLabel(course), courseClockText(course), courseLocationText(course, true)].filter(Boolean).join(" · "))}</p><small>仅本地调整；下方原始课程信息保留用于核对。</small></section>`;
+}
+
 function personalScheduleActions() {
   const exportActions = scheduleExportActions("personal")
-    .replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "")
-    + `<button class="button button-soft button-small" type="button" data-action="open-day-moves">调休 / 整天调课${dayMovesForTerm().length ? `（${dayMovesForTerm().length}）` : ""}</button>`;
-  return `<div class="schedule-action-groups" aria-label="课表操作"><div class="schedule-action-group schedule-action-group-primary" role="group" aria-label="自定义安排"><span class="schedule-action-group-label">自定义安排</span><button class="button button-primary button-small" type="button" data-action="open-local-editor">+ 添加安排</button><button class="button button-soft button-small" type="button" data-action="open-local-manager">管理自定义安排</button></div><div class="schedule-action-group schedule-action-group-secondary" role="group" aria-label="课表导入导出"><span class="schedule-action-group-label">课表工具</span>${exportActions}${localScheduleTransferActions()}</div></div>`;
+    .replace(/^<div class="button-row schedule-export-action-row">|<\/div>$/g, "");
+  return `<div class="schedule-primary-actions" aria-label="课表操作"><button class="button button-primary" type="button" data-action="open-local-editor">+ 添加</button><button class="button button-soft" type="button" data-action="open-day-moves">调休${dayMovesForTerm().length ? `（${dayMovesForTerm().length}）` : ""}</button><details class="schedule-tools"><summary class="button button-ghost">课表工具</summary><div class="schedule-tools-panel"><button class="button button-ghost" type="button" data-action="open-local-manager">管理自定义安排</button>${exportActions}${localScheduleTransferActions()}</div></details></div>`;
 }
 
 function renderCampusPromptModal() {
@@ -7882,6 +8098,12 @@ function renderSettingsWithLocalOverlay() {
 function updatePersonalTermSelect() {
   if (!elements.termSelect) return;
   const terms = localScheduleTerms();
+  const selectedTerm = terms.find(term => term.code === state.termCode);
+  const fullName = selectedTerm?.name || selectedTerm?.code || "选择学期";
+  const compact = document.getElementById("termCompactLabel");
+  if (compact) compact.textContent = compactTermName(fullName);
+  elements.termSelect.setAttribute("aria-label", `学期：${fullName}`);
+  elements.termSelect.setAttribute("title", fullName);
   if (!terms.length) {
     elements.termSelect.innerHTML = `<option value="">暂无缓存学期</option>`;
     elements.termSelect.disabled = true;
@@ -8315,7 +8537,7 @@ elements.content.addEventListener("click", async (event) => {
   if (action === "show-local-schedule") {
     const item = (state.localSchedule.items || []).find((candidate) => candidate.id === button.dataset.localScheduleId);
     if (!item) return;
-    state.selectedCourse = localScheduleItemToCourseRow(item);
+    state.selectedCourse = resolveScheduleItemFromAction(button) || localScheduleItemToCourseRow(item);
     state.selectedCourseScope = "personal";
     state.localSchedule.managerOpen = false;
     render();
@@ -8381,9 +8603,9 @@ function courseChipMarkup(course, scope = "personal", extraClass = "", style = "
   const clockText = extractClockText(course.time) || localScheduleClockText(course);
   const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
   const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
-  const className = ["course-chip", extraClass, course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""].filter(Boolean).join(" ");
-  const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
-  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
+  const className = ["course-chip", extraClass, courseGlassToneClass(course), course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""].filter(Boolean).join(" ");
+  const badge = (course.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
+  return `<button class="${className}" ${courseActionAttributes(course, scope)} style="${style}" title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span class="course-room">${escapeHtml(courseLocationText(course) || "地点待定")}</span>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
 }
 
 function courseWeekNumbers(course) {
@@ -8905,8 +9127,8 @@ function courseGroupChipMarkup(courses, scope = "personal", style = "", availabi
     const clockText = extractClockText(course.time) || localScheduleClockText(course);
     const timeText = [course.weeks, course.weekday, courseSectionLabel(course), clockText].filter((value) => value && value !== "节次待识别").join(" ") || (course.localDate ? `${course.localDate} ${clockText}`.trim() : "时间待识别");
     const placeText = [course.teacher, courseLocationText(course)].filter(Boolean).join(" · ") || "地点待识别";
-    const badge = course.source === "local" ? localScheduleSourceBadge(course) : "";
-    return `<button class="course-chip course-chip-variant ${course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
+    const badge = (course.source === "local" ? localScheduleSourceBadge(course) : "") + dayMoveBadge(course);
+    return `<button class="course-chip course-chip-variant ${courseGlassToneClass(course)} ${course.source === "local" ? `local-schedule-chip local-schedule-color-${course.localColorKey || "blue"}` : ""}" ${courseActionAttributes(course, scope)} title="点击查看课程详情"><strong>${escapeHtml(course.name || "未命名课程")}</strong><span class="course-room">${escapeHtml(courseLocationText(course) || "地点待定")}</span>${badge}<span>${escapeHtml(timeText)}</span><span>${escapeHtml(placeText)}</span>${courseTagsMarkup(course, availability || { assessment: true, requirement: true })}</button>`;
   }).join("");
   return `<div class="schedule-course-group-chip" style="${style}">${variants}</div>`;
 }
@@ -9006,7 +9228,7 @@ function renderScheduleGrid(rows, scope = "personal") {
   }).join("");
   const unplaced = positioned.filter((item) => !item.range).map((item) => courseChipMarkup(item.course, scope, "schedule-unplaced-chip", "", availability)).join("");
   const unplacedBlock = unplaced ? `<div class="schedule-unplaced"><strong>已识别星期但未识别节次</strong><div class="schedule-unplaced-list">${unplaced}</div></div>` : "";
-  return `<div class="schedule-grid-scroll" data-schedule-scope="${escapeHtml(scope)}"><div class="schedule-grid${transitionClass}" style="--section-count:${sectionCount}">${header}${labels}${tracks}</div></div>${unplacedBlock}`;
+  return `${scheduleDensityControls()}<div class="schedule-grid-scroll density-${scheduleGridDensity()}" data-schedule-scope="${escapeHtml(scope)}"><div class="schedule-grid${transitionClass}" style="--section-count:${sectionCount}">${header}${labels}${tracks}</div></div>${unplacedBlock}`;
 }
 
 function scheduleExportRows(scope = "personal") {
@@ -10831,21 +11053,80 @@ function renderAllUtilities() {
   return renderSectionUtilities(`<button class="button button-ghost" type="button" data-action="open-portal">原系统</button>`);
 }
 
+function androidSessionDisplay() {
+  const login = state.androidLogin;
+  let title, detail, kind = "idle";
+  if (["retrying", "waiting", "checking"].includes(login.status)) {
+    title = login.status === "waiting" ? "等待完成学校验证" : login.status === "checking" ? "正在检查登录状态" : "正在恢复登录";
+    detail = login.phaseMessage || login.message || "正在连接学校统一身份认证…";
+    kind = login.status === "waiting" ? "waiting" : "loading";
+  } else if (login.status === "failed") {
+    title = "后台自动登录失败";
+    detail = login.message || "请手动登录，已有本机数据会继续保留。";
+    kind = "error";
+  } else if (state.loading) {
+    title = "正在同步教务数据";
+    detail = login.syncMessage || "正在连接教务系统，当前内容继续保留…";
+    kind = "loading";
+  } else if (state.connected) {
+    title = "教务连接正常";
+    detail = login.syncMessage || "当前登录有效，教务数据已更新。";
+    kind = "ready";
+  } else if (login.status === "success") {
+    title = "登录已恢复";
+    detail = "正在准备同步最新教务数据…";
+    kind = "loading";
+  } else {
+    title = state.personalCache.available ? "当前显示本机缓存" : "等待连接教务系统";
+    detail = login.status === "probe" ? "网络暂时不可用，保留现有数据，稍后可刷新。"
+      : state.fatalError ? "暂时无法读取教务数据，可重新登录后刷新。"
+      : login.syncMessage || "连接恢复后会尝试更新，也可随时手动登录。";
+  }
+  const domain = {scores: "scores", exams: "exams", personal: "schedule"}[state.view];
+  const savedAt = cacheDateText((domain && state.data?.updatedAtByDomain?.[domain])
+    || state.personalCache.savedAt || state.updatedAt);
+  return {title, detail, kind, meta: savedAt ? `数据更新于 ${savedAt}` : "尚未获取教务数据",
+    count: kind === "loading" && !login.phase && login.syncTotal ? `${login.syncCompleted || 0} / ${login.syncTotal}` : ""};
+}
+
 function renderAndroidLoginEntry() {
   if (!IS_ANDROID_APP) return "";
-  const loginStatus = state.androidLogin.status;
-  const loginMessage = state.androidLogin.message;
-  const shouldShow = loginStatus === "retrying" || loginStatus === "failed"
-    || (state.personalCache.available && !state.connected);
-  if (!shouldShow || state.fatalError) return "";
-  const savedAt = cacheDateText(state.personalCache.savedAt);
-  const retrying = loginStatus === "retrying";
-  const title = retrying ? "正在后台重新登录" : loginStatus === "failed" ? "后台自动登录失败" : "当前显示本机缓存";
-  const detail = loginMessage || "教务系统登录会话已失效或暂时不可用。";
-  const diagnosticAction = loginStatus === "failed"
-    ? `<button class="button button-ghost" type="button" data-action="copy-login-diagnostics">复制详细报错</button>`
-    : "";
-  return `<section class="android-login-entry" aria-live="polite"><div class="android-login-entry-copy"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p>${savedAt ? `<small>缓存时间：${escapeHtml(savedAt)}</small>` : ""}</div><div class="android-login-entry-actions"><button class="button button-primary" type="button" data-action="open-portal">手动登录 / 其他方式</button>${diagnosticAction}</div></section>`;
+  const display = androidSessionDisplay();
+  return `<section class="android-login-entry" data-session-kind="${display.kind}" aria-label="教务连接与登录状态"><div class="android-session-head"><span class="android-session-mark" aria-hidden="true"></span><strong data-session-title>${escapeHtml(display.title)}</strong><span data-session-count>${escapeHtml(display.count)}</span></div><p class="android-session-progress" data-session-progress role="status" aria-live="polite" aria-atomic="true" title="${escapeHtml(display.detail)}">${escapeHtml(display.detail)}</p><div class="android-session-footer"><small data-session-meta>${escapeHtml(display.meta)}</small><div class="android-login-entry-actions"><button class="button button-ghost button-small" type="button" data-action="copy-login-diagnostics" aria-label="复制登录诊断">诊断</button><button class="button button-soft button-small" type="button" data-action="open-portal">登录方式</button></div></div></section>`;
+}
+
+function syncAndroidLoginEntry() {
+  if (!IS_ANDROID_APP || typeof document === "undefined") return;
+  const slot = document.getElementById("androidSessionSlot");
+  if (!slot) return;
+  slot.hidden = !["overview", "personal", "scores", "exams"].includes(state.view);
+  if (slot.hidden) return;
+  // The slot is a sibling of the changing page. Keep its nodes and dimensions
+  // through login recovery, data refreshes and changes between primary pages.
+  if (!slot.querySelector(".android-login-entry")) slot.innerHTML = renderAndroidLoginEntry();
+  const display = androidSessionDisplay();
+  const card = slot.querySelector(".android-login-entry");
+  if (!card) return;
+  card.dataset.sessionKind = display.kind;
+  for (const [key, value] of [["title", display.title], ["progress", display.detail], ["meta", display.meta], ["count", display.count]]) {
+    const node = slot.querySelector(`[data-session-${key}]`);
+    if (!node || node.textContent === value) continue;
+    node.textContent = value;
+    if (key === "progress") {
+      node.title = value;
+      if (interfaceMotionEnabled() && node.animate) {
+        node.getAnimations?.().forEach((animation) => animation.cancel());
+        node.animate([{opacity: .45, transform: "translateY(3px)"}, {opacity: 1, transform: "none"}], {duration: 180, easing: "ease-out"});
+      }
+    }
+  }
+}
+
+function updateAndroidSyncProgress(message, completed = 0, total = 0) {
+  state.androidLogin.syncMessage = message;
+  state.androidLogin.syncCompleted = completed;
+  state.androidLogin.syncTotal = total;
+  syncAndroidLoginEntry();
 }
 
 const MOBILE_NAV_VIEW_ALIASES = Object.freeze({
@@ -10853,6 +11134,267 @@ const MOBILE_NAV_VIEW_ALIASES = Object.freeze({
   curriculum: "settings",
   "course-outline": "settings"
 });
+
+let renderedPageView = "";
+
+function interfaceMotionEnabled() {
+  return typeof globalThis.matchMedia !== "function" || !globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+const PRIMARY_PAGE_ORDER = ["overview", "personal", "scores", "exams", "settings"];
+let activeRouteTransition = null;
+let routeRenderPending = false;
+
+function primaryPageIndex(view) {
+  return PRIMARY_PAGE_ORDER.indexOf(MOBILE_NAV_VIEW_ALIASES[view] || view);
+}
+
+function setNativeDashboardMotionActive(active) {
+  try { globalThis.AndroidApi?.setDashboardMotionActive?.(active); } catch { /* older shell */ }
+}
+
+function releaseRouteLayers(transition) {
+  transition.frames.forEach((frame) => cancelAnimationFrame(frame));
+  transition.animations.forEach((animation) => animation.cancel());
+  transition.viewport.remove();
+  transition.arrival.classList.remove("route-arrival");
+  transition.arrival.style.transform = "";
+  transition.arrival.style.maxHeight = "";
+  setNativeDashboardMotionActive(false);
+  transition.resolve();
+}
+
+function cancelRouteTransition() {
+  const transition = activeRouteTransition;
+  activeRouteTransition = null;
+  routeRenderPending = false;
+  if (transition) releaseRouteLayers(transition);
+}
+
+function captureRouteDeparture() {
+  if (!renderedPageView || renderedPageView === state.view || !interfaceMotionEnabled()
+      || !elements.content.getBoundingClientRect || !elements.content.animate
+      || document.querySelector(".modal-backdrop")) return null;
+  const page = document.querySelector(".page-wrap");
+  if (!page?.getBoundingClientRect) return null;
+  // Read geometry before writing. Reparent the existing children instead of
+  // cloning a long timetable/grade page and allocating a second entire tree.
+  const viewportRect = page.getBoundingClientRect();
+  const contentRect = elements.content.getBoundingClientRect();
+  const sessionSlot = document.getElementById("androidSessionSlot");
+  const sessionRect = sessionSlot && !sessionSlot.hidden ? sessionSlot.getBoundingClientRect() : null;
+  cancelNativeCampusContentMotion();
+  const departingContent = document.createElement("section");
+  departingContent.className = elements.content.className;
+  departingContent.classList.remove("route-arrival");
+  while (elements.content.firstChild) departingContent.appendChild(elements.content.firstChild);
+  departingContent.querySelectorAll("[id]").forEach((node) => node.removeAttribute("id"));
+  departingContent.querySelectorAll("[aria-live]").forEach((node) => node.removeAttribute("aria-live"));
+  departingContent.setAttribute("aria-hidden", "true");
+  departingContent.inert = true;
+  const viewport = document.createElement("div");
+  viewport.className = "route-departure";
+  viewport.setAttribute("aria-hidden", "true");
+  viewport.inert = true;
+  Object.assign(viewport.style, { left: `${viewportRect.left}px`, top: `${viewportRect.top}px`,
+    width: `${viewportRect.width}px`, height: `${viewportRect.height}px` });
+  Object.assign(departingContent.style, { position: "absolute", margin: "0", width: `${contentRect.width}px`,
+    left: `${contentRect.left - viewportRect.left}px`, top: `${contentRect.top - viewportRect.top}px` });
+  const departingBody = document.createElement("div");
+  departingBody.className = "page-body";
+  Object.assign(departingBody.style, { position: "absolute", inset: "0" });
+  departingBody.appendChild(departingContent);
+  // Snapshot only the small status card. Keep its live event/progress root in
+  // the arrival page, while the departing page retains its previous status.
+  if (sessionRect) {
+    const departingSession = sessionSlot.cloneNode(true);
+    departingSession.removeAttribute("id");
+    departingSession.querySelectorAll("[id], [aria-live]").forEach((node) => {
+      node.removeAttribute("id"); node.removeAttribute("aria-live");
+    });
+    departingSession.setAttribute("aria-hidden", "true");
+    departingSession.inert = true;
+    Object.assign(departingSession.style, { position: "absolute", margin: "0", width: `${sessionRect.width}px`,
+      left: `${sessionRect.left - viewportRect.left}px`, top: `${sessionRect.top - viewportRect.top}px` });
+    departingBody.appendChild(departingSession);
+  }
+  viewport.appendChild(departingBody);
+  return { viewport, departingContent, departingBody, width: viewportRect.width, bottom: viewportRect.bottom, from: renderedPageView };
+}
+
+function animateRouteArrival(departure) {
+  if (!departure) return;
+  if (!interfaceMotionEnabled() || document.querySelector(".modal-backdrop")) { departure.viewport.remove(); return; }
+  const from = primaryPageIndex(departure.from), to = primaryPageIndex(state.view);
+  const direction = from >= 0 && to >= 0 ? Math.sign(to - from) || 1 : 1;
+  const distance = direction * departure.width;
+  document.body.appendChild(departure.viewport);
+  const arrival = document.getElementById("pageBody") || elements.content;
+  const transition = { viewport: departure.viewport, arrival, animations: [], frames: [], resolve: null, finished: null };
+  transition.finished = new Promise((resolve) => { transition.resolve = resolve; });
+  activeRouteTransition = transition;
+  setNativeDashboardMotionActive(true);
+  arrival.classList.add("route-arrival");
+  arrival.style.transform = `translateX(${distance}px)`;
+  // Give layout and compositor promotion their own frame before the motion
+  // starts. Bound the incoming paint to the viewport, rather than rasterizing
+  // a full semester's off-screen grades during the first moving frame.
+  transition.frames.push(requestAnimationFrame(() => {
+    if (activeRouteTransition !== transition) return;
+    const rect = arrival.getBoundingClientRect();
+    arrival.style.maxHeight = `${Math.max(1, departure.bottom - rect.top)}px`;
+    transition.frames.push(requestAnimationFrame(() => {
+      if (activeRouteTransition !== transition) return;
+      const options = { duration: 340, easing: "cubic-bezier(.22,1,.36,1)", fill: "both" };
+      arrival.style.transform = "";
+      transition.animations = [
+        departure.departingBody.animate([{ transform: "translateX(0)" }, { transform: `translateX(${-distance}px)` }], options),
+        arrival.animate([{ transform: `translateX(${distance}px)` }, { transform: "translateX(0)" }], options)
+      ];
+      Promise.allSettled(transition.animations.map((animation) => animation.finished)).then(() => {
+        if (activeRouteTransition !== transition) return;
+        activeRouteTransition = null;
+        const pending = routeRenderPending;
+        routeRenderPending = false;
+        releaseRouteLayers(transition);
+        if (pending) render();
+      });
+    }));
+  }));
+}
+
+function refreshAfterRouteArrival(view) {
+  const transition = activeRouteTransition;
+  if (transition) {
+    transition.finished.then(() => refreshAfterRouteArrival(view));
+    return;
+  }
+  if (state.view === view && !state.loading) refresh();
+}
+
+function renderPageSkeleton(view = state.view) {
+  const line = (size = "") => `<span class="skeleton-line ${size}"></span>`;
+  const card = `<div class="skeleton-card">${line("wide")}${line()}${line("short")}</div>`;
+  let shape;
+  if (view === "scores") shape = `<div class="skeleton-card skeleton-gpa">${line("short")}${line("number")}${line()}</div>${Array(5).fill(`<div class="skeleton-score">${line("wide")}${line("short")}</div>`).join("")}`;
+  else if (view === "personal") shape = `<div class="skeleton-toolbar">${line("short")}${line("short")}</div><div class="skeleton-week">${Array(7).fill(line()).join("")}</div>${Array(3).fill(card).join("")}`;
+  else if (view === "exams") shape = `<div class="skeleton-card skeleton-feature">${line("short")}${line("wide")}${line()}</div>${Array(3).fill(card).join("")}`;
+  else shape = `<div class="skeleton-date">${line("number")}${line("short")}</div>${line("short")}${card}${line("short")}${Array(3).fill(`<div class="skeleton-timeline">${line("short")}${card}</div>`).join("")}`;
+  return `<section class="page-skeleton skeleton-${escapeHtml(view)}" aria-busy="true" aria-label="正在加载${escapeHtml({overview:"首页",personal:"课表",scores:"成绩",exams:"考试"}[view] || "页面")}"><div class="page-loading-status" role="status"><span class="loading-orbit" aria-hidden="true"></span>正在同步教务数据…</div><div aria-hidden="true">${shape}</div></section>`;
+}
+
+function syncPageLoadingIndicator() {
+  syncAndroidLoginEntry();
+  const refresh = elements.refreshButton || document.getElementById("refreshButton");
+  refresh?.classList.toggle("is-refreshing", Boolean(state.loading));
+  refresh?.setAttribute("aria-label", state.loading ? "正在同步数据" : "刷新数据");
+  elements.content.setAttribute?.("aria-busy", String(Boolean(state.loading)));
+}
+
+// One delegated press controller covers controls created by subsequent renders.
+const LIQUID_CONTROL_SELECTOR = "button, a.button, summary, select, .settings-switch, [role='button']";
+const liquidControlAnimations = new WeakMap();
+let activeLiquidPress = null;
+
+function liquidControlForEvent(event) {
+  const control = event.target?.closest?.(LIQUID_CONTROL_SELECTOR);
+  return control && !control.disabled && control.getAttribute("aria-disabled") !== "true"
+    && !control.closest("[inert], .route-departure, .is-modal-exiting") ? control : null;
+}
+
+function animateLiquidControl(control, pressed, cancelled = false) {
+  const current = typeof globalThis.getComputedStyle === "function" ? globalThis.getComputedStyle(control).transform : "none";
+  liquidControlAnimations.get(control)?.cancel();
+  liquidControlAnimations.delete(control);
+  if (!interfaceMotionEnabled() || !control.animate) return;
+  const compact = control.matches?.(".icon-button, .mobile-nav-item, .settings-switch");
+  const frames = pressed
+    ? [{ transform: current }, { transform: compact ? "scale(.94, .92)" : "scale(.97, .94)" }]
+    : cancelled ? [{ transform: current }, { transform: "none" }]
+    : [{ transform: current, offset: 0 },
+       { transform: compact ? "scale(1.045, 1.025)" : "scale(1.025, 1.035)", offset: .42 },
+       { transform: "scale(.995, .99)", offset: .7 }, { transform: "none", offset: 1 }];
+  const animation = control.animate(frames, { duration: pressed ? 110 : cancelled ? 180 : 460,
+    easing: pressed ? "cubic-bezier(.2,.8,.3,1)" : "cubic-bezier(.22,.8,.35,1)", fill: "forwards" });
+  liquidControlAnimations.set(control, animation);
+  if (pressed) animation.finished.catch(() => {});
+  if (!pressed) animation.finished.then(() => {
+    if (liquidControlAnimations.get(control) === animation) {
+      liquidControlAnimations.delete(control);
+      animation.cancel(); // Return to ordinary hover/focus styles after settling.
+    }
+  }).catch(() => {});
+}
+
+function finishLiquidPress(cancelled = false) {
+  const press = activeLiquidPress;
+  activeLiquidPress = null;
+  if (!press) return;
+  press.control.classList.remove("is-liquid-pressed");
+  press.nav?.classList.remove("is-liquid-pressing");
+  animateLiquidControl(press.control, false, cancelled);
+}
+
+function beginLiquidPress(event) {
+  if (event.isPrimary === false || event.button > 0) return;
+  const control = liquidControlForEvent(event);
+  if (!control) return;
+  finishLiquidPress(true);
+  const rect = control.getBoundingClientRect();
+  const x = Number.isFinite(event.clientX) ? event.clientX : rect.left + rect.width / 2;
+  const y = Number.isFinite(event.clientY) ? event.clientY : rect.top + rect.height / 2;
+  control.style.setProperty("--liquid-touch-x", `${Math.round(x - rect.left)}px`);
+  control.style.setProperty("--liquid-touch-y", `${Math.round(y - rect.top)}px`);
+  const nav = control.closest(".mobile-bottom-nav");
+  activeLiquidPress = { control, nav, x, y, pointerId: event.pointerId };
+  control.classList.add("is-liquid-pressed");
+  nav?.classList.add("is-liquid-pressing");
+  animateLiquidControl(control, true);
+}
+
+function moveLiquidPress(event) {
+  if (!activeLiquidPress || event.pointerId !== activeLiquidPress.pointerId) return;
+  if (Math.hypot(event.clientX - activeLiquidPress.x, event.clientY - activeLiquidPress.y) > 10) finishLiquidPress(true);
+}
+
+function bindLiquidControls() {
+  document.addEventListener?.("pointerdown", beginLiquidPress, { passive: true });
+  document.addEventListener?.("pointermove", moveLiquidPress, { passive: true });
+  document.addEventListener?.("pointerup", (event) => {
+    if (event.pointerId === activeLiquidPress?.pointerId) finishLiquidPress();
+  }, { passive: true });
+  document.addEventListener?.("pointercancel", () => finishLiquidPress(true), { passive: true });
+  document.addEventListener?.("keydown", (event) => {
+    if (!event.repeat && ["Enter", " "].includes(event.key)) beginLiquidPress(event);
+  });
+  document.addEventListener?.("keyup", (event) => {
+    if (["Enter", " "].includes(event.key)) finishLiquidPress();
+  });
+  document.addEventListener?.("visibilitychange", () => { if (document.hidden) finishLiquidPress(true); });
+  globalThis.addEventListener?.("blur", () => finishLiquidPress(true));
+}
+
+bindLiquidControls();
+
+function animateModalDeparture(modal) {
+  if (!modal?.animate || !document.body?.appendChild || !interfaceMotionEnabled()) return;
+  const sheet = modal.querySelector(".detail-modal");
+  modal.classList.add("is-modal-exiting");
+  modal.setAttribute("aria-hidden", "true");
+  modal.inert = true;
+  modal.style.pointerEvents = "none";
+  document.body.appendChild(modal);
+  const animations = [modal.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, easing: "ease-out", fill: "forwards" })];
+  if (sheet?.animate) {
+    const mobile = globalThis.matchMedia?.("(max-width: 899px)").matches;
+    animations.push(sheet.animate([{ transform: "none" }, { transform: mobile ? "translateY(24px) scale(.985)" : "translateX(24px)" }],
+      { duration: 200, easing: "cubic-bezier(.4,0,1,1)", fill: "forwards" }));
+  }
+  Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
+    modal.remove();
+    syncNativeEcodeOverlayLock();
+  });
+}
 
 function mobileBottomNavView() {
   return MOBILE_NAV_VIEW_ALIASES[state.view] || state.view;
@@ -10870,6 +11412,15 @@ function syncMobileBottomNavIndicator() {
 }
 
 function render() {
+  restoreMissingPersonalCache();
+  if (nativeCampusContentAnimation && renderedPageView === state.view) {
+    nativeCampusRenderPending = true; syncPageLoadingIndicator(); return;
+  }
+  if (activeRouteTransition && renderedPageView === state.view) { routeRenderPending = true; return; }
+  const departure = captureRouteDeparture();
+  // Capture the visible position before cancelling an interrupted slide.
+  cancelRouteTransition();
+  const previousModal = elements.content?.querySelector?.(".modal-backdrop");
   try {
   if (IS_ANDROID_APP && ["curriculum", "course-outline"].includes(state.view)) state.view = "overview";
   try { updatePersonalTermSelect(); } catch { /* 初始化阶段元素可能尚未准备好 */ }
@@ -10899,15 +11450,15 @@ function render() {
     return;
   }
   if (state.loading && !state.data.scores.length && !state.data.exams.length && !state.data.courses.length && !localScheduleItemsForTerm(state.termCode).length && state.view === "overview") {
-    elements.content.innerHTML = loadingCard();
+    elements.content.innerHTML = renderPageSkeleton();
     return;
   }
   if (state.view === "overview") elements.content.innerHTML = renderOverview();
-  if (state.view === "scores") elements.content.innerHTML = state.loading && !state.data.scores.length ? loadingCard() : renderScores();
+  if (state.view === "scores") elements.content.innerHTML = state.loading && !state.data.scores.length && !hasCachedPersonalDomain("scores") ? renderPageSkeleton("scores") : renderScores();
   if (state.view === "curriculum") elements.content.innerHTML = renderCurriculum();
   if (state.view === "course-outline") elements.content.innerHTML = renderCourseOutline();
-  if (state.view === "exams") elements.content.innerHTML = state.loading && !state.data.exams.length ? loadingCard() : renderExams();
-  if (state.view === "personal") elements.content.innerHTML = state.loading && !state.data.courses.length ? `${loadingCard()}${renderCampusPromptModal()}` : renderPersonal();
+  if (state.view === "exams") elements.content.innerHTML = state.loading && !state.data.exams.length && !hasCachedPersonalDomain("exams") ? renderPageSkeleton("exams") : renderExams();
+  if (state.view === "personal") elements.content.innerHTML = state.loading && !state.data.courses.length ? `${renderPageSkeleton("personal")}${renderCampusPromptModal()}` : renderPersonal();
   if (state.view === "all") elements.content.innerHTML = renderAll();
   if (state.view === "settings") elements.content.innerHTML = renderSettings();
   if (state.view === "all" && state.allTypeCode) {
@@ -10918,9 +11469,21 @@ function render() {
     const term = document.getElementById("allTermSelect");
     if (term) term.value = state.allTermCode;
   }
-  const loginEntry = renderAndroidLoginEntry();
-  if (loginEntry) elements.content.insertAdjacentHTML("beforeend", loginEntry);
   } finally {
+    const currentModal = elements.content.querySelector?.(".modal-backdrop");
+    if (previousModal && !currentModal) animateModalDeparture(previousModal);
+    // 详情数据异步更新时沿用当前位置，不再次播放整张弹层的入场动画。
+    if (previousModal && currentModal) currentModal.classList.add("is-modal-updated");
+    // Resolve destination footer visibility and text before measuring the
+    // shared slide plane, including transitions to/from settings.
+    syncPageLoadingIndicator();
+    // 页面切换从顶部开始；同页刷新、筛选和打开详情保留滚动位置。
+    if (renderedPageView !== state.view) {
+      const page = document.querySelector(".page-wrap");
+      if (page) page.scrollTop = 0;
+      renderedPageView = state.view;
+      animateRouteArrival(departure);
+    }
     // 无论页面走正常渲染、加载占位还是登录错误分支，都同步模态锁；
     // 这样任意新弹窗都默认隔离校园码手势，不依赖逐个绑定事件。
     syncNativeEcodeOverlayLock();
@@ -11011,12 +11574,16 @@ async function runRefresh(forceTerms = false) {
   const hasCache = Boolean(localBootstrap?.hasCache || state.personalCache.available);
   const hasLocalSchedule = localScheduleItemsForTerm(state.termCode).length > 0;
   state.fatalError = "";
+  state.loading = true;
+  updateAndroidSyncProgress("正在连接教务系统，当前内容继续保留…");
   setNotice(hasCache ? "正在尝试刷新教务接口，页面先显示上次缓存…" : hasLocalSchedule && state.localSchedule.items.length ? "正在读取教务接口，页面先显示本地安排…" : "正在读取教务接口…", "", hasCache ? TOAST_CATEGORY_ESSENTIAL : "default");
   setConnection(hasCache ? "正在刷新 · 已显示本地缓存" : "正在读取数据", "loading");
-  render();
+  restoreMissingPersonalCache();
+  renderRefreshProgress();
   try {
     if (forceTerms || !state.terms.length || !state.personalCache.networkTermsAttempted) {
       try {
+        updateAndroidSyncProgress("正在读取学校学期列表…");
         await loadTerms();
       } catch (error) {
         if (!hasCache) throw error;
@@ -11030,11 +11597,15 @@ async function runRefresh(forceTerms = false) {
     const refreshed = state.personalCache.lastLiveEndpointCount > 0;
     if (refreshed) {
       setConnection("已连接 · 使用当前登录会话", "ready");
+      updateAndroidSyncProgress(state.personalCache.saveError ? "同步完成，本机缓存暂未写入，可稍后重试。"
+        : state.errors.length ? `数据已更新，${state.errors.length} 项信息暂未更新，可稍后刷新。`
+        : "同步完成，最新教务数据已缓存到本机。");
       if (state.errors.length) setNotice(`数据已自动更新，但有 ${state.errors.length} 项接口暂时失败，可点击刷新重试。`, "", TOAST_CATEGORY_ESSENTIAL);
       else setNotice("数据已更新，个人结果已缓存到本机。", "success", TOAST_CATEGORY_ESSENTIAL);
     } else if (hasCache) {
       state.personalCache.source = "cache";
       setConnection("离线 · 使用本地缓存", "ready");
+      updateAndroidSyncProgress("暂时无法更新，继续显示本机缓存。");
       setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "", TOAST_CATEGORY_ESSENTIAL);
     }
   } catch (error) {
@@ -11046,15 +11617,18 @@ async function runRefresh(forceTerms = false) {
       state.fatalError = "";
       state.personalCache.source = "cache";
       setConnection("离线 · 使用本地缓存", "ready");
+      updateAndroidSyncProgress("暂时无法更新，继续显示本机缓存。");
       setNotice(`教务系统暂时不可用，当前显示缓存${cacheDateText(state.personalCache.savedAt) ? `（${cacheDateText(state.personalCache.savedAt)}）` : ""}。登录后刷新会自动更新。`, "", TOAST_CATEGORY_ESSENTIAL);
     } else if (localScheduleItemsForTerm(state.termCode).length) {
       state.fatalError = "";
       state.personalCache.source = "";
       setConnection("仅显示本地安排", "ready");
+      updateAndroidSyncProgress("暂时无法更新，继续显示本地自定义安排。");
       setNotice("教务系统暂时不可用，当前仍显示本机自定义安排。登录后刷新会自动补充学校课表。", "");
     } else {
       state.fatalError = error.message || "无法读取教务系统";
       setConnection(error.message || "连接失败", "error");
+      updateAndroidSyncProgress("暂时无法连接，可手动登录或稍后刷新。");
       setNotice(`${state.fatalError}。请先打开原系统并登录，再回到本页刷新。`, "error");
     }
   }
@@ -11684,6 +12258,7 @@ function applyDayMoves(rows, rules = dayMovesForTerm()) {
       occurrenceId: `${row.occurrenceId || stableOccurrenceId(row)}:move:${rule.id}`,
       dayMoveFrom: rule.from,
       dayMoveDate: rule.to,
+      dayMoveOriginal: { weeks: row.weeks, weekday: row.weekday, detail: row.detail, time: row.time },
       // Keep time/place/teacher unchanged; do not parse raw recurring detail again.
       detail: [row.detail, `本地调休：${rule.from} → ${rule.to}`].filter(Boolean).join(" · ")
     }));
@@ -11867,6 +12442,9 @@ function localScheduleRowById(id) {
 }
 
 function resolveScheduleItemFromAction(element) {
+  if (element?.dataset?.movedOccurrence) {
+    return mergedPersonalScheduleRows().find(row => row.occurrenceId === element.dataset.movedOccurrence) || null;
+  }
   const source = element?.dataset?.courseSource || element?.dataset?.source || "school";
   if (source === "local" || element?.dataset?.localScheduleId) {
     return localScheduleRowById(element.dataset.localScheduleId);
@@ -12237,8 +12815,9 @@ function courseIndexForScope(course, scope = "personal") {
 
 function courseActionAttributes(course, scope = "personal") {
   if (course?.source === "local" && course.localId) {
-    return `type="button" data-action="show-local-schedule" data-course-source="local" data-local-schedule-id="${escapeHtml(course.localId)}"`;
+    return `type="button" data-action="show-local-schedule" data-course-source="local" data-local-schedule-id="${escapeHtml(course.localId)}"${movedCourseAttributes(course)}`;
   }
+  if (course?.dayMoveDate) return `type="button" data-action="show-course" data-course-scope="personal"${movedCourseAttributes(course)}`;
   const index = courseIndexForScope(course, scope);
   const detailIndex = scope === "personal"
     ? Number.isInteger(course?.sourceDetailIndex) ? course.sourceDetailIndex : state.data.scheduleDetail.indexOf(course)
@@ -13676,8 +14255,11 @@ function renderDailySchedule(rows, scope = "personal") {
 }
 
 function renderCourseDetailModal() {
-  if (state.selectedCourse?.source === "local") return renderLocalScheduleDetailModal(state.selectedCourse);
-  return renderCourseDetailWithLocalOverlay();
+  const markup = state.selectedCourse?.source === "local"
+    ? renderLocalScheduleDetailModal(state.selectedCourse)
+    : renderCourseDetailWithLocalOverlay(state.selectedCourse?.dayMoveOriginal
+      ? { ...state.selectedCourse, ...state.selectedCourse.dayMoveOriginal } : state.selectedCourse);
+  return markup.replace('<div class="detail-grid">', `${dayMoveDetail(state.selectedCourse)}<div class="detail-grid">`);
 }
 
 function renderPersonal() {
@@ -14533,10 +15115,10 @@ document.querySelectorAll("[data-view]").forEach((tab) => {
     if (state.view === "scores" && !state.loading) {
       // 成绩提醒只以进入成绩页后得到的最新网络结果为准。各平台都在
       // 进入时刷新；学号与当前查询学期仍由提醒作用域严格隔离。
-      refresh();
+      refreshAfterRouteArrival(nextView);
     } else if (IS_ANDROID_APP && ["overview", "exams", "personal"].includes(state.view) && !state.loading) {
-      // 进入个人功能时再尝试一次网络刷新；缓存已经先渲染出来，离线时不会阻塞页面。
-      refresh();
+      // 等页面滑动结束再启动刷新，让缓存入场与接口处理各自拥有帧预算。
+      refreshAfterRouteArrival(nextView);
     }
     if (state.view === "all") {
       const tasks = [];
@@ -14550,6 +15132,7 @@ document.querySelectorAll("[data-view]").forEach((tab) => {
 });
 
 elements.termSelect.addEventListener("change", async () => {
+  state.examHistoryOpen = false;
   state.termCode = elements.termSelect.value;
   state.termSelectionTouched = true;
   state.scheduleWeek.personal = "";
@@ -14566,8 +15149,18 @@ elements.termSelect.addEventListener("change", async () => {
   await refresh();
 });
 
+document.getElementById("androidSessionSlot")?.addEventListener("click", (event) => {
+  const action = event.target.closest?.("[data-action]")?.dataset.action;
+  if (action === "open-portal") openPortal();
+  if (action === "copy-login-diagnostics") copyAndroidLoginDiagnostics();
+});
+
 elements.refresh.addEventListener("click", refresh);
 document.getElementById("openPortal").addEventListener("click", openPortal);
+
+elements.content.addEventListener("toggle", (event) => {
+  if (event.target?.matches?.(".ended-exams")) state.examHistoryOpen = event.target.open;
+}, true);
 
 elements.content.addEventListener("input", (event) => {
   if (event.target.id === "dayMoveFrom" || event.target.id === "dayMoveTo") {
@@ -14895,6 +15488,11 @@ elements.content.addEventListener("click", async (event) => {
     return;
   }
   if (action === "open-schedule-image-export") return openScheduleImageExport(button.dataset.scheduleScope || "personal");
+  if (action === "schedule-density") {
+    writeStoredSetting("zhizhang.scheduleDensity", button.dataset.density === "overview" ? "overview" : "readable");
+    render();
+    return;
+  }
   if (["open-day-moves", "close-day-moves", "save-day-move", "delete-day-move"].includes(action)) return handleDayMoveAction(action, button);
   if (action === "export-schedule-csv") return exportScheduleCsv(button.dataset.scheduleScope || "personal");
   if (action === "open-local-schedule-ai-prompt") return openLocalScheduleAiPrompt();
@@ -15192,6 +15790,7 @@ elements.content.addEventListener("click", async (event) => {
 
 const SCHEDULE_GRID_SWIPE_THRESHOLD = 52;
 const SCHEDULE_GRID_EDGE_TOLERANCE = 2;
+let scheduleGridSuppressClickUntil = 0;
 
 function scheduleGridSwipeDirection(deltaX, deltaY) {
   const x = Number(deltaX);
@@ -15247,6 +15846,12 @@ function handleScheduleGridTouchEnd(event) {
   const scrollWidth = Number(gesture.scroll.scrollWidth);
   const clientWidth = Number(gesture.scroll.clientWidth);
   const maxScroll = scrollWidth - clientWidth;
+  if (gesture.scroll.classList?.contains("density-overview")) {
+    scheduleGridEdgeArm = null;
+    scheduleGridSuppressClickUntil = Date.now() + 400;
+    changeScheduleWeekBy(scope, direction === "next" ? 1 : -1);
+    return;
+  }
   if (!Number.isFinite(maxScroll) || maxScroll <= SCHEDULE_GRID_EDGE_TOLERANCE) {
     scheduleGridEdgeArm = null;
     return;
@@ -15275,6 +15880,12 @@ function handleScheduleGridTouchEnd(event) {
 }
 
 elements.content.addEventListener("touchstart", handleScheduleGridTouchStart, { passive: true });
+elements.content.addEventListener("click", (event) => {
+  if (Date.now() < scheduleGridSuppressClickUntil && scheduleGridNodeForEvent(event)) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
 elements.content.addEventListener("touchend", handleScheduleGridTouchEnd, { passive: true });
 elements.content.addEventListener("touchcancel", () => {
   scheduleGridGesture = null;

@@ -23,6 +23,8 @@ code += `\nglobalThis.t = { state, applyDayMoves, filterCoursesForDate, normaliz
   localSchedulePayload, saveLocalSchedule, hydrateLocalSchedule, localScheduleItemToCourseRow,
   mergedPersonalScheduleRows, scheduleExportRows, scheduleExportFilteredRows, filterScheduleWeekRows,
   localScheduleCsvEntries, renderDayMovesModal, handleDayMoveAction, normalizeLocalScheduleItem,
+  compactTermName, scheduleDensityControls, courseActionAttributes, resolveScheduleItemFromAction,
+  renderCourseDetailModal, courseChipMarkup, personalScheduleActions,
   noRender() { render = () => {}; } };`;
 vm.runInNewContext(code, context);
 const t = context.t, s = t.state;
@@ -85,6 +87,24 @@ moved = t.mergedPersonalScheduleRows();
 assert.deepEqual(names(moved, move.from), ['约会']);
 assert.ok(names(moved, move.to).includes('自定义课'));
 assert.equal(t.scheduleExportRows().filter(row => row.dayMoveDate).length, 2);
+for (const row of moved.filter(row => row.dayMoveDate)) {
+  const attrs = t.courseActionAttributes(row);
+  assert.match(attrs, /data-moved-occurrence=/);
+  const resolved = t.resolveScheduleItemFromAction({ dataset: { movedOccurrence: row.occurrenceId } });
+  assert.equal(resolved.dayMoveDate, move.to);
+  s.selectedCourse = resolved;
+  const markup = t.renderCourseDetailModal();
+  assert.ok(markup.includes(`原上课日期：${move.from}`));
+  assert.ok(markup.includes(`实际上课：${move.to}`));
+  assert.ok(t.courseChipMarkup(row).includes('已调课'));
+  assert.ok(t.courseChipMarkup(row).includes('class="course-room"'));
+}
+assert.equal(t.compactTermName('2026-2027学年第一学期'), '26–27 ①');
+assert.equal(t.compactTermName('2026-2027-2'), '26–27 ②');
+assert.equal(t.compactTermName('2026-2027 秋季'), '26–27 秋');
+assert.equal(t.compactTermName('自定义学期'), '自定义学期');
+assert.ok(t.scheduleDensityControls().includes('清晰大字'));
+assert.ok(t.personalScheduleActions().includes('<details class="schedule-tools">'));
 const csv = t.localScheduleCsvEntries();
 assert.ok(csv.some(row => row.courseName === '周一课程' && row.weekday === '6' && row.weekText === '3周'));
 assert.ok(csv.some(row => row.courseName === '自定义课' && row.weekday === '6'));

@@ -58,14 +58,14 @@ function harness() {
     cacheSafeValue, cacheTermSnapshot, applyCachedTermSnapshot, persistPersonalCache, hydratePersonalCache,
     readPersonalCacheEnvelope, personalCacheStatusText, schoolPersonalScheduleRows, courseArrangementRows,
     courseIndexForScope, renderCourseRowsTable, schoolScheduleOccurrenceKey, clearPersonalCache,
-    loadTermData, setRequests(home, grid) { getHome=home; postNativeScheduleDetail=grid;
+    loadTermData, render, renderRefreshProgress, hasCachedPersonalDomain, setRequests(home, grid) { getHome=home; postNativeScheduleDetail=grid;
       loadFullScores=async()=>[]; loadAllScoreRows=async()=>({rows:[]}); getScore=async()=>({}); },
     setSequence(n) { refreshRequestSequence=n; }, scheduleExportRows };`;
   vm.runInNewContext(code, context, { filename: 'dashboard.js' });
   return { t: context.t, api, profiles, elements };
 }
 
-const { t, api, profiles } = harness();
+const { t, api, profiles, elements } = harness();
 const ok = value => ({ status: 'fulfilled', value });
 const failed = { status: 'rejected' };
 const raw = { courseName: 'MATLAB实验', courseCode: 'MAT2', teachClassId: 'CLASS-MAT2',
@@ -197,5 +197,34 @@ assert.equal(profiles.get('20250001').termSnapshots['TERM-B'].scheduleDetail.len
   resolveGrid([other]);
   assert.equal(await inFlight, false);
   assert.equal(t.state.data, currentData);
+  // A deliberately suspended network must not delay the first cached grade
+  // or exam render. Failure must preserve both domains and existing DOM.
+  t.state.termCode = 'TERM-A'; t.state.view = 'scores';
+  t.state.personalCache.workingSnapshots = {};
+  t.state.personalCache.termSnapshots = {'TERM-A': {...t.cacheTermSnapshot(),
+    scores:[{name:'即时缓存成绩',score:'91',credit:'3'}],
+    exams:[{name:'即时缓存考试',status:'待考试',date:'2026-10-20',time:'09:00',place:'缓存考场'}]}};
+  t.state.data = t.emptyPersonalData();
+  const rejections = [];
+  t.setRequests(() => new Promise((resolve,reject) => rejections.push(reject)), async () => {throw Error('offline grid');});
+  const stalled = t.loadTermData(7);
+  assert.ok(elements.get('content').innerHTML.includes('即时缓存成绩'));
+  assert.ok(!elements.get('content').innerHTML.includes('skeleton-scores'));
+  t.state.view = 'exams';t.render();
+  assert.ok(elements.get('content').innerHTML.includes('即时缓存考试'));
+  elements.get('content').innerHTML += '<!-- preserve existing node tree -->';
+  t.renderRefreshProgress();
+  assert.ok(elements.get('content').innerHTML.includes('preserve existing node tree'), 'progress never reconstructs cached list');
+  rejections.forEach(reject => reject(Error('offline')));
+  await stalled;
+  assert.equal(t.state.data.scores[0].name,'即时缓存成绩');
+  assert.equal(t.state.data.exams[0].name,'即时缓存考试');
+  // A cached successful empty result stays an empty state during refresh.
+  t.state.personalCache.workingSnapshots = {};
+  t.state.personalCache.termSnapshots['TERM-A'].exams = [];
+  t.state.personalCache.termSnapshots['TERM-A'].updatedAtByDomain = {exams:now1};
+  t.state.data.exams = [];t.state.loading = true;t.render();
+  assert.ok(elements.get('content').innerHTML.includes('暂无考试'));
+  assert.ok(!elements.get('content').innerHTML.includes('skeleton-exams'));
   console.log('cache reliability tests: PASS');
 })().catch(error => { console.error(error); process.exitCode = 1; });

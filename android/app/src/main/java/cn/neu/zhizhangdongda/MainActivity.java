@@ -3,7 +3,11 @@ package cn.neu.zhizhangdongda;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
+import android.animation.ObjectAnimator;
+import android.animation.PropertyValuesHolder;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ContentValues;
@@ -20,6 +24,11 @@ import android.graphics.Paint;
 import android.graphics.Picture;
 import android.graphics.Rect;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.content.res.ColorStateList;
+import android.view.inputmethod.EditorInfo;
+import android.widget.ProgressBar;
 import android.media.MediaScannerConnection;
 import android.net.Uri;
 import android.os.Build;
@@ -29,13 +38,18 @@ import android.provider.MediaStore;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.text.InputType;
+import android.text.method.PasswordTransformationMethod;
 import android.util.Base64;
 import android.util.Log;
 import android.view.Gravity;
+import android.view.Display;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.view.animation.AccelerateDecelerateInterpolator;
+import android.view.animation.PathInterpolator;
 import android.webkit.CookieManager;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -116,7 +130,7 @@ public class MainActivity extends Activity {
     private static final String ECODE_URL = "https://webvpn.neu.edu.cn/https/62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689/ecode/";
     private static final String ECODE_TARGET_TOKEN = "62304135386136393339346365373340b5e2ab3b8f8b48d8e7566e77934bd689";
     private static final String WEBVPN_ECODE_URL = ECODE_URL;
-    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.96";
+    private static final String DASHBOARD_URL = "file:///android_asset/dashboard.html?v=0.1.109";
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String ECODE_LAYOUT_SCRIPT = """
             (function () {
@@ -609,6 +623,7 @@ public class MainActivity extends Activity {
     private WebView ecodeWebView;
     private WebView dashboardWebView;
     private LinearLayout loginMethodBar;
+    private View loginHeaderBackdrop;
     private FrameLayout builtInLoginPanel;
     private EditText builtInUsernameInput;
     private EditText builtInPasswordInput;
@@ -619,6 +634,8 @@ public class MainActivity extends Activity {
     private CheckBox interactiveTrustDeviceCheck;
     private TextView builtInLoginStatus;
     private Button builtInLoginButton;
+    private ProgressBar builtInLoginProgress;
+    private ProgressBar portalLoadingProgress;
     private Button builtInMobileLoginButton;
     private Button builtInOpenAcademicButton;
     private Button builtInCloseLoginButton;
@@ -628,6 +645,11 @@ public class MainActivity extends Activity {
     private FrameLayout ecodeCollapsedCard;
     private ImageView ecodeThumbnailView;
     private TextView ecodeCollapsedTimeView;
+    private ProgressBar ecodeLoadingProgress;
+    private String ecodeStatusMessage = "正在准备校园码…";
+    private boolean ecodeStatusIsError;
+    private boolean ecodeLoading = true;
+    private int ecodePanelTopPx;
     private TextView ecodeErrorView;
     private TextView ecodeExpandHint;
     private TextView ecodeCollapseButton;
@@ -642,7 +664,15 @@ public class MainActivity extends Activity {
     private boolean ecodeExpanded;
     private boolean ecodeAutoScrolled;
     private boolean ecodeSessionReady;
-    private boolean ecodePanelHidden;
+    private boolean ecodePanelHidden = true;
+    private boolean dashboardMotionActive;
+    private ValueAnimator ecodeSizeAnimator;
+    private ValueAnimator ecodeVisibilityAnimator;
+    private final Runnable ecodeProbeRunnable = this::probeEcodeLayout;
+    private volatile int statusBarInsetPx;
+    private int systemBarInsetLeft;
+    private int systemBarInsetRight;
+    private int systemBarInsetBottom;
     private boolean ecodeBackgroundLoginAttemptedForCurrentFailure;
     private boolean ecodeReloadAfterBackgroundLogin;
     private int ecodeProbeAttempts;
@@ -688,7 +718,10 @@ public class MainActivity extends Activity {
 
     // 所有异步会话/登录回调都必须带上这两个代次；WebView 旧页面完成回调
     // 不能改变新一轮登录或新 Cookie 的状态。
-    private long sessionEpoch = 1L;
+    private volatile long sessionEpoch = 1L;
+    private String dashboardAcademicLoginStatus = "";
+    private String dashboardLoginProgressPhase = "";
+    private String dashboardLoginProgressMessage = "";
     private long loginOperationSequence;
     private long activeLoginOperationId;
     // dashboard.js 的 ready 回调可能早于 WebView 的 onPageFinished；必须先
@@ -774,8 +807,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().setStatusBarColor(getColor(R.color.native_background));
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
         getWindow().setNavigationBarColor(getColor(R.color.native_background));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(false);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            WindowManager.LayoutParams attributes = getWindow().getAttributes();
+            attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(attributes);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getWindow().setStatusBarContrastEnforced(false);
+        }
 
         preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         cookieManager.setAcceptCookie(true);
@@ -784,6 +828,7 @@ public class MainActivity extends Activity {
         }
         loginMethodForCurrentPortal = readLoginMethodPreference();
         lastAcademicLoginError = preferences.getString(LAST_ACADEMIC_LOGIN_ERROR, "");
+        dashboardAcademicLoginStatus = lastAcademicLoginError.isEmpty() ? "" : "failed";
         lastLoginDiagnostics = preferences.getString(LAST_LOGIN_DIAGNOSTICS, "");
         savedQrImageUri = preferences.getString(SAVED_QR_IMAGE_URI, "");
         savedQrImagePath = preferences.getString(SAVED_QR_IMAGE_PATH, "");
@@ -810,14 +855,26 @@ public class MainActivity extends Activity {
                 Gravity.TOP
         );
         dashboardHome.addView(ecodePanel, ecodeParams);
+        applyEcodePanelVisibility(false);
         root.addView(dashboardHome, fullScreenParams());
 
+        loginHeaderBackdrop = new View(this);
+        loginHeaderBackdrop.setBackgroundColor(getColor(R.color.native_background));
+        loginHeaderBackdrop.setVisibility(View.GONE);
+        root.addView(loginHeaderBackdrop, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, dp(72), Gravity.TOP));
         loginMethodBar = createLoginMethodBar();
         root.addView(loginMethodBar, loginMethodBarParams());
+        portalLoadingProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        portalLoadingProgress.setIndeterminate(true);
+        portalLoadingProgress.setIndeterminateTintList(ColorStateList.valueOf(getColor(R.color.native_brand_text)));
+        portalLoadingProgress.setVisibility(View.GONE);
+        FrameLayout.LayoutParams portalProgressParams = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, dp(2), Gravity.TOP);
+        portalProgressParams.topMargin = dp(70);
+        root.addView(portalLoadingProgress, portalProgressParams);
         builtInLoginPanel = createBuiltInLoginPanel();
         root.addView(builtInLoginPanel, builtInLoginPanelParams());
 
-        portalActionButton = new Button(this);
+        portalActionButton = new LiquidButton();
         portalActionButton.setAllCaps(false);
         portalActionButton.setTextColor(Color.WHITE);
         portalActionButton.setTextSize(15);
@@ -857,7 +914,7 @@ public class MainActivity extends Activity {
         actionParams.setMargins(dp(16), 0, dp(16), dp(24));
         root.addView(portalActionButton, actionParams);
 
-        portalQrActionButton = new Button(this);
+        portalQrActionButton = new LiquidButton();
         portalQrActionButton.setAllCaps(false);
         portalQrActionButton.setTextColor(getColor(R.color.native_text_primary));
         portalQrActionButton.setTextSize(14);
@@ -910,6 +967,7 @@ public class MainActivity extends Activity {
 
         setContentView(root);
         applySystemBarInsets();
+        configureHighRefreshRate();
         boolean hasAcademicSession = preferences.getBoolean(HAS_ACADEMIC_SESSION, false);
         if (hasAcademicSession) {
             // 只根据教务系统登录标记进入查询页。E 码通是否有效由上方独立
@@ -953,12 +1011,22 @@ public class MainActivity extends Activity {
         webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
         webView.setVerticalScrollBarEnabled(false);
         webView.setHorizontalScrollBarEnabled(false);
-        webView.setWebChromeClient(new WebChromeClient());
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override public void onProgressChanged(WebView view, int progress) {
+                if (view == portalWebView && portalLoadingProgress != null) {
+                    boolean visible = progress < 100 && loginMethodBar != null
+                            && loginMethodBar.getVisibility() == View.VISIBLE
+                            && builtInLoginPanel != null && builtInLoginPanel.getVisibility() != View.VISIBLE;
+                    portalLoadingProgress.setVisibility(visible ? View.VISIBLE : View.GONE);
+                }
+            }
+        });
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
                 if (view == portalWebView) {
+                    if (portalLoadingProgress != null && loginMethodBar != null && loginMethodBar.getVisibility() == View.VISIBLE && builtInLoginPanel.getVisibility() != View.VISIBLE) portalLoadingProgress.setVisibility(View.VISIBLE);
                     clearPendingQrUrl();
                     portalLoginService = extractLoginService(url);
                     updatePortalActionLabel(url);
@@ -991,7 +1059,7 @@ public class MainActivity extends Activity {
                     ecodeAutoScrolled = false;
                     ecodeProbeAttempts = 0;
                     ecodeSessionReady = false;
-                    setEcodeError("正在加载学校 E 码通原网页…");
+                    setEcodeProgress("正在加载学校 E 码通原网页…");
                 }
             }
 
@@ -1000,6 +1068,7 @@ public class MainActivity extends Activity {
                 super.onPageFinished(view, url);
                 cookieManager.flush();
                 if (view == portalWebView) {
+                    if (portalLoadingProgress != null) portalLoadingProgress.setVisibility(View.GONE);
                     portalLoginService = extractLoginService(url);
                     updatePortalActionLabel(url);
                     if (builtInLoginSubmissionPending) {
@@ -1073,10 +1142,12 @@ public class MainActivity extends Activity {
                         handleEcodeSessionInvalid("E 码通登录状态已失效", url);
                         return;
                     }
-                    setEcodeError("原网页已加载，正在定位二维码…");
+                    setEcodeProgress("原网页已加载，正在定位二维码…");
                     scheduleEcodeProbe(350);
                 } else if (view == dashboardWebView) {
                     dashboardPageReady = true;
+                    deliverDashboardLoginProgress();
+                    syncDashboardStatusBarInset();
                     view.evaluateJavascript("document.documentElement.classList.add('android-shell');", null);
                     view.evaluateJavascript("window.__prepareNativeEcode && window.__prepareNativeEcode();", null);
                     // JS 的启动握手可能比 onPageFinished 更早抵达。此处仅消费
@@ -1182,24 +1253,21 @@ public class MainActivity extends Activity {
     private LinearLayout createLoginMethodBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setPadding(dp(8), dp(7), dp(8), dp(7));
-        bar.setBackgroundColor(getColor(R.color.native_surface));
+        bar.setPadding(dp(4), dp(4), dp(4), dp(4));
+        bar.setBackground(loginGlassBackground(22));
+        bar.setElevation(dp(3));
         String[][] methods = {
                 {LOGIN_METHOD_BUILT_IN, "内置登录"},
                 {LOGIN_METHOD_PASSWORD, "原网页账密"},
                 {LOGIN_METHOD_WECHAT, "二维码登录"}
         };
         for (String[] item : methods) {
-            Button button = new Button(this);
+            Button button = loginButton(item[1], false);
             button.setTag(item[0]);
-            button.setText(item[1]);
             button.setTextSize(12);
-            button.setAllCaps(false);
-            button.setMinHeight(0);
-            button.setMinimumHeight(0);
-            button.setPadding(dp(4), 0, dp(4), 0);
+            button.setPadding(dp(2), 0, dp(2), 0);
             button.setOnClickListener(view -> selectPortalLoginMethod(String.valueOf(view.getTag())));
-            bar.addView(button, new LinearLayout.LayoutParams(0, dp(38), 1f));
+            bar.addView(button, new LinearLayout.LayoutParams(0, dp(44), 1f));
         }
         return bar;
     }
@@ -1207,183 +1275,302 @@ public class MainActivity extends Activity {
     private FrameLayout.LayoutParams loginMethodBarParams() {
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT, dp(52), Gravity.TOP);
-        params.setMargins(dp(12), dp(6), dp(12), 0);
+        params.setMargins(dp(20), dp(10), dp(20), 0);
         return params;
     }
 
     private FrameLayout createBuiltInLoginPanel() {
         FrameLayout panel = new FrameLayout(this);
-        panel.setBackgroundColor(getColor(R.color.native_background));
-
+        boolean dark = isNativeDarkTheme();
+        panel.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[]{dark ? Color.rgb(26, 35, 48) : Color.rgb(232, 241, 253),
+                        getColor(R.color.native_background),
+                        dark ? Color.rgb(24, 23, 31) : Color.rgb(247, 242, 249)}));
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        scroll.setVerticalScrollBarEnabled(false);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(22), dp(30), dp(22), dp(30));
+        content.setPadding(dp(24), dp(30), dp(24), dp(28));
 
-        TextView title = new TextView(this);
-        title.setText("内置登录");
-        title.setTextColor(getColor(R.color.native_text_primary));
-        title.setTextSize(24);
+        TextView mark = loginText("NEU", 16, getColor(R.color.native_brand_text));
+        mark.setGravity(Gravity.CENTER);
+        mark.setTypeface(null, android.graphics.Typeface.BOLD);
+        mark.setBackground(loginGlassBackground(18));
+        content.addView(mark, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        TextView title = loginText("登录执掌东大", 28, getColor(R.color.native_text_primary));
         title.setTypeface(null, android.graphics.Typeface.BOLD);
-        content.addView(title);
+        content.addView(title, loginSpacing(18, 6));
+        content.addView(loginText("连接校园，让每一天更从容。", 14, getColor(R.color.native_text_secondary)), loginSpacing(0, 26));
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("通过学校官方统一身份认证页面提交。凭据仅使用 Android Keystore 加密保存在本机，用于登录失效后的后台自动重试。");
-        subtitle.setTextColor(getColor(R.color.native_text_secondary));
-        subtitle.setTextSize(13);
-        subtitle.setLineSpacing(0, 1.25f);
-        LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        subtitleParams.setMargins(0, dp(8), 0, dp(22));
-        content.addView(subtitle, subtitleParams);
-
-        builtInUsernameInput = builtInLoginField("学号", InputType.TYPE_CLASS_TEXT);
-        content.addView(builtInUsernameInput, loginFieldParams());
-        builtInPasswordInput = builtInLoginField(
-                "密码",
-                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD
-        );
-        content.addView(builtInPasswordInput, loginFieldParams());
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(18), dp(18), dp(18), dp(18));
+        form.setBackground(loginGlassBackground(24));
+        form.setElevation(dp(1));
+        builtInUsernameInput = builtInLoginField("请输入学号", InputType.TYPE_CLASS_TEXT);
+        builtInUsernameInput.setImeOptions(EditorInfo.IME_ACTION_NEXT);
+        if (Build.VERSION.SDK_INT >= 26) builtInUsernameInput.setAutofillHints(View.AUTOFILL_HINT_USERNAME);
+        form.addView(loginFieldLabel("学号", builtInUsernameInput), loginSpacing(0, 6));
+        form.addView(builtInUsernameInput, loginFieldParams());
+        builtInPasswordInput = builtInLoginField("请输入统一身份认证密码",
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        if (Build.VERSION.SDK_INT >= 26) builtInPasswordInput.setAutofillHints(View.AUTOFILL_HINT_PASSWORD);
+        builtInPasswordInput.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        builtInPasswordInput.setOnEditorActionListener((view, actionId, event) -> {
+            if (actionId != EditorInfo.IME_ACTION_DONE) return false;
+            if (builtInLoginButton.isEnabled()) builtInLoginButton.performClick();
+            return true;
+        });
+        form.addView(loginFieldLabel("密码", builtInPasswordInput), loginSpacing(2, 6));
+        FrameLayout passwordField = new FrameLayout(this);
+        builtInPasswordInput.setPadding(dp(12), 0, dp(58), 0);
+        passwordField.addView(builtInPasswordInput, fullScreenParams());
+        Button passwordVisibility = loginButton("显示", false);
+        passwordVisibility.setTextSize(11);
+        passwordVisibility.setContentDescription("显示密码");
+        passwordVisibility.setOnClickListener(view -> {
+            boolean show = builtInPasswordInput.getTransformationMethod() instanceof PasswordTransformationMethod;
+            int selection = builtInPasswordInput.getSelectionStart();
+            builtInPasswordInput.setTransformationMethod(show ? null : PasswordTransformationMethod.getInstance());
+            passwordVisibility.setText(show ? "隐藏" : "显示");
+            passwordVisibility.setContentDescription(show ? "隐藏密码" : "显示密码");
+            if (selection >= 0) builtInPasswordInput.setSelection(selection);
+        });
+        passwordField.addView(passwordVisibility, new FrameLayout.LayoutParams(dp(56), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END));
+        form.addView(passwordField, loginFieldParams());
 
         builtInCodeRow = new LinearLayout(this);
         builtInCodeRow.setTag("built_in_code_row");
         builtInCodeRow.setOrientation(LinearLayout.HORIZONTAL);
         builtInCodeInput = builtInLoginField("短信验证码", InputType.TYPE_CLASS_NUMBER);
         builtInCodeRow.addView(builtInCodeInput, new LinearLayout.LayoutParams(0, dp(52), 1f));
-        builtInCodeSendButton = new Button(this);
-        builtInCodeSendButton.setText("获取验证码");
+        builtInCodeSendButton = loginButton("获取验证码", false);
         builtInCodeSendButton.setTextSize(12);
-        builtInCodeSendButton.setAllCaps(false);
         builtInCodeSendButton.setOnClickListener(view -> requestBuiltInSmsCode());
-        LinearLayout.LayoutParams codeButtonParams = new LinearLayout.LayoutParams(dp(112), dp(52));
+        LinearLayout.LayoutParams codeButtonParams = new LinearLayout.LayoutParams(dp(100), dp(52));
         codeButtonParams.setMargins(dp(8), 0, 0, 0);
         builtInCodeRow.addView(builtInCodeSendButton, codeButtonParams);
         builtInCodeRow.setVisibility(View.GONE);
-        content.addView(builtInCodeRow, loginFieldParams());
+        form.addView(builtInCodeRow, loginFieldParams());
 
         builtInTrustDeviceCheck = new CheckBox(this);
-        builtInTrustDeviceCheck.setText("信任此设备，并保存加密凭据用于后台自动登录");
+        builtInTrustDeviceCheck.setText("信任此设备");
         builtInTrustDeviceCheck.setTextColor(getColor(R.color.native_text_primary));
+        builtInTrustDeviceCheck.setButtonTintList(ColorStateList.valueOf(getColor(R.color.native_brand_text)));
         builtInTrustDeviceCheck.setTextSize(13);
+        builtInTrustDeviceCheck.setMinHeight(dp(44));
         builtInTrustDeviceCheck.setChecked(true);
-        LinearLayout.LayoutParams trustParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        trustParams.setMargins(0, dp(2), 0, dp(14));
-        content.addView(builtInTrustDeviceCheck, trustParams);
+        form.addView(builtInTrustDeviceCheck, loginSpacing(0, 0));
+        form.addView(loginText("仅在此设备加密保存，登录失效后自动重试。", 11,
+                getColor(R.color.native_text_tertiary)), loginSpacing(0, 18));
 
-        builtInLoginButton = new Button(this);
-        builtInLoginButton.setText("登录");
-        builtInLoginButton.setAllCaps(false);
-        builtInLoginButton.setTextSize(15);
-        builtInLoginButton.setTextColor(Color.WHITE);
-        builtInLoginButton.setBackground(roundBackground(getColor(R.color.native_brand), 14));
+        builtInLoginButton = loginButton("登录", true);
         builtInLoginButton.setOnClickListener(view -> {
             if (builtInLoginChallengeVisible) submitBuiltInVerificationCode();
-            else submitBuiltInCredentials(false);
+            else {
+                if (builtInUsernameInput.getText().toString().trim().isEmpty()) {
+                    builtInUsernameInput.setError("请输入学号"); builtInUsernameInput.requestFocus(); return;
+                }
+                if (builtInPasswordInput.getText().toString().isEmpty()) {
+                    builtInPasswordInput.setError("请输入密码"); builtInPasswordInput.requestFocus(); return;
+                }
+                submitBuiltInCredentials(false);
+            }
         });
-        content.addView(builtInLoginButton, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+        FrameLayout loginAction = new FrameLayout(this);
+        loginAction.setClipChildren(false);
+        loginAction.addView(builtInLoginButton, fullScreenParams());
+        builtInLoginProgress = new ProgressBar(this);
+        builtInLoginProgress.setIndeterminateTintList(ColorStateList.valueOf(Color.WHITE));
+        builtInLoginProgress.setVisibility(View.GONE);
+        FrameLayout.LayoutParams progressParams = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.START | Gravity.CENTER_VERTICAL);
+        progressParams.leftMargin = dp(20);
+        loginAction.addView(builtInLoginProgress, progressParams);
+        form.addView(loginAction, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)));
+        builtInLoginStatus = loginText("通过学校统一身份认证安全登录", 12, getColor(R.color.native_text_tertiary));
+        builtInLoginStatus.setPadding(dp(12), dp(12), dp(12), dp(12));
+        builtInLoginStatus.setBackground(roundBackground(withAlpha(getColor(R.color.native_surface_subtle), 170), 12));
+        builtInLoginStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        content.addView(form, loginSpacing(0, 12));
+        content.addView(builtInLoginStatus, loginSpacing(0, 10));
 
-        builtInMobileLoginButton = new Button(this);
+        builtInMobileLoginButton = loginButton("", false);
         builtInMobileLoginButton.setText("使用手机验证码登录");
-        builtInMobileLoginButton.setAllCaps(false);
         builtInMobileLoginButton.setTextSize(13);
-        builtInMobileLoginButton.setTextColor(getColor(R.color.native_brand_text));
-        builtInMobileLoginButton.setBackground(roundBackground(getColor(R.color.native_surface), 14));
         builtInMobileLoginButton.setContentDescription("在内置登录流程中使用手机验证码登录");
         builtInMobileLoginButton.setOnClickListener(view -> startBuiltInMobileLogin());
-        LinearLayout.LayoutParams mobileLoginParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        mobileLoginParams.setMargins(0, dp(8), 0, 0);
-        content.addView(builtInMobileLoginButton, mobileLoginParams);
-
+        content.addView(builtInMobileLoginButton, loginSpacing(0, 8));
         LinearLayout manualNavigationRow = new LinearLayout(this);
         manualNavigationRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams manualNavigationParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(44));
-        manualNavigationParams.setMargins(0, dp(8), 0, 0);
-
-        builtInOpenAcademicButton = new Button(this);
+        builtInOpenAcademicButton = loginButton("", false);
         builtInOpenAcademicButton.setText("打开教务系统原网页");
-        builtInOpenAcademicButton.setAllCaps(false);
-        builtInOpenAcademicButton.setTextSize(12);
-        builtInOpenAcademicButton.setTextColor(getColor(R.color.native_brand_text));
-        builtInOpenAcademicButton.setBackground(roundBackground(getColor(R.color.native_surface), 14));
+        builtInOpenAcademicButton.setTextSize(11);
         builtInOpenAcademicButton.setContentDescription("打开教务系统原网页");
         builtInOpenAcademicButton.setOnClickListener(view -> openOfficialAcademicPortal());
         manualNavigationRow.addView(builtInOpenAcademicButton, new LinearLayout.LayoutParams(0, dp(44), 1f));
-
-        builtInCloseLoginButton = new Button(this);
+        builtInCloseLoginButton = loginButton("", false);
         builtInCloseLoginButton.setText("关闭并返回主页");
-        builtInCloseLoginButton.setAllCaps(false);
-        builtInCloseLoginButton.setTextSize(12);
-        builtInCloseLoginButton.setTextColor(getColor(R.color.native_text_secondary));
-        builtInCloseLoginButton.setBackground(roundBackground(getColor(R.color.native_surface_subtle), 14));
+        builtInCloseLoginButton.setTextSize(11);
         builtInCloseLoginButton.setContentDescription("关闭认证页并返回执掌东大主页");
         builtInCloseLoginButton.setOnClickListener(view -> closePortalLoginToDashboard());
-        LinearLayout.LayoutParams closeLoginParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
-        closeLoginParams.setMargins(dp(8), 0, 0, 0);
-        manualNavigationRow.addView(builtInCloseLoginButton, closeLoginParams);
-        content.addView(manualNavigationRow, manualNavigationParams);
+        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        closeParams.leftMargin = dp(8);
+        manualNavigationRow.addView(builtInCloseLoginButton, closeParams);
+        content.addView(manualNavigationRow, loginSpacing(0, 14));
 
-        builtInLoginStatus = new TextView(this);
-        builtInLoginStatus.setTextColor(getColor(R.color.native_text_tertiary));
-        builtInLoginStatus.setTextSize(12);
-        builtInLoginStatus.setLineSpacing(0, 1.25f);
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        statusParams.setMargins(0, dp(12), 0, dp(8));
-        content.addView(builtInLoginStatus, statusParams);
-
-        TextView fallback = new TextView(this);
-        fallback.setText("手机验证码属于内置登录的补充验证方式。需要时可点击上面的按钮；图形验证码、短信发送、Cookie 和跳转仍由学校官方页面完成，验证码仅提交给学校页面，应用不会保存。如果学校已经登录但仍停在认证页，可使用上方按钮手动打开原网页或返回主页。");
-        fallback.setTextColor(getColor(R.color.native_text_tertiary));
-        fallback.setTextSize(11);
-        fallback.setLineSpacing(0, 1.2f);
-        content.addView(fallback);
-
+        TextView help = loginText("密码、验证码与隐私说明  ⌄", 12, getColor(R.color.native_text_secondary));
+        help.setGravity(Gravity.CENTER);
+        help.setMinHeight(dp(44));
+        help.setFocusable(true);
+        TextView details = loginText("学号与密码通过学校官方统一身份认证页面提交。勾选信任此设备后，只有登录成功才会将凭据加密保存在本机；取消勾选不会新增保存。验证码不保存。\n\n若学校要求图形验证码或短信验证，请在学校页面完成。登录后仍停在认证页，可打开原网页或返回主页。", 12,
+                getColor(R.color.native_text_tertiary));
+        details.setVisibility(View.GONE);
+        help.setOnClickListener(view -> {
+            boolean show = details.getVisibility() != View.VISIBLE;
+            details.setVisibility(show ? View.VISIBLE : View.GONE);
+            help.setText(show ? "收起说明  ⌃" : "密码、验证码与隐私说明  ⌄");
+        });
+        content.addView(help);
+        content.addView(details, loginSpacing(2, 0));
         LoginCredentials saved = loadBuiltInCredentials();
         if (saved.isComplete()) {
             builtInUsernameInput.setText(saved.username);
             builtInPasswordInput.setText(saved.password);
-            builtInLoginStatus.setText("已读取本机加密凭据。登录状态失效时会先在后台自动重试。");
+            builtInLoginStatus.setText("已填入本机保存的账号，可直接登录。");
         } else if (!lastAcademicLoginError.isEmpty()) {
             builtInLoginStatus.setText(lastAcademicLoginError);
             builtInLoginStatus.setTextColor(getColor(R.color.native_error));
         }
-
-        scroll.addView(content, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        scroll.addView(content, new ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
         panel.addView(scroll, fullScreenParams());
         return panel;
     }
 
+    private boolean isNativeDarkTheme() {
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private GradientDrawable loginGlassBackground(int radius) {
+        int surface = getColor(R.color.native_surface);
+        GradientDrawable drawable = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[]{withAlpha(surface, 240), withAlpha(surface, 185)});
+        drawable.setCornerRadius(dp(radius));
+        return drawable;
+    }
+
+    private TextView loginText(String text, int size, int color) {
+        TextView view = new LiquidTextButton();
+        view.setText(text); view.setTextSize(size); view.setTextColor(color);
+        view.setLineSpacing(0, 1.2f);
+        return view;
+    }
+
+    private TextView loginFieldLabel(String text, EditText field) {
+        field.setId(View.generateViewId());
+        TextView label = loginText(text, 12, getColor(R.color.native_text_secondary));
+        label.setLabelFor(field.getId());
+        return label;
+    }
+
+    private LinearLayout.LayoutParams loginSpacing(int top, int bottom) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.setMargins(0, dp(top), 0, dp(bottom));
+        return params;
+    }
+
+    private ObjectAnimator animateNativeLiquidPress(View control, boolean pressed) {
+        if (!nativeMotionEnabled()) { control.setScaleX(1f); control.setScaleY(1f); return null; }
+        PropertyValuesHolder x = PropertyValuesHolder.ofFloat(View.SCALE_X,
+                pressed ? new float[]{control.getScaleX(), .97f} : new float[]{control.getScaleX(), 1.025f, .995f, 1f});
+        PropertyValuesHolder y = PropertyValuesHolder.ofFloat(View.SCALE_Y,
+                pressed ? new float[]{control.getScaleY(), .94f} : new float[]{control.getScaleY(), 1.035f, .99f, 1f});
+        ObjectAnimator animator = ObjectAnimator.ofPropertyValuesHolder(control, x, y);
+        animator.setDuration(pressed ? 110 : 460);
+        animator.setInterpolator(new PathInterpolator(.22f, .8f, .35f, 1f));
+        animator.start();
+        return animator;
+    }
+
+    private final class LiquidButton extends Button {
+        private ObjectAnimator liquidPressAnimator;
+        LiquidButton() { super(MainActivity.this); }
+        @Override public void setPressed(boolean pressed) {
+            boolean changed = pressed != isPressed();
+            super.setPressed(pressed);
+            if (!changed) return;
+            if (liquidPressAnimator != null) liquidPressAnimator.cancel();
+            liquidPressAnimator = animateNativeLiquidPress(this, pressed);
+        }
+        @Override protected void onDetachedFromWindow() {
+            if (liquidPressAnimator != null) liquidPressAnimator.cancel();
+            setScaleX(1f); setScaleY(1f);
+            super.onDetachedFromWindow();
+        }
+    }
+
+    private final class LiquidTextButton extends TextView {
+        private ObjectAnimator liquidPressAnimator;
+        LiquidTextButton() { super(MainActivity.this); }
+        @Override public void setPressed(boolean pressed) {
+            boolean changed = pressed != isPressed();
+            super.setPressed(pressed);
+            if (!changed) return;
+            if (liquidPressAnimator != null) liquidPressAnimator.cancel();
+            liquidPressAnimator = animateNativeLiquidPress(this, pressed);
+        }
+        @Override protected void onDetachedFromWindow() {
+            if (liquidPressAnimator != null) liquidPressAnimator.cancel();
+            setScaleX(1f); setScaleY(1f);
+            super.onDetachedFromWindow();
+        }
+    }
+
+    private Button loginButton(String text, boolean primary) {
+        Button button = new LiquidButton();
+        button.setText(text); button.setAllCaps(false); button.setTextSize(15);
+        button.setMinHeight(dp(44)); button.setMinimumHeight(dp(44));
+        button.setStateListAnimator(null);
+        button.setTextColor(primary ? Color.WHITE : getColor(R.color.native_brand_text));
+        int color = primary ? getColor(R.color.native_brand) : Color.TRANSPARENT;
+        button.setBackground(new RippleDrawable(ColorStateList.valueOf(withAlpha(getColor(R.color.native_brand_text), 32)),
+                roundBackground(color, 16), roundBackground(Color.WHITE, 16)));
+        return button;
+    }
+
     private EditText builtInLoginField(String hint, int inputType) {
         EditText field = new EditText(this);
-        field.setHint(hint);
-        field.setTextSize(15);
-        field.setSingleLine(true);
-        field.setInputType(inputType);
-        field.setPadding(dp(14), 0, dp(14), 0);
-        field.setBackground(roundBackground(getColor(R.color.native_surface), 12));
+        field.setHint(hint); field.setTextSize(15); field.setSingleLine(true); field.setInputType(inputType);
+        field.setTextColor(getColor(R.color.native_text_primary));
+        field.setHintTextColor(getColor(R.color.native_text_tertiary));
+        field.setPadding(dp(12), 0, dp(12), 0);
+        StateListDrawable backgrounds = new StateListDrawable();
+        GradientDrawable focused = roundBackground(withAlpha(getColor(R.color.native_surface_subtle), 220), 12);
+        focused.setStroke(dp(1), withAlpha(getColor(R.color.native_brand_text), 130));
+        backgrounds.addState(new int[]{android.R.attr.state_focused}, focused);
+        backgrounds.addState(new int[]{}, roundBackground(withAlpha(getColor(R.color.native_surface_subtle), 200), 12));
+        field.setBackground(backgrounds);
         return field;
     }
 
+    private void setBuiltInLoginBusy(boolean busy) {
+        if (builtInLoginButton == null) return;
+        builtInLoginButton.setEnabled(!busy);
+        builtInLoginButton.setAlpha(busy ? .8f : 1f);
+        builtInLoginButton.setText(busy ? "正在登录…" : builtInLoginChallengeVisible ? "验证并登录" : "登录");
+        if (builtInLoginProgress != null) builtInLoginProgress.setVisibility(busy ? View.VISIBLE : View.GONE);
+    }
+
     private LinearLayout.LayoutParams loginFieldParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(52));
-        params.setMargins(0, 0, 0, dp(12));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52));
+        params.setMargins(0, 0, 0, dp(10));
         return params;
     }
 
     private FrameLayout.LayoutParams builtInLoginPanelParams() {
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                Gravity.TOP
-        );
-        params.setMargins(0, dp(58), 0, 0);
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.TOP);
+        params.setMargins(0, dp(72), 0, 0);
         return params;
     }
 
@@ -1396,28 +1583,94 @@ public class MainActivity extends Activity {
 
     private void applySystemBarInsets() {
         boolean darkMode = isDarkMode();
-        int systemUiVisibility = darkMode ? 0 : View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        int systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+        if (!darkMode) systemUiVisibility |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
         if (!darkMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             systemUiVisibility |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         }
         getWindow().getDecorView().setSystemUiVisibility(systemUiVisibility);
-        root.setOnApplyWindowInsetsListener((view, insets) -> {
-            int top;
-            int bottom;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-                top = bars.top;
-                bottom = bars.bottom;
-            } else {
-                top = insets.getSystemWindowInsetTop();
-                bottom = insets.getSystemWindowInsetBottom();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                int appearanceMask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(darkMode ? 0 : appearanceMask, appearanceMask);
             }
-            // Android 15 对 target 35 的 Activity 默认采用 edge-to-edge；将内容
-            // 推到系统状态栏和导航栏以内，避免手机通知图标压住应用标题。
-            view.setPadding(0, top, 0, bottom);
+        }
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                statusBarInsetPx = bars.top;
+                systemBarInsetLeft = bars.left;
+                systemBarInsetRight = bars.right;
+                systemBarInsetBottom = Math.max(bars.bottom, insets.getInsets(WindowInsets.Type.ime()).bottom);
+            } else {
+                statusBarInsetPx = insets.getSystemWindowInsetTop();
+                systemBarInsetLeft = insets.getSystemWindowInsetLeft();
+                systemBarInsetRight = insets.getSystemWindowInsetRight();
+                systemBarInsetBottom = insets.getSystemWindowInsetBottom();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && insets.getDisplayCutout() != null) {
+                    statusBarInsetPx = Math.max(statusBarInsetPx, insets.getDisplayCutout().getSafeInsetTop());
+                    systemBarInsetLeft = Math.max(systemBarInsetLeft, insets.getDisplayCutout().getSafeInsetLeft());
+                    systemBarInsetRight = Math.max(systemBarInsetRight, insets.getDisplayCutout().getSafeInsetRight());
+                }
+            }
+            applyCurrentSystemBarInsets();
             return insets;
         });
         root.requestApplyInsets();
+    }
+
+    private void applyCurrentSystemBarInsets() {
+        if (root == null) return;
+        // 查询页背景延伸到状态栏，由网页工具栏内部避让；学校认证页及
+        // 原生登录控件仍整体留在安全区内，横屏刘海和键盘也独立处理。
+        root.setPadding(systemBarInsetLeft, dashboardVisible ? 0 : statusBarInsetPx,
+                systemBarInsetRight, systemBarInsetBottom);
+        if (ecodePanel != null) {
+            FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) ecodePanel.getLayoutParams();
+            int panelTop = ecodePanelTopPx > 0 ? ecodePanelTopPx : statusBarInsetPx + dp(58);
+            if (params.topMargin != panelTop) {
+                params.topMargin = panelTop;
+                ecodePanel.setLayoutParams(params);
+            }
+            applyEcodePanelVisibility(false);
+        }
+        syncDashboardStatusBarInset();
+    }
+
+    private void syncDashboardStatusBarInset() {
+        if (dashboardWebView == null || !dashboardPageReady) return;
+        float cssInset = statusBarInsetPx / getResources().getDisplayMetrics().density;
+        dashboardWebView.evaluateJavascript("window.__setNativeStatusBarInset && window.__setNativeStatusBarInset("
+                + Float.toString(cssInset) + ");", null);
+    }
+
+    private void configureHighRefreshRate() {
+        Display display = root == null ? null : root.getDisplay();
+        if (display == null) display = getWindowManager().getDefaultDisplay();
+        if (display == null) return;
+        Display.Mode current = display.getMode();
+        float preferredRate = current.getRefreshRate();
+        for (Display.Mode mode : display.getSupportedModes()) {
+            if (mode.getPhysicalWidth() == current.getPhysicalWidth()
+                    && mode.getPhysicalHeight() == current.getPhysicalHeight()) {
+                preferredRate = Math.max(preferredRate, mode.getRefreshRate());
+            }
+        }
+        WindowManager.LayoutParams params = getWindow().getAttributes();
+        // 只请求刷新率，不指定分辨率模式；系统仍可按温控、节电策略调度。
+        params.preferredRefreshRate = preferredRate;
+        getWindow().setAttributes(params);
+        if (Build.VERSION.SDK_INT >= 35) {
+            getWindow().setFrameRateBoostOnTouchEnabled(true);
+            // ViewGroup 的刷新率偏好不会自动传递给 WebView 子节点。
+            root.setRequestedFrameRate(View.REQUESTED_FRAME_RATE_CATEGORY_HIGH);
+            dashboardWebView.setRequestedFrameRate(View.REQUESTED_FRAME_RATE_CATEGORY_HIGH);
+            ecodeWebView.setRequestedFrameRate(View.REQUESTED_FRAME_RATE_CATEGORY_HIGH);
+            portalWebView.setRequestedFrameRate(View.REQUESTED_FRAME_RATE_CATEGORY_HIGH);
+        }
     }
 
     private void enterBackgroundLoginMode() {
@@ -1449,7 +1702,9 @@ public class MainActivity extends Activity {
      */
     private void restorePortalOverlayOrder() {
         if (root == null) return;
+        if (loginHeaderBackdrop != null) loginHeaderBackdrop.bringToFront();
         if (loginMethodBar != null) loginMethodBar.bringToFront();
+        if (portalLoadingProgress != null) portalLoadingProgress.bringToFront();
         if (builtInLoginPanel != null) builtInLoginPanel.bringToFront();
         if (portalActionButton != null) portalActionButton.bringToFront();
         if (portalQrActionButton != null) portalQrActionButton.bringToFront();
@@ -1463,6 +1718,7 @@ public class MainActivity extends Activity {
     private void showPortal(boolean forceLoginPage) {
         runOnUiThread(() -> {
             dashboardVisible = false;
+            applyCurrentSystemBarInsets();
             exitBackgroundLoginMode();
             String currentUrl = portalWebView == null ? "" : portalWebView.getUrl();
             if (forceLoginPage
@@ -1613,6 +1869,7 @@ public class MainActivity extends Activity {
     private void showDashboard() {
         runOnUiThread(() -> {
             dashboardVisible = true;
+            applyCurrentSystemBarInsets();
             builtInMobileLoginMode = false;
             academicPortalViewerActive = false;
             academicEcodeRedirectAttempts = 0;
@@ -1629,11 +1886,8 @@ public class MainActivity extends Activity {
                 dashboardWebView.loadUrl(DASHBOARD_URL);
             }
             if (ecodePanel != null) {
-                ecodePanelHidden = false;
-                ecodePanel.animate().cancel();
-                ecodePanel.setTranslationY(0f);
-                ecodePanel.setAlpha(1f);
-                ecodePanel.setVisibility(View.VISIBLE);
+                // 返回首页也沿用已有收起状态，避免认证返回时闪出校园码。
+                applyEcodePanelVisibility(false);
             }
         });
     }
@@ -1811,6 +2065,21 @@ public class MainActivity extends Activity {
                 loginDiagnosticEvents.removeFirst();
             }
             loginDiagnosticEvents.addLast(event);
+        }
+        // Publish only fixed, user-facing milestones. Diagnostic details can
+        // contain URLs/identifiers and must never become progress text.
+        if (!"academic".equals(loginDiagnosticScope) || !builtInLoginSubmissionPending) return;
+        if ("start".equals(phase) || "retry".equals(phase)) {
+            notifyDashboardLoginProgress("connecting", "正在连接学校统一身份认证…");
+        } else if ("login-tab".equals(phase)) {
+            notifyDashboardLoginProgress("preparing", "学校认证页已就绪，正在准备登录…");
+        } else if ("form-submit".equals(phase)) {
+            notifyDashboardLoginProgress("authenticating", "登录已提交，正在等待学校认证结果…");
+        } else if ("interactive-challenge".equals(phase)) {
+            notifyDashboardLoginProgress("waiting", "需要在学校官方页面完成图形或短信验证。");
+        } else if ("portal-probe".equals(phase) || "cas-ticket-pending".equals(phase)
+                || (phase != null && phase.endsWith("-confirm"))) {
+            notifyDashboardLoginProgress("verifying", "正在验证教务登录会话是否有效…");
         }
     }
 
@@ -2625,7 +2894,7 @@ public class MainActivity extends Activity {
 
     private void applyAcademicPortalViewerUi() {
         academicPortalViewerActive = true;
-        if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
+        setLoginChromeVisible(false);
         if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
         if (interactiveTrustDevicePanel != null) interactiveTrustDevicePanel.setVisibility(View.GONE);
         if (portalQrActionButton != null) portalQrActionButton.setVisibility(View.GONE);
@@ -2744,7 +3013,7 @@ public class MainActivity extends Activity {
 
     private void hidePortalOverlays() {
         academicPortalViewerActive = false;
-        if (loginMethodBar != null) loginMethodBar.setVisibility(View.GONE);
+        setLoginChromeVisible(false);
         if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
         if (interactiveTrustDevicePanel != null) interactiveTrustDevicePanel.setVisibility(View.GONE);
         if (portalActionButton != null) portalActionButton.setVisibility(View.GONE);
@@ -2769,26 +3038,33 @@ public class MainActivity extends Activity {
         applyPortalLoginChrome();
     }
 
+    private void setLoginChromeVisible(boolean visible) {
+        if (loginMethodBar != null) loginMethodBar.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (loginHeaderBackdrop != null) loginHeaderBackdrop.setVisibility(visible ? View.VISIBLE : View.GONE);
+        if (!visible && portalLoadingProgress != null) portalLoadingProgress.setVisibility(View.GONE);
+    }
+
     private void applyPortalLoginChrome() {
         if (loginMethodBar != null) {
-            loginMethodBar.setVisibility(View.VISIBLE);
+            setLoginChromeVisible(true);
             for (int index = 0; index < loginMethodBar.getChildCount(); index += 1) {
                 View child = loginMethodBar.getChildAt(index);
                 if (!(child instanceof Button)) continue;
                 boolean selected = loginMethodForCurrentPortal.equals(String.valueOf(child.getTag()));
-                ((Button) child).setTextColor(selected ? Color.WHITE : getColor(R.color.native_text_secondary));
-                child.setBackground(roundBackground(
-                        selected ? getColor(R.color.native_brand) : getColor(R.color.native_surface_subtle),
-                        10
-                ));
+                ((Button) child).setTextColor(selected ? getColor(R.color.native_text_primary) : getColor(R.color.native_text_secondary));
+                ((Button) child).setTypeface(null, selected ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+                child.setBackground(selected ? loginGlassBackground(18) : roundBackground(Color.TRANSPARENT, 18));
+                child.setElevation(selected ? dp(1) : 0);
             }
         }
         boolean builtIn = LOGIN_METHOD_BUILT_IN.equals(loginMethodForCurrentPortal);
         boolean nativeBuiltIn = builtIn && !builtInInteractiveChallengeVisible && !builtInMobileLoginMode;
+        if (portalLoadingProgress != null) portalLoadingProgress.setVisibility(!nativeBuiltIn && portalWebView != null && portalWebView.getProgress() < 100 ? View.VISIBLE : View.GONE);
         boolean showInteractiveTrustDevice = builtInInteractiveChallengeVisible
                 || builtInMobileLoginMode
                 || (LOGIN_METHOD_MOBILE.equals(loginMethodForCurrentPortal)
                 && isPortalLoginPage(portalWebView == null ? "" : portalWebView.getUrl()));
+        if (nativeBuiltIn) setBuiltInLoginBusy(builtInLoginSubmissionPending && !backgroundLoginInProgress);
         if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(nativeBuiltIn ? View.VISIBLE : View.GONE);
         if (builtInMobileLoginButton != null) {
             builtInMobileLoginButton.setVisibility(nativeBuiltIn ? View.VISIBLE : View.GONE);
@@ -2862,12 +3138,12 @@ public class MainActivity extends Activity {
         if (!background) {
             showBuiltInChallenge(false);
             setBuiltInLoginStatus("正在连接学校统一身份认证…", false);
-            if (builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+            setBuiltInLoginBusy(true);
             backgroundLoginForEcode = false;
             pendingEcodeLoginUrl = "";
         } else {
             if (backgroundLoginForEcode) {
-                setEcodeError("登录状态已失效，正在后台使用本机加密凭据重新登录…");
+                setEcodeProgress("登录状态已失效，正在后台使用本机加密凭据重新登录…");
             } else {
                 notifyDashboardLoginStatus("retrying", "登录状态已失效，正在后台使用本机加密凭据重新登录…");
             }
@@ -3356,9 +3632,10 @@ public class MainActivity extends Activity {
             showBuiltInChallenge(false);
             exitBackgroundLoginMode();
             dashboardVisible = false;
+            applyCurrentSystemBarInsets();
             if (dashboardHome != null) dashboardHome.setVisibility(View.GONE);
             if (portalWebView != null) portalWebView.setVisibility(View.VISIBLE);
-            if (loginMethodBar != null) loginMethodBar.setVisibility(View.VISIBLE);
+            setLoginChromeVisible(true);
             if (builtInLoginPanel != null) builtInLoginPanel.setVisibility(View.GONE);
             if (interactiveTrustDevicePanel != null) {
                 interactiveTrustDevicePanel.setVisibility(View.VISIBLE);
@@ -3446,7 +3723,7 @@ public class MainActivity extends Activity {
             portalActionButton.setEnabled(false);
             portalActionButton.setText("正在确认学校登录…");
         }
-        if (!background && builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+        if (!background) setBuiltInLoginBusy(true);
         recordLoginDiagnostic(diagnosticPhase, "用当前 WebView Cookie 确认教务会话");
         cookieManager.flush();
         networkExecutor.execute(() -> {
@@ -3508,7 +3785,7 @@ public class MainActivity extends Activity {
                     closePortalLoginToDashboardNow();
                     return;
                 }
-                if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+                setBuiltInLoginBusy(false);
                 if (portalActionButton != null) {
                     portalActionButton.setEnabled(true);
                     portalActionButton.setText("验证完成，进入执掌东大");
@@ -3555,7 +3832,7 @@ public class MainActivity extends Activity {
         }
         if (portalWebView == null) return;
         final long operationId = activeLoginOperationId;
-        if (builtInLoginButton != null) builtInLoginButton.setEnabled(false);
+        setBuiltInLoginBusy(true);
         String script = "(function(){var code=document.getElementById('mcode'),save=document.getElementById('saveDevice'),button=document.getElementById('second_valid_ok');"
                 + "if(!code||!button)return JSON.stringify({ok:false,error:'学校二次认证输入框不可用'});"
                 + "code.value=" + JSONObject.quote(code) + ";"
@@ -3568,12 +3845,12 @@ public class MainActivity extends Activity {
                 JSONObject result = new JSONObject(decodeJavascriptString(value));
                 if (!result.optBoolean("ok", false)) {
                     setBuiltInLoginStatus(result.optString("error", "无法提交验证码"), true);
-                    if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+                    setBuiltInLoginBusy(false);
                     return;
                 }
             } catch (Exception error) {
                 setBuiltInLoginStatus("无法确认验证码是否提交，请稍后重试。", true);
-                if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+                setBuiltInLoginBusy(false);
                 return;
             }
             setBuiltInLoginStatus("正在验证短信验证码并登记可信设备…", false);
@@ -3696,11 +3973,12 @@ public class MainActivity extends Activity {
             if (portalWebView != null) portalWebView.setVisibility(View.GONE);
             if (dashboardHome != null) dashboardHome.setVisibility(View.VISIBLE);
             dashboardVisible = true;
+            applyCurrentSystemBarInsets();
         } else {
             setBuiltInLoginStatus(fullMessage, true);
             showBuiltInChallenge(false);
             applyPortalLoginMethodUi();
-            if (builtInLoginButton != null) builtInLoginButton.setEnabled(true);
+            setBuiltInLoginBusy(false);
         }
     }
 
@@ -3718,7 +3996,33 @@ public class MainActivity extends Activity {
         String script = "window.__androidLoginStatus && window.__androidLoginStatus("
                 + JSONObject.quote(status == null ? "" : status) + ","
                 + JSONObject.quote(message == null ? "" : message) + ");";
-        runOnUiThread(() -> dashboardWebView.evaluateJavascript(script, null));
+        runOnUiThread(() -> {
+            dashboardAcademicLoginStatus = status == null ? "" : status;
+            if (!"retrying".equals(status)) {
+                dashboardLoginProgressPhase = "";
+                dashboardLoginProgressMessage = "";
+            }
+            dashboardWebView.evaluateJavascript(script, null);
+        });
+    }
+
+    private void notifyDashboardLoginProgress(String phase, String message) {
+        final long progressEpoch = sessionEpoch;
+        runOnUiThread(() -> {
+            if (progressEpoch != sessionEpoch) return;
+            if (phase.equals(dashboardLoginProgressPhase) && message.equals(dashboardLoginProgressMessage)) return;
+            dashboardAcademicLoginStatus = "retrying";
+            dashboardLoginProgressPhase = phase;
+            dashboardLoginProgressMessage = message;
+            deliverDashboardLoginProgress();
+        });
+    }
+
+    private void deliverDashboardLoginProgress() {
+        if (dashboardWebView == null || !dashboardPageReady || dashboardLoginProgressPhase.isEmpty()) return;
+        dashboardWebView.evaluateJavascript("window.__androidLoginProgress && window.__androidLoginProgress("
+                + JSONObject.quote(dashboardLoginProgressPhase) + ","
+                + JSONObject.quote(dashboardLoginProgressMessage) + ");", null);
     }
 
     private boolean isAcademicPortalReadyUrl(String url) {
@@ -3825,7 +4129,15 @@ public class MainActivity extends Activity {
             backgroundLoginAttemptedForCurrentFailure = false;
             pendingAcademicFailureReason = "";
             if (preferences != null) preferences.edit().putBoolean(HAS_ACADEMIC_SESSION, true).apply();
+            boolean hadLoginWarning = !lastAcademicLoginError.isEmpty()
+                    || "failed".equals(dashboardAcademicLoginStatus)
+                    || "retrying".equals(dashboardAcademicLoginStatus)
+                    || "probe".equals(dashboardAcademicLoginStatus);
             if (!lastAcademicLoginError.isEmpty()) setLastAcademicLoginError("");
+            lastAcademicSessionHealthyAt = System.currentTimeMillis();
+            // The dashboard is retained across manual login, so clearing only
+            // SharedPreferences leaves its in-memory failure banner visible.
+            if (hadLoginWarning) notifyDashboardLoginStatus("ready", "");
         });
     }
 
@@ -3858,14 +4170,14 @@ public class MainActivity extends Activity {
             if (isPortalLoginPage(loginUrl)) pendingEcodeLoginUrl = loginUrl;
             if (!dashboardVisible) return;
             if (backgroundLoginInProgress) {
-                setEcodeError(reason + "，正在等待当前后台登录完成…");
+                setEcodeProgress(reason + "，正在等待当前后台登录完成…");
                 return;
             }
             LoginCredentials saved = loadBuiltInCredentials();
             if (saved.isComplete() && !ecodeBackgroundLoginAttemptedForCurrentFailure) {
                 ecodeBackgroundLoginAttemptedForCurrentFailure = true;
                 backgroundLoginForEcode = true;
-                setEcodeError(reason + "，正在后台使用本机加密凭据重新登录…");
+                setEcodeProgress(reason + "，正在后台使用本机加密凭据重新登录…");
                 submitBuiltInCredentials(true);
                 return;
             }
@@ -3882,7 +4194,7 @@ public class MainActivity extends Activity {
         ecodeReloadAfterBackgroundLogin = false;
         ecodeAutoScrolled = false;
         ecodeProbeAttempts = 0;
-        setEcodeError("后台登录成功，正在重新加载学校原网页…");
+        setEcodeProgress("后台登录成功，正在重新加载学校原网页…");
         ecodeWebView.stopLoading();
         ecodeWebView.loadUrl(ecodeUrl());
     }
@@ -4429,7 +4741,12 @@ public class MainActivity extends Activity {
     }
 
     private FrameLayout createEcodePanel() {
-        FrameLayout panel = new FrameLayout(this);
+        FrameLayout panel = new FrameLayout(this) {
+            @Override public boolean dispatchTouchEvent(MotionEvent event) {
+                if (ecodePanelHidden) return false;
+                return super.dispatchTouchEvent(event);
+            }
+        };
         applyEcodePanelChrome(panel, false);
 
         ecodeWebView.setBackgroundColor(getColor(R.color.native_background));
@@ -4437,7 +4754,9 @@ public class MainActivity extends Activity {
         panel.addView(ecodeWebView, fullScreenParams());
 
         ecodeCollapsedCard = new FrameLayout(this);
-        ecodeCollapsedCard.setBackground(roundBackground(getColor(R.color.native_surface), 0));
+        // 背景交由查询页的 backdrop-filter 层绘制；原生层只画二维码和文字。
+        ecodeCollapsedCard.setBackgroundColor(Color.TRANSPARENT);
+        ecodeWebView.setAlpha(0f);
         ecodeCollapsedCard.setContentDescription("校园码，点击查看完整 E 码通");
         ecodeCollapsedCard.setOnClickListener(view -> setEcodeExpanded(true));
 
@@ -4458,6 +4777,11 @@ public class MainActivity extends Activity {
         ecodeThumbnailView.setPadding(0, 0, 0, 0);
         ecodeThumbnailView.setBackgroundColor(Color.TRANSPARENT);
         ecodeThumbnailShell.addView(ecodeThumbnailView, fullScreenParams());
+        ecodeLoadingProgress = new ProgressBar(this);
+        ecodeLoadingProgress.setIndeterminateTintList(ColorStateList.valueOf(getColor(R.color.native_brand_text)));
+        ecodeLoadingProgress.setContentDescription("正在准备校园码");
+        ecodeThumbnailShell.addView(ecodeLoadingProgress,
+                new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER));
         ecodeCollapsedCard.addView(ecodeThumbnailShell, thumbnailParams);
 
         LinearLayout ecodeCopy = new LinearLayout(this);
@@ -4470,13 +4794,14 @@ public class MainActivity extends Activity {
         ecodeTitle.setTypeface(null, android.graphics.Typeface.BOLD);
         ecodeCopy.addView(ecodeTitle, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         ecodeCollapsedTimeView = new TextView(this);
-        ecodeCollapsedTimeView.setText("点击查看完整 E 码通");
+        ecodeCollapsedTimeView.setText("正在准备校园码…");
         ecodeCollapsedTimeView.setTextColor(getColor(R.color.native_text_secondary));
         ecodeCollapsedTimeView.setTextSize(11);
+        ecodeCollapsedTimeView.setMaxLines(2);
         LinearLayout.LayoutParams ecodeTimeParams = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         ecodeTimeParams.topMargin = dp(4);
         ecodeCopy.addView(ecodeCollapsedTimeView, ecodeTimeParams);
-        FrameLayout.LayoutParams copyParams = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER_VERTICAL | Gravity.START);
+        FrameLayout.LayoutParams copyParams = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.CENTER_VERTICAL | Gravity.START);
         copyParams.setMargins(dp(100), 0, dp(52), 0);
         ecodeCollapsedCard.addView(ecodeCopy, copyParams);
 
@@ -4488,17 +4813,8 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams arrowParams = new FrameLayout.LayoutParams(dp(40), FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END);
         arrowParams.setMargins(0, 0, dp(8), 0);
         ecodeCollapsedCard.addView(ecodeArrow, arrowParams);
-        View ecodeHeaderDivider = new View(this);
-        ecodeHeaderDivider.setBackgroundColor(getColor(R.color.native_border));
-        ecodeCollapsedCard.addView(
-                ecodeHeaderDivider,
-                new FrameLayout.LayoutParams(
-                        FrameLayout.LayoutParams.MATCH_PARENT,
-                        Math.max(1, dp(1)),
-                        Gravity.BOTTOM
-                )
-        );
-        panel.addView(ecodeCollapsedCard, fullScreenParams());
+        panel.addView(ecodeCollapsedCard, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, dp(ECODE_COLLAPSED_HEIGHT_DP), Gravity.TOP));
 
         ecodeErrorView = new TextView(this);
         ecodeErrorView.setTextColor(getColor(R.color.native_error));
@@ -4513,10 +4829,10 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP
         );
-        errorParams.setMargins(dp(10), dp(10), dp(10), 0);
+        errorParams.setMargins(dp(10), dp(52), dp(10), 0);
         panel.addView(ecodeErrorView, errorParams);
 
-        ecodeExpandHint = new TextView(this);
+        ecodeExpandHint = new LiquidTextButton();
         ecodeExpandHint.setText("点击展开 E 码通");
         ecodeExpandHint.setTextColor(Color.WHITE);
         ecodeExpandHint.setTextSize(12);
@@ -4527,7 +4843,7 @@ public class MainActivity extends Activity {
         ecodeExpandHint.setVisibility(View.GONE);
         panel.addView(ecodeExpandHint, fullScreenParams());
 
-        ecodeCollapseButton = new TextView(this);
+        ecodeCollapseButton = new LiquidTextButton();
         ecodeCollapseButton.setText("收起");
         ecodeCollapseButton.setTextColor(getColor(R.color.native_text_primary));
         ecodeCollapseButton.setTextSize(12);
@@ -4539,7 +4855,7 @@ public class MainActivity extends Activity {
         collapseParams.setMargins(0, dp(10), dp(76), 0);
         panel.addView(ecodeCollapseButton, collapseParams);
 
-        ecodeRefreshButton = new TextView(this);
+        ecodeRefreshButton = new LiquidTextButton();
         ecodeRefreshButton.setText("刷新");
         ecodeRefreshButton.setTextColor(getColor(R.color.native_text_primary));
         ecodeRefreshButton.setTextSize(12);
@@ -4551,7 +4867,7 @@ public class MainActivity extends Activity {
         refreshParams.setMargins(0, dp(10), dp(10), 0);
         panel.addView(ecodeRefreshButton, refreshParams);
 
-        ecodeLoginButton = new TextView(this);
+        ecodeLoginButton = new LiquidTextButton();
         ecodeLoginButton.setText("登录");
         ecodeLoginButton.setTextColor(getColor(R.color.native_text_primary));
         ecodeLoginButton.setTextSize(12);
@@ -4571,12 +4887,18 @@ public class MainActivity extends Activity {
 
     private void setEcodeExpanded(boolean expanded) {
         if (ecodePanel == null || ecodeExpanded == expanded) return;
+        Rect currentClip = ecodePanel.getClipBounds();
+        int start = currentClip != null ? currentClip.height()
+                : ecodePanel.getHeight() > 0 ? ecodePanel.getHeight() : dp(ECODE_COLLAPSED_HEIGHT_DP);
+        if (ecodeSizeAnimator != null) ecodeSizeAnimator.cancel();
+        if (ecodeVisibilityAnimator != null) ecodeVisibilityAnimator.cancel();
         ecodePanel.animate().cancel();
+        ecodePanel.setVisibility(View.VISIBLE);
         ecodePanelHidden = false;
+        ecodePanel.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
         ecodePanel.setTranslationY(0f);
         ecodePanel.setAlpha(1f);
         FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) ecodePanel.getLayoutParams();
-        int start = params == null || params.height <= 0 ? dp(ECODE_COLLAPSED_HEIGHT_DP) : params.height;
         int target = expanded ? ecodeExpandedHeight() : dp(ECODE_COLLAPSED_HEIGHT_DP);
         ecodeExpanded = expanded;
         ecodeExpandHint.setVisibility(View.GONE);
@@ -4585,23 +4907,52 @@ public class MainActivity extends Activity {
         ecodeRefreshButton.setVisibility(expanded ? View.VISIBLE : View.GONE);
         ecodeLoginButton.setVisibility(expanded ? View.VISIBLE : View.GONE);
         applyEcodePanelChrome(ecodePanel, expanded);
-
+        updateEcodeStatusPresentation();
+        ecodeWebView.setAlpha(expanded ? 1f : 0f);
+        if (!nativeMotionEnabled()) {
+            params.height = target;
+            ecodePanel.setLayoutParams(params);
+            ecodePanel.setClipBounds(null);
+            return;
+        }
+        // 一次性布局到足够高度，逐帧仅改变裁切范围；避免每帧重排官方
+        // WebView 的页面，90/120/144Hz 下也不必重复执行整页 measure/layout。
+        params.height = Math.max(start, target);
+        ecodePanel.setLayoutParams(params);
+        ecodePanel.setClipBounds(new Rect(0, 0, ecodePanel.getWidth(), start));
         ValueAnimator animator = ValueAnimator.ofInt(start, target);
-        animator.setDuration(260);
-        animator.setInterpolator(new AccelerateDecelerateInterpolator());
-        animator.addUpdateListener(valueAnimator -> {
-            FrameLayout.LayoutParams current = (FrameLayout.LayoutParams) ecodePanel.getLayoutParams();
-            current.height = (int) valueAnimator.getAnimatedValue();
-            ecodePanel.setLayoutParams(current);
+        ecodeSizeAnimator = animator;
+        animator.setDuration(360);
+        animator.setInterpolator(new PathInterpolator(.22f, 1f, .36f, 1f));
+        animator.addUpdateListener(valueAnimator -> ecodePanel.setClipBounds(
+                new Rect(0, 0, ecodePanel.getWidth(), (int) valueAnimator.getAnimatedValue())));
+        animator.addListener(new AnimatorListenerAdapter() {
+            private boolean cancelled;
+            @Override public void onAnimationCancel(Animator animation) {
+                cancelled = true;
+                if (ecodeSizeAnimator == animation) ecodeSizeAnimator = null;
+            }
+            @Override public void onAnimationEnd(Animator animation) {
+                if (cancelled) return;
+                FrameLayout.LayoutParams current = (FrameLayout.LayoutParams) ecodePanel.getLayoutParams();
+                current.height = target;
+                ecodePanel.setLayoutParams(current);
+                ecodePanel.setClipBounds(null);
+                if (ecodeSizeAnimator == animation) ecodeSizeAnimator = null;
+            }
         });
         animator.start();
+    }
+
+    private boolean nativeMotionEnabled() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || ValueAnimator.areAnimatorsEnabled();
     }
 
     private void refreshEcodePage() {
         if (ecodeWebView == null) return;
         ecodeAutoScrolled = false;
         ecodeProbeAttempts = 0;
-        setEcodeError("正在手动刷新学校 E 码通原网页…");
+        setEcodeProgress("正在手动刷新学校 E 码通原网页…");
         ecodeWebView.stopLoading();
         // E 码通与教务系统分别检查业务会话。直接刷新 E 码通目标；若它
         // 跳回统一认证页，由独立后台登录流程恢复，不再借道教务入口。
@@ -4613,7 +4964,7 @@ public class MainActivity extends Activity {
         setEcodeExpanded(true);
         ecodeAutoScrolled = false;
         ecodeProbeAttempts = 0;
-        setEcodeError("已展开 E 码通原网页，可在这里单独登录；不会影响教务系统会话");
+        setEcodeProgress("正在打开校园码登录页…");
         ecodeWebView.stopLoading();
         ecodeWebView.loadUrl(ecodeUrl());
     }
@@ -4625,42 +4976,123 @@ public class MainActivity extends Activity {
         boolean nextHidden = Boolean.parseBoolean(String.valueOf(hidden));
         if (ecodePanelHidden == nextHidden && ecodePanel.getAnimation() == null) return;
         ecodePanelHidden = nextHidden;
+        applyEcodePanelVisibility(true);
+        if (!nextHidden && !ecodeStatusIsError) scheduleEcodeProbe(360);
+    }
+
+    private void applyEcodePanelVisibility(boolean animated) {
+        if (ecodePanel == null) return;
         ecodePanel.animate().cancel();
-        int panelHeight = ecodePanel.getHeight() > 0 ? ecodePanel.getHeight() : dp(ECODE_COLLAPSED_HEIGHT_DP);
-        ecodePanel.animate()
-                .translationY(nextHidden ? -panelHeight : 0f)
-                .alpha(nextHidden ? 0f : 1f)
-                .setDuration(190)
-                .setInterpolator(new AccelerateDecelerateInterpolator())
-                .start();
+        Rect clip = ecodePanel.getClipBounds();
+        int currentHeight = ecodePanel.getLayoutParams().height;
+        int start = clip != null ? clip.height() : Math.max(0, currentHeight);
+        int panelHeight = ecodeExpanded ? ecodeExpandedHeight() : dp(ECODE_COLLAPSED_HEIGHT_DP);
+        float startAlpha = ecodePanel.getAlpha();
+        if (ecodeSizeAnimator != null) ecodeSizeAnimator.cancel();
+        if (ecodeVisibilityAnimator != null) ecodeVisibilityAnimator.cancel();
+        ecodePanel.setTranslationY(0f);
+        ecodePanel.setImportantForAccessibility(ecodePanelHidden
+                ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS : View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        int target = ecodePanelHidden ? 0 : panelHeight;
+        if (!animated || !nativeMotionEnabled()) {
+            setEcodePanelHeight(panelHeight);
+            ecodePanel.setAlpha(ecodePanelHidden ? 0f : 1f);
+            ecodePanel.setClipBounds(ecodePanelHidden ? new Rect(0, 0, ecodePanel.getWidth(), 0) : null);
+            ecodePanel.setVisibility(View.VISIBLE);
+            return;
+        }
+        setEcodePanelHeight(Math.max(start, panelHeight));
+        // Reveal below the fixed toolbar. Never translate a QR card through
+        // the status bar; clip and alpha do not resize the school WebView.
+        ecodePanel.setVisibility(View.VISIBLE);
+        ecodePanel.setClipBounds(new Rect(0, 0, ecodePanel.getWidth(), start));
+        ValueAnimator animator = ValueAnimator.ofInt(start, target);
+        ecodeVisibilityAnimator = animator;
+        animator.setDuration(340);
+        animator.setInterpolator(new PathInterpolator(.22f, 1f, .36f, 1f));
+        animator.addUpdateListener(value -> {
+            ecodePanel.setClipBounds(new Rect(0, 0, ecodePanel.getWidth(), (int) value.getAnimatedValue()));
+            ecodePanel.setAlpha(startAlpha + ((target == 0 ? 0f : 1f) - startAlpha) * value.getAnimatedFraction());
+        });
+        animator.addListener(new AnimatorListenerAdapter() {
+            private boolean cancelled;
+            @Override public void onAnimationCancel(Animator animation) { cancelled = true; }
+            @Override public void onAnimationEnd(Animator animation) {
+                if (ecodeVisibilityAnimator != animation) return;
+                ecodeVisibilityAnimator = null;
+                if (cancelled) return;
+                setEcodePanelHeight(panelHeight);
+                ecodePanel.setVisibility(View.VISIBLE);
+                ecodePanel.setClipBounds(target == 0 ? new Rect(0, 0, ecodePanel.getWidth(), 0) : null);
+            }
+        });
+        animator.start();
+    }
+
+    private void setEcodePanelHeight(int height) {
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) ecodePanel.getLayoutParams();
+        if (params.height == height) return;
+        params.height = height;
+        ecodePanel.setLayoutParams(params);
     }
 
     private int ecodeExpandedHeight() {
         float density = getResources().getDisplayMetrics().density;
         int screenDp = Math.round(getResources().getDisplayMetrics().heightPixels / density);
         int heightDp = Math.min(680, Math.max(480, Math.round(screenDp * 0.72f)));
-        return dp(heightDp);
+        int panelTop = ecodePanelTopPx > 0 ? ecodePanelTopPx : statusBarInsetPx + dp(58);
+        int availableHeight = getResources().getDisplayMetrics().heightPixels - panelTop - systemBarInsetBottom;
+        return Math.min(dp(heightDp), Math.max(dp(ECODE_COLLAPSED_HEIGHT_DP), availableHeight));
+    }
+
+    private void setEcodeProgress(String message) {
+        setEcodeStatus(message, false);
     }
 
     private void setEcodeError(String message) {
-        if (ecodeErrorView == null) return;
+        setEcodeStatus(message == null || message.isEmpty() ? "暂时无法读取校园码，请稍后重试" : message, true);
+    }
+
+    private void setEcodeStatus(String message, boolean error) {
         runOnUiThread(() -> {
-            if (ecodeErrorView == null) return;
-            ecodeErrorView.setText("E 码通：" + (message == null || message.isEmpty() ? "未知错误" : message));
-            ecodeErrorView.setVisibility(View.VISIBLE);
+            ecodeStatusMessage = message;
+            ecodeStatusIsError = error;
+            ecodeLoading = !error;
+            updateEcodeStatusPresentation();
         });
     }
 
+    private void updateEcodeStatusPresentation() {
+        if (ecodeLoadingProgress != null) {
+            ecodeLoadingProgress.setVisibility(ecodeLoading ? View.VISIBLE : View.GONE);
+        }
+        if (ecodeCollapsedTimeView != null && !ecodeStatusMessage.isEmpty()) {
+            ecodeCollapsedTimeView.setText(ecodeStatusIsError ? "暂时无法读取，点此查看或重试" : "正在准备校园码…");
+            ecodeCollapsedTimeView.setTextColor(getColor(R.color.native_text_secondary));
+        }
+        if (ecodeErrorView != null) {
+            // Only a real failure can create a banner, and only inside the
+            // full official page. The compact card keeps its normal hierarchy.
+            ecodeErrorView.setText(ecodeStatusMessage);
+            ecodeErrorView.setVisibility(ecodeExpanded && ecodeStatusIsError ? View.VISIBLE : View.GONE);
+        }
+        if (ecodeLoading && ecodeThumbnailView != null) ecodeThumbnailView.setImageDrawable(null);
+    }
+
     private void clearEcodeError() {
-        if (ecodeErrorView == null) return;
         runOnUiThread(() -> {
-            if (ecodeErrorView != null) ecodeErrorView.setVisibility(View.GONE);
+            ecodeStatusMessage = "";
+            ecodeStatusIsError = false;
+            ecodeLoading = false;
+            updateEcodeStatusPresentation();
+            if (ecodeCollapsedTimeView != null) ecodeCollapsedTimeView.setText("点击查看完整 E 码通");
         });
     }
 
     private void scheduleEcodeProbe(long delayMs) {
         if (ecodeWebView == null || !dashboardVisible) return;
-        ecodeWebView.postDelayed(this::probeEcodeLayout, delayMs);
+        ecodeWebView.removeCallbacks(ecodeProbeRunnable);
+        ecodeWebView.postDelayed(ecodeProbeRunnable, delayMs);
     }
 
     private void probeEcodeLayout() {
@@ -4757,8 +5189,14 @@ public class MainActivity extends Activity {
 
     private void captureEcodeFallbackThumbnail(String time, String reason) {
         if (ecodeWebView == null || ecodeThumbnailView == null) return;
+        // Full-page bitmap capture/analysis is expensive on the UI thread.
+        // Hidden drawers need no screenshot, and a route slide owns this frame.
+        if (ecodePanelHidden) return;
+        if (dashboardMotionActive) { scheduleEcodeProbe(500); return; }
         Log.w(LOG_TAG, "ecode thumbnail image-analysis fallback: " + reason);
         ecodeWebView.post(() -> {
+            if (ecodePanelHidden) return;
+            if (dashboardMotionActive) { scheduleEcodeProbe(500); return; }
             Bitmap snapshot = null;
             Bitmap thumbnail = null;
             try {
@@ -5059,6 +5497,11 @@ public class MainActivity extends Activity {
             activeAcademicProbeLoginOperationId = loginOperationId;
         }
         final String trigger = reason == null || reason.trim().isEmpty() ? "unknown" : reason.trim();
+        if (loginOperationId > 0L && !postLoginVerificationForEcode) {
+            notifyDashboardLoginProgress("verifying", "正在确认新的教务登录会话…");
+        } else if (!backgroundLoginInProgress && !builtInLoginSubmissionPending) {
+            notifyDashboardLoginProgress("checking", "正在检查当前登录会话，已有内容继续显示…");
+        }
         networkExecutor.execute(() -> performAcademicSessionProbe(probeId, probeEpoch, loginOperationId, trigger));
     }
 
@@ -5226,7 +5669,7 @@ public class MainActivity extends Activity {
             panel.setBackground(roundBackground(getColor(R.color.native_surface), 0, 0, 12, 12));
             panel.setElevation(dp(2));
         } else {
-            panel.setBackground(roundBackground(getColor(R.color.native_surface), 0));
+            panel.setBackgroundColor(Color.TRANSPARENT);
             panel.setElevation(0f);
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -5270,6 +5713,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        configureHighRefreshRate();
         if (dashboardVisible) {
             long now = System.currentTimeMillis();
             boolean stayedInBackgroundLongEnough = lastBackgroundAt > 0L
@@ -5369,12 +5813,27 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (ecodeSizeAnimator != null) ecodeSizeAnimator.cancel();
+        if (ecodeVisibilityAnimator != null) ecodeVisibilityAnimator.cancel();
         cookieManager.flush();
         networkExecutor.shutdownNow();
         if (portalWebView != null) portalWebView.destroy();
-        if (ecodeWebView != null) ecodeWebView.destroy();
+        if (ecodeWebView != null) { ecodeWebView.removeCallbacks(ecodeProbeRunnable); ecodeWebView.destroy(); }
         if (dashboardWebView != null) dashboardWebView.destroy();
         super.onDestroy();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && root != null) configureHighRefreshRate();
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        configureHighRefreshRate();
+        if (root != null) root.requestApplyInsets();
     }
 
     /** 只接收学校登录页生成的临时二维码地址，不接收账号、密码或验证码。 */
@@ -5416,6 +5875,29 @@ public class MainActivity extends Activity {
             // 这里不能直接调用同名桥接方法，否则会在 UI 线程里递归调用自身，
             // 页面一触发滚动通知就会 StackOverflowError 使整个 Activity 闪退。
             runOnUiThread(() -> MainActivity.this.setEcodePanelHidden(hidden));
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setDashboardMotionActive(boolean active) {
+            runOnUiThread(() -> dashboardMotionActive = active);
+        }
+
+        @android.webkit.JavascriptInterface
+        public void setEcodePanelTop(float topCssPixels) {
+            if (!Float.isFinite(topCssPixels) || topCssPixels < 0 || topCssPixels > 240) return;
+            runOnUiThread(() -> {
+                ecodePanelTopPx = Math.round(topCssPixels * getResources().getDisplayMetrics().density);
+                if (ecodePanel == null) return;
+                FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) ecodePanel.getLayoutParams();
+                if (params.topMargin == ecodePanelTopPx) return;
+                params.topMargin = ecodePanelTopPx;
+                ecodePanel.setLayoutParams(params);
+            });
+        }
+
+        @android.webkit.JavascriptInterface
+        public float getStatusBarInset() {
+            return statusBarInsetPx / getResources().getDisplayMetrics().density;
         }
 
         @android.webkit.JavascriptInterface
@@ -5524,7 +6006,8 @@ public class MainActivity extends Activity {
 
         @android.webkit.JavascriptInterface
         public void request(String requestId, String method, String url, String body, String headersJson) {
-            networkExecutor.execute(() -> performRequest(requestId, method, url, body, headersJson));
+            final long requestEpoch = sessionEpoch;
+            networkExecutor.execute(() -> performRequest(requestId, method, url, body, headersJson, requestEpoch));
         }
 
         @android.webkit.JavascriptInterface
@@ -5692,7 +6175,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void performRequest(String requestId, String method, String urlText, String body, String headersJson) {
+    private void performRequest(String requestId, String method, String urlText, String body, String headersJson, long requestEpoch) {
         HttpURLConnection connection = null;
         try {
             if (!isAllowedNativeRequestUrl(urlText)) {
@@ -5739,23 +6222,36 @@ public class MainActivity extends Activity {
             storeResponseCookies(urlText, connection.getHeaderFields());
             InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
             String responseBody = readResponse(stream);
-            boolean loginInvalid = isAcademicLoginInvalidResponse(status, responseBody);
-            if (loginInvalid) {
-                handleAcademicSessionInvalid(
-                        status == 401
-                                ? "教务系统返回 HTTP 401，登录状态已失效"
-                                : "教务接口返回统一身份认证登录页，当前会话已失效"
-                );
-            } else if (status >= 200 && status < 400) {
-                markAcademicSessionHealthy();
-            }
+            applyAcademicResponseStatus(requestEpoch, status, urlText, responseBody);
             deliver(requestId, status, responseBody);
         } catch (Exception error) {
-            recordAcademicNetworkFailure(error.getMessage());
+            runOnUiThread(() -> {
+                if (requestEpoch == sessionEpoch) recordAcademicNetworkFailure(error.getMessage());
+            });
             deliver(requestId, -1, error.getMessage() == null ? "原生网络请求失败" : error.getMessage());
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private void applyAcademicResponseStatus(long requestEpoch, int status, String urlText, String responseBody) {
+        boolean loginInvalid = isAcademicLoginInvalidResponse(status, responseBody);
+        String trimmedResponse = responseBody.trim();
+        boolean healthyAcademicResponse = status >= 200 && status < 300
+                && isAcademicPortalReadyUrl(urlText)
+                && (trimmedResponse.startsWith("{") || trimmedResponse.startsWith("["));
+        runOnUiThread(() -> {
+            // Responses issued with the old Cookie cannot revive a warning
+            // after a new manual login, or clear a newer login failure.
+            if (requestEpoch != sessionEpoch) return;
+            if (loginInvalid) {
+                handleAcademicSessionInvalid(status == 401
+                        ? "教务系统返回 HTTP 401，登录状态已失效"
+                        : "教务接口返回统一身份认证登录页，当前会话已失效");
+            } else if (healthyAcademicResponse) {
+                markAcademicSessionHealthy();
+            }
+        });
     }
 
     private void recordAcademicNetworkFailure(String detail) {

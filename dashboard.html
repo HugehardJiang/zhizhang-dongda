@@ -11,14 +11,6 @@
   </head>
   <body>
     <div class="app-shell">
-      <section id="androidEcodeCard" class="android-ecode-card" hidden aria-label="校园 E 码通">
-        <div class="android-ecode-qr-shell">
-          <img id="androidEcodeQr" class="android-ecode-qr" alt="校园 E 码通二维码" hidden />
-        </div>
-        <div id="androidEcodeTime" class="android-ecode-time" hidden></div>
-        <div id="androidEcodeUnavailable" class="android-ecode-unavailable" hidden>校园 E 码通暂时无法读取</div>
-      </section>
-
       <aside class="desktop-sidebar" aria-label="主导航">
         <div class="sidebar-brand">
           <div class="brand-mark" aria-hidden="true">NEU</div>
@@ -66,27 +58,39 @@
       </aside>
 
       <div class="main-shell">
+        <section id="androidEcodeCard" class="android-ecode-card" hidden aria-label="校园 E 码通">
+          <div class="android-ecode-qr-shell">
+            <img id="androidEcodeQr" class="android-ecode-qr" alt="校园 E 码通二维码" hidden />
+          </div>
+          <div id="androidEcodeTime" class="android-ecode-time" hidden></div>
+          <div id="androidEcodeUnavailable" class="android-ecode-unavailable" hidden>校园 E 码通暂时无法读取</div>
+        </section>
         <header class="app-toolbar">
           <div class="toolbar-title-group">
             <h1 id="pageTitle">总览</h1>
+            <button id="campusCodeButton" class="icon-button native-ecode-toggle" type="button" aria-label="展开校园码" aria-expanded="false" title="校园码" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM19 15h2v6h-6v-2M12 3v3m0 5v2H8m-5-1h3m6 4v5m4-9h5"/></svg></button>
           </div>
           <div class="toolbar-actions">
             <label class="toolbar-term" title="成绩、考试和个人课表使用的学期">
               <span>学期</span>
+              <span id="termCompactLabel" class="term-compact-label" aria-hidden="true">选择学期</span>
               <select id="termSelect" disabled>
                 <option>正在读取学期…</option>
               </select>
             </label>
             <span id="connectionStatus" class="connection is-loading">正在连接</span>
             <span id="updatedAt" class="updated-at">等待数据</span>
-            <button id="refreshButton" class="icon-button" type="button" aria-label="刷新数据" title="刷新数据">↻</button>
+            <button id="refreshButton" class="icon-button" type="button" aria-label="刷新数据" title="刷新数据"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button>
             <button id="openPortal" class="button button-ghost toolbar-portal-button" type="button">原教务系统</button>
           </div>
         </header>
 
         <main class="page-wrap">
           <div id="notice" class="notice" hidden aria-hidden="true"></div>
-          <section id="content" class="content-area" aria-live="polite"></section>
+          <div id="pageBody" class="page-body">
+            <section id="content" class="content-area" aria-live="polite"></section>
+            <div id="androidSessionSlot" class="android-session-slot" hidden></div>
+          </div>
         </main>
 
         <nav class="mobile-bottom-nav has-indicator" style="--mobile-nav-index: 0" aria-label="移动端主导航">

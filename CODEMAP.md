@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.121` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.96` / `96` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.128` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.109` / `109` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -224,6 +224,8 @@ APK 文件名：`执掌东大-Android-<versionName>-<buildType>.apk`。
 
 原生侧还负责：Cookie 持久化、后台不可见 WebView 重登、图形/手机/设备挑战检测与可见官方 WebView 交互、可信设备选项同步、登录诊断脱敏、E 码通二维码截图、微信可见性、模态时隐藏校园码。细节以 `android/README.md` 为准。
 
+校园码默认完全收起，由顶栏按钮或主页面顶部额外下拉显示；首页保留一行功能提示。原生 `ecodePanelHidden` 与页面 `campusHeaderState` 必须保持一致，认证返回不得强制恢复可见。状态栏沉浸由 `applyCurrentSystemBarInsets()` / `syncDashboardStatusBarInset()` 和页面 `__setNativeStatusBarInset` 配合：背景覆盖状态栏，标题在工具栏内部避让，登录页仍整体留在安全区。
+
 ---
 
 ## 7. `background.js` 职责边界
@@ -259,6 +261,9 @@ APK 文件名：`执掌东大-Android-<versionName>-<buildType>.apk`。
 ```sh
 node tests/audit_smoke.js
 node tests/mobile_shell_smoke.js
+node tests/page_motion_test.js
+node tests/liquid_controls_test.js
+node tests/android_login_smoke.js
 ```
 
 这两份测试会把 `dashboard.js` 放进 stub 的 `document`/`AndroidApi` 里跑，**不断网、不打真教务**。`audit_smoke.js` 末尾会剥掉自动 `refresh()`。加映射/学期/GPA/本地课表/PDF 模型时扩 `audit_smoke.js`；动校园码头、`render()` 是否重置 header、弹窗锁手势时扩 `mobile_shell_smoke.js`。
@@ -294,7 +299,7 @@ Chrome：`chrome://extensions/` → 开发者模式 → 加载本仓库根目录
 11. 培养方案 PDF 只导出白名单结构/完成状态，不要序列化原始接口对象。
 12. 本地课表与教务缓存分 schema、分目录；冲突「隐藏」不是删除学校数据。
 13. `render()` 不得把 `state.mobileShell.campusHeaderState` 默认改回可见。
-14. 关闭弹窗后不要自动恢复校园码，必须用户在主页面重新下拉。
+14. 关闭弹窗后不要自动恢复校园码，必须用户在主页面重新下拉或点击顶栏校园码入口。
 
 ---
 
@@ -329,3 +334,11 @@ Chrome：`chrome://extensions/` → 开发者模式 → 加载本仓库根目录
 7. 更新本代码地图：若你移动了大段逻辑或新增文件，改第 2、5、6 节的行号和树。
 
 历史审查里已经修过的坑（竞态代次号、全校课表分页失败不能静默丢课、`queryAction` 优先、非法考试日期、培养方案合并索引）写在 `AUDIT_REPORT.md`，不要回退。
+
+主页面横向交接由 `captureRouteDeparture()` / `animateRouteArrival()` 控制，移动已有子节点形成一个不可交互离场层，保留正式内容根节点的事件委托；提前两帧准备有界绘制区域，完成后释放图层。`page_motion_test.js` 验证方向、滚动位置、快速取消、待更新渲染和减少动态效果；首次占位由 `renderPageSkeleton()` 按视图生成；`restoreMissingPersonalCache()` 在第一次显示前恢复当前账号/学期数据，`renderRefreshProgress()` 只更新进度，`refreshAfterRouteArrival()` 在切页结束后启动刷新。缓存中的已确认空结果保持空状态。
+
+校园码使用固定顶栏下方的抽屉：同一网页玻璃背板始终覆盖状态栏和顶栏，`setEcodePanelTop()` 在安全区/尺寸变化时同步原生内容位置。加载中的 `setEcodeProgress()` 使用中性占位，真实错误 `setEcodeError()` 仅在完整页面显示详细红色提示。`setDashboardMotionActive()` 让原生截图兜底避开页面动画，探测队列去重。
+
+登录恢复：`markAcademicSessionHealthy()` 在会话得到验证后同步 `ready`，清除保留 WebView 内存中的旧失败卡片；`applyAcademicResponseStatus()` 在 UI 线程检查请求代次，登录前请求不得覆盖新会话。`tests/login_recovery_test.js` 编译实际 Java 方法测试竞态，并验证网页提示与 Toast 的同步清理。
+
+校园码：滚动容器固定尺寸与位置，只改变顶部预留并按实际内容坐标进行一次垂直补偿；底部 scrollTop 裁切、快速反向、提示行与数据更新共用同一个过渡。`tests/campus_drawer_motion_test.js` 验证这些边界。

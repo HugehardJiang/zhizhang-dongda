@@ -8,7 +8,7 @@ function createElementStub() {
     value: '', textContent: '', innerHTML: '', className: '', disabled: false, hidden: false, src: '',
     dataset: {}, selectedOptions: [],
     classList: { add(){}, remove(){}, toggle(){}, contains(){ return false; } },
-    addEventListener(){}, setAttribute(){}, remove(){}, focus(){}, setSelectionRange(){}, click(){},
+    addEventListener(){}, setAttribute(){}, remove(){}, focus(){}, setSelectionRange(){}, click(){}, replaceChildren(){},
     querySelector(){ return null; }, querySelectorAll(){ return []; }, matches(){ return false; }, closest(){ return null; }
   };
 }
@@ -49,7 +49,7 @@ globalThis.__auditTest = {
   calculateAverageGpa, courseIndexForScope,
   courseAtScopeIndex, courseRowsForScope, queryAllSchedule, loadAllScheduleList,
   currentAcademicWeekNumber, defaultPersonalScheduleWeek, scheduleWeekValue, scheduleWeekDateForDay,
-  scheduleSectionClockText, scheduleGridSwipeDirection,
+  scheduleSectionClockText, scheduleGridSwipeDirection, handleScheduleGridTouchStart, handleScheduleGridTouchEnd,
   personalScheduleRows,
   courseArrangementRows, renderCourseRowsTable, scheduleExportRows,
   scheduleCsvEntries, buildScheduleCsv, scheduleCsvFileName,
@@ -593,6 +593,36 @@ const t = global.__auditTest;
   assert.strictEqual(t.scheduleGridSwipeDirection(-80, 10), 'next');
   assert.strictEqual(t.scheduleGridSwipeDirection(80, 10), 'previous');
   assert.strictEqual(t.scheduleGridSwipeDirection(10, 80), '');
+  {
+    const savedWeek = t.state.scheduleWeek.personal;
+    const savedCourses = t.state.data.courses;
+    t.state.data.courses = [{ name: '滑动测试', code: 'SWIPE', courseRecordVersion: 1, weeks: '1-8周', weekday: '周一', section: '第1-2节' }];
+    t.state.scheduleWeek.personal = '2';
+    const grid = { dataset: { scheduleScope: 'personal' }, scrollWidth: 360, clientWidth: 360,
+      scrollLeft: 0, classList: { contains: name => name === 'density-overview' } };
+    const swipe = (x, y = 0) => {
+      t.handleScheduleGridTouchStart({ target: { closest: () => grid }, touches: [{ clientX: 200, clientY: 200 }] });
+      t.handleScheduleGridTouchEnd({ changedTouches: [{ clientX: 200 + x, clientY: 200 + y }] });
+    };
+    swipe(90);
+    assert.strictEqual(t.state.scheduleWeek.personal, '1', 'compact grid swipes without horizontal overflow');
+    swipe(-90);
+    assert.strictEqual(t.state.scheduleWeek.personal, '2');
+    swipe(0, 90);
+    assert.strictEqual(t.state.scheduleWeek.personal, '2', 'vertical scroll does not switch week');
+    swipe(15);
+    assert.strictEqual(t.state.scheduleWeek.personal, '2', 'small movement does not switch week');
+    grid.classList.contains = () => false;
+    swipe(90);
+    assert.strictEqual(t.state.scheduleWeek.personal, '2', 'readable mode retains its edge-scroll behavior');
+    grid.scrollWidth = 1000;
+    swipe(90);
+    assert.strictEqual(t.state.scheduleWeek.personal, '2', 'first edge swipe arms only');
+    swipe(90);
+    assert.strictEqual(t.state.scheduleWeek.personal, '1');
+    t.state.scheduleWeek.personal = savedWeek;
+    t.state.data.courses = savedCourses;
+  }
   t.state.campus.code = savedScheduleCampus;
   t.state.calendar.firstWeekStart = '';
   t.state.scheduleWeek.personal = '';
@@ -1547,7 +1577,7 @@ const t = global.__auditTest;
   assert.strictEqual(t.state.localSchedule.managerOpen, false);
   assert.strictEqual(t.state.localSchedule.editorOpen, false);
   assert.strictEqual(t.state.localSchedule.conflict, null);
-  assert.ok(t.renderOverview().includes('今天安排'));
+  assert.ok(t.renderOverview().includes('今日时间线'));
 
   // An exact-date event is visible without firstWeekStart; a recurring school
   // course remains conservatively excluded until the academic week is known.
@@ -1678,9 +1708,10 @@ const t = global.__auditTest;
   assert.ok(nanhuPrompt.includes('第12节：21:15-22:00'));
   assert.ok(nanhuPrompt.includes('zhizhang-schedule-import/v1'));
   const scheduleActionMarkup = t.personalScheduleActions();
-  assert.ok(scheduleActionMarkup.includes('schedule-action-groups'));
-  assert.ok(scheduleActionMarkup.includes('aria-label="自定义安排"'));
-  assert.ok(scheduleActionMarkup.includes('aria-label="课表导入导出"'));
+  assert.ok(scheduleActionMarkup.includes('schedule-primary-actions'));
+  assert.ok(scheduleActionMarkup.includes('<details class="schedule-tools">'));
+  assert.ok(!scheduleActionMarkup.includes('<details class="schedule-tools" open'));
+  assert.ok(scheduleActionMarkup.includes('data-action="open-day-moves"'));
   assert.ok(scheduleActionMarkup.includes('data-action="open-schedule-image-export"'));
   assert.ok(scheduleActionMarkup.includes('data-action="open-local-schedule-ai-prompt"'));
   t.state.campus.code = 'hunnan';
