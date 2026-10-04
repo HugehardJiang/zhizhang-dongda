@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(require.resolve('../dashboard.js'), 'utf8');
-const section = source.slice(source.indexOf('let renderedPageView ='), source.indexOf('function renderPageSkeleton('));
+const section = source.slice(source.indexOf('let renderedPageView ='), source.indexOf('let activePersonalScheduleMotion ='));
 const animations = [], appended = [], frames = new Map();
 let frameId = 0, reduced = false, modal = false, renders = 0, refreshes = 0;
 function node(rect = {left: 16, top: -160, width: 358, height: 1200, bottom: 1040}) {

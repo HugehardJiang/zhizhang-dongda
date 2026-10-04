@@ -58,7 +58,7 @@ const elements = new Map();
 const storedSettings = new Map();
 const pageWrap = createEventTarget();
 let activeModal = null;
-let nativeToastNotificationsEnabled = true;
+let nativeToastNotificationsEnabled = false;
 let nativeCurrentTermSettings = "";
 let nativeCampusSetting = "";
 const nativeCalls = [];
@@ -220,12 +220,14 @@ assert.ok(loginSettings.indexOf('更多工具') < loginSettings.indexOf('第一�
 assert.ok(loginSettings.includes('WebVPN 地址生成器'));
 assert.ok(loginSettings.includes('id="toastNotificationsEnabled"'));
 assert.ok(loginSettings.includes('class="settings-switch-track"'));
-assert.ok(loginSettings.includes('隐藏所有底部 Toast，包括登录状态、缓存和数据刷新提示'));
+assert.ok(loginSettings.includes('显示操作提示'));
+assert.ok(loginSettings.includes('关闭后隐藏所有底部临时提示'));
 assert.ok(loginSettings.includes('id="currentTermSelect"'));
 assert.ok(loginSettings.includes('从教务系统同步'));
 assert.ok(loginSettings.indexOf('当前学期') < loginSettings.indexOf('第一周周日'));
 assert.ok(loginSettings.includes('id="campusSettingSelect"'));
-assert.ok(loginSettings.indexOf('默认校区与上课时间') < loginSettings.indexOf('第一周周日'));
+assert.ok(loginSettings.indexOf('默认校区') >= 0);
+assert.ok(loginSettings.indexOf('默认校区') < loginSettings.indexOf('第一周周日'));
 assert.ok(loginSettings.includes('data-action="open-local-schedule-ai-prompt"'));
 assert.ok(loginSettings.includes('data-action="open-local-schedule-batch-import"'));
 
@@ -322,6 +324,9 @@ assert.ok(nativeCalls.includes('copy-login-diagnostics'));
 // one bottom snackbar. It must never repopulate the legacy top notice.
 const notice = elements.get('notice');
 const toastRegion = elements.get('toastRegion');
+audit.setNotice('默认不显示操作提示。');
+assert.strictEqual(toastRegion.children.length, 0);
+audit.setToastNotificationsEnabled(true);
 audit.setNotice('正在后台重新登录…');
 assert.strictEqual(notice.textContent, '');
 assert.strictEqual(toastRegion.children.length, 1);

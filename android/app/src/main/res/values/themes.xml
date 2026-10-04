@@ -1,5 +1,5 @@
 <resources>
-    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="AppThemeBase" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:colorAccent">@color/native_brand</item>
@@ -9,4 +9,5 @@
         <item name="android:windowLightNavigationBar">true</item>
         <item name="android:windowNoTitle">true</item>
     </style>
+    <style name="AppTheme" parent="AppThemeBase" />
 </resources>

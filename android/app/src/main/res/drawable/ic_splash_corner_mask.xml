@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="156dp" android:height="156dp"
+    android:viewportWidth="156" android:viewportHeight="156">
+    <!-- A true 36dp quarter-circle at each corner, tangent to both straight edges. -->
+    <path android:fillColor="@color/native_background" android:fillType="evenOdd"
+        android:pathData="M0,0 H156 V156 H0 Z M36,0 H120 A36,36 0,0 1,156,36 V120 A36,36 0,0 1,120,156 H36 A36,36 0,0 1,0,120 V36 A36,36 0,0 1,36,0 Z" />
+</vector>

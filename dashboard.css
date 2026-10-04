@@ -1087,7 +1087,7 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .daily-schedule-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; }
 .daily-day-card { min-width: 0; padding: 0; background: transparent; border: 0; border-radius: 0; }
 .daily-day-card.is-today { border: 0; box-shadow: none; }
-.daily-day-header { margin-bottom: 0; padding: 0 0 9px; border-bottom: 1px solid var(--border); }
+.daily-day-header { margin-bottom: 14px; padding: 0; border-bottom: 0; }
 .daily-day-header h4 { margin: 0; color: var(--text-primary); font-size: 14px; font-weight: 650; }
 .daily-day-badge { display: none; }
 .daily-day-header .tag { display: block; margin-top: 4px; }
@@ -1101,13 +1101,13 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .daily-course-tags .course-chip-tags { display: inline; }
 .daily-course-card p { margin: 3px 0 0; color: var(--text-secondary); font-size: 11px; }
 .daily-course-card small { margin-top: 4px; color: var(--text-tertiary); font-size: 10px; }
-.daily-empty { min-height: 86px; place-items: start; align-content: center; padding: 12px 0; color: var(--text-tertiary); background: transparent; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; text-align: left; }
+.daily-empty { min-height: 86px; place-items: start; align-content: center; padding: 12px 0; color: var(--text-tertiary); background: transparent; border: 0; border-radius: 0; text-align: left; }
 .daily-empty strong { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
 .daily-empty span { display: none; }
-.course-records-details { margin-top: 22px; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; }
-.course-records-details summary { padding: 12px 0; color: var(--text-secondary); cursor: pointer; font-size: 12px; font-weight: 500; }
-.course-records-details[open] summary { border-bottom: 1px solid var(--border); }
-.course-records-details .table-wrap { margin: 10px 0 0; }
+.course-records-details { margin-top: 16px; border: 0; border-radius: 0; background: transparent; }
+.course-records-details summary { padding: 14px; color: var(--text-secondary); background: var(--control-fill); border-radius: var(--radius-sm); cursor: pointer; font-size: 12px; font-weight: 500; }
+.course-records-details[open] summary { margin-bottom: 14px; border-bottom: 0; }
+.course-records-details .table-wrap { margin: 0; }
 .course-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 28px; }
 .course-card { padding: 13px 0; background: transparent; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
 .course-card-button { width: 100%; color: inherit; text-align: left; }
@@ -1911,7 +1911,7 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .daily-course-tags .local-source-badge { margin: 0 5px 0 0; }
 .overview-priority-copy .local-source-badge { margin-left: 3px; }
 .overview-conflict-mark { margin-left: 7px; color: #9b7442; font-size: 10px; font-style: normal; font-weight: 600; }
-.local-schedule-inline { margin: 17px 0 14px; padding-top: 15px; border-top: 1px solid var(--border, #e4e9ef); }
+.local-schedule-inline { margin: 24px 0 14px; padding-top: 0; border-top: 0; }
 .local-inline-head, .local-manager-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
 .local-inline-head > div { display: grid; gap: 3px; }
 .local-inline-head strong, .local-manager-section-head strong { color: var(--text-primary, #263b49); font-size: 13px; }
@@ -2557,7 +2557,9 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
     position: absolute; inset: 0 0 auto; z-index: 5; visibility: visible;
     min-height: 0; height: calc(var(--toolbar-height) + var(--native-status-bar-inset) + 112px);
     display: block; opacity: 1; border: 0; border-radius: 0 0 24px 24px;
-    box-shadow: var(--glass-shadow); clip-path: inset(0 0 0);
+    /* Keep the expanded rounded shadow inside the paint bounds. A zero
+       inset clips it exactly at the backplate's bottom edge. */
+    box-shadow: var(--glass-shadow); clip-path: inset(0 -48px -48px);
     transition: clip-path 340ms var(--motion-settle);
   }
   .android-shell .android-ecode-placeholder > * { display: none; }
@@ -2748,12 +2750,20 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
     background-image: linear-gradient(145deg, rgba(255, 255, 255, .18), transparent 48%, rgba(255, 255, 255, .035));
     box-shadow: inset 0 1px 0 var(--liquid-rim), inset 0 -1px 0 rgba(0, 0, 0, .045), 0 4px 12px -8px rgba(15, 30, 50, .28);
   }
-  :is(.button:not(.button-link), .icon-button, .nav-item, .mobile-nav-item)::before {
+  :is(.daily-course-card, .overview-priority-main, .settings-tool-entry, .exam-card, .course-chip-variant) { position: relative; isolation: isolate; }
+  :is(.schedule-course-chip, .schedule-unplaced-chip) { isolation: isolate; }
+  :is(.button:not(.button-link), .icon-button, .nav-item, .mobile-nav-item,
+    .daily-course-card, .overview-priority-main, .settings-tool-entry, .exam-card,
+    .schedule-course-chip, .schedule-unplaced-chip, .course-chip-variant)::before {
     content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
     background: radial-gradient(ellipse at var(--liquid-touch-x, 50%) var(--liquid-touch-y, 50%), var(--liquid-flash), transparent 75%);
     opacity: 0; transition: opacity 160ms ease;
   }
-  :is(.button, .icon-button, .nav-item, .mobile-nav-item).is-liquid-pressed::before { opacity: 1; }
+  .is-liquid-pressed::before { opacity: 1; }
+  /* The delegated spring owns the transform; do not add a second CSS press. */
+  .has-liquid-controls :is(button, a.button, summary, .settings-switch, [role="button"]) { -webkit-user-select: none; user-select: none; }
+  .has-liquid-controls :is(.button, .icon-button, .nav-item, .mobile-nav-item,
+    .overview-priority-main, .daily-course-card, .score-mobile-row):active { transform: none; }
   .nav-item { position: relative; isolation: isolate; }
   .mobile-nav-item { isolation: isolate; }
   .mobile-nav-indicator { transition: transform 440ms cubic-bezier(.2, .95, .22, 1.14), opacity 220ms ease; }
@@ -2921,6 +2931,198 @@ td.primary-cell { color: var(--text-primary); font-weight: 600; }
 .android-session-footer small { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-tertiary); }
 .android-session-slot .android-login-entry-actions { width: auto; flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; margin: 0; }
 .android-session-slot .android-login-entry .button { width: auto; min-height: 32px; padding: 6px 9px; font-size: 11px; }
+/* Daily tasks: compact controls, explicit query scope and grouped details. */
+@media screen {
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .toolbar-term[hidden] { display: none; }
+  .query-term-context { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 18px; padding: 12px 16px; color: var(--text-primary); background: var(--warning-soft); border-radius: var(--radius-sm); }
+  .query-term-context > div { display: grid; gap: 4px; min-width: 0; }
+  .query-term-context strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+  .query-term-context span { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+  .query-term-context .button { flex: 0 0 auto; }
+  .personal-controls { display: flex; align-items: start; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 18px; }
+  .personal-view-toolbar { display: flex; align-items: center; flex: 1 1 auto; gap: 12px; min-width: 0; }
+  .personal-controls .schedule-display-switch { display: flex; flex: 0 0 auto; gap: 3px; margin: 0; padding: 3px; background: var(--control-fill); border: 0; border-radius: var(--radius-sm); }
+  .personal-controls .schedule-display-switch .button { min-height: 38px; margin: 0; }
+  .personal-week-control { min-width: 0; }
+  .personal-week-control select { width: 150px; min-width: 0; min-height: 44px; padding: 0 26px 0 12px; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-size: 14px; text-overflow: ellipsis; }
+  .personal-controls .schedule-primary-actions { display: flex; align-items: start; flex-wrap: wrap; gap: 8px; margin: 0; }
+  .personal-controls .schedule-primary-actions > .button,
+  .personal-controls .schedule-primary-actions summary { min-height: 44px; padding: 0 14px; font-size: 14px; }
+  .personal-search > summary { list-style: none; cursor: pointer; }
+  .personal-search > summary::-webkit-details-marker { display: none; }
+  .personal-search[open] > summary { color: var(--brand); }
+  .personal-search[open], .personal-controls .schedule-tools[open] { flex: 1 1 100%; }
+  .personal-search-panel { display: flex; gap: 8px; margin-top: 10px; }
+  .personal-search-panel input { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-size: 16px; }
+  .personal-controls .schedule-tools-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .schedule-tool-info, .schedule-tool-display { grid-column: 1 / -1; min-width: 0; }
+  .schedule-tool-info { display: grid; gap: 5px; padding: 2px 0 8px; font-size: 13px; line-height: 1.5; }
+  .schedule-tool-info strong { font-weight: 500; }
+  .schedule-tool-info span { color: var(--text-secondary); }
+  .schedule-tool-display { padding: 4px 0 12px; border-bottom: 0; }
+  .schedule-tool-display .schedule-density-controls { margin: 0; border: 0; padding: 0; }
+  .personal-controls .schedule-tool-display .schedule-density-controls .button { width: auto; }
+  .personal-filter-summary { margin: 0 0 12px; color: var(--text-secondary); font-size: 13px; }
+  .local-schedule-inline > summary { display: flex; align-items: center; min-height: 48px; padding: 12px 14px; color: var(--text-secondary); background: var(--control-fill); border-radius: var(--radius-sm); cursor: pointer; font-size: 14px; }
+  .local-schedule-inline[open] > summary { margin-bottom: 16px; }
+  .local-schedule-inline > summary::before { content: "›"; margin-right: 8px; }
+  .local-schedule-inline[open] > summary::before { content: "⌄"; }
+  .gpa-coverage { display: grid; gap: 6px; color: var(--text-secondary); font-size: 13px; line-height: 1.5; }
+  .gpa-summary .gpa-coverage > span { margin: 0; font-size: inherit; }
+  .gpa-summary .gpa-coverage-warning { color: var(--warning); }
+  .score-query-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin: 16px 0 12px; }
+  .score-query-heading h3 { margin: 0; color: var(--text-primary); font-size: 16px; font-weight: 600; }
+  .score-query-heading > span { color: var(--text-secondary); font-size: 13px; }
+  .exam-priority-section { margin: 18px 0 24px; }
+  .exam-following-section { margin: 18px 0; }
+  .exam-priority-card { background: var(--surface); box-shadow: var(--card-shadow); border-radius: var(--radius-lg); }
+  .exam-priority-card .exam-date-block { background: var(--brand-soft); }
+  .exam-status-text { flex: 0 0 auto; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+  .exam-today .exam-status-text { color: var(--warning); }
+  .exam-card-head p { white-space: normal; overflow-wrap: anywhere; }
+  .settings-panel { max-width: 880px; }
+  .settings-tools-section { margin-bottom: 22px; }
+  .settings-tool-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .settings-tool-entry { display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 78px; padding: 14px; color: var(--text-primary); background: var(--surface); border: 0; border-radius: var(--radius-md); box-shadow: var(--card-shadow); text-align: left; cursor: pointer; }
+  .settings-tool-entry > .nav-icon { flex: 0 0 22px; color: var(--brand); }
+  .settings-tool-entry > span { display: grid; gap: 5px; min-width: 0; }
+  .settings-tool-entry strong { font-size: 14px; font-weight: 600; word-break: keep-all; }
+  .settings-tool-entry small { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+  .settings-tool-entry .settings-tool-arrow { display: block; margin-left: auto; color: var(--text-tertiary); }
+  .settings-tool-entry:hover { background: var(--surface-hover); }
+  .settings-options-card { overflow: hidden; color: var(--text-primary); background: var(--surface); border-radius: var(--radius-lg); box-shadow: var(--card-shadow); }
+  .settings-group { margin: 0; color: var(--text-primary); background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+  .settings-group + .settings-group { border-top: 1px solid var(--separator); }
+  .settings-group > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 80px; padding: 16px 18px; list-style: none; cursor: pointer; }
+  .settings-group > summary::-webkit-details-marker { display: none; }
+  .settings-group > summary > span:first-child { display: grid; gap: 6px; min-width: 0; }
+  .settings-group > summary strong { font-size: 16px; font-weight: 600; }
+  .settings-group > summary small { color: var(--text-secondary); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  .settings-group-arrow { color: var(--text-tertiary); font-size: 22px; }
+  .settings-group[open] .settings-group-arrow { transform: rotate(90deg); }
+  .settings-group-body { padding: 0 18px 16px; }
+  .settings-group .settings-section { margin: 0; padding: 18px 0; border-radius: 0; background: transparent; border-bottom: 1px solid var(--separator); box-shadow: none; }
+  .settings-group .settings-section:first-child { padding-top: 8px; border-top: 0; }
+  .settings-group .settings-section:last-child { padding-bottom: 0; border-bottom: 0; }
+  .settings-group .settings-field { max-width: none; }
+  .settings-group .settings-field > select, .settings-group .settings-field > input { width: 100%; }
+  .settings-description { margin: 0 0 12px; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+  .settings-help { margin-top: 10px; color: var(--text-secondary); font-size: 13px; }
+  .settings-help > summary { display: flex; align-items: center; gap: 6px; min-height: 44px; list-style: none; color: var(--brand); cursor: pointer; }
+  .settings-help > summary::-webkit-details-marker { display: none; }
+  .settings-help > summary::after { content: "⌄"; }
+  .settings-help[open] > summary::after { content: "⌃"; }
+  .settings-help p { margin: 0 0 10px; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+  .settings-help.settings-danger-zone > summary { color: var(--danger); }
+  .settings-group .settings-row { border-top: 0; }
+  .course-detail-priority { display: grid; gap: 16px; padding: 18px; margin-bottom: 16px; background: var(--brand-soft); border-radius: var(--radius-md); }
+  .course-detail-priority span { display: block; margin-bottom: 5px; color: var(--text-secondary); font-size: 13px; }
+  .course-detail-priority strong { display: block; color: var(--text-primary); font-size: 16px; line-height: 1.5; font-weight: 600; overflow-wrap: anywhere; }
+  .course-detail-priority .course-detail-time strong { color: var(--brand); font-size: 24px; font-variant-numeric: tabular-nums; }
+  .course-detail-priority small { display: block; margin-top: 6px; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
+  .course-detail-teacher { display: flex; align-items: baseline; gap: 10px; }
+  .course-detail-teacher span { margin: 0; }
+  .course-detail-teacher strong { font-size: 15px; font-weight: 500; }
+  .course-detail-modal .course-detail-attributes { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 20px; }
+  .course-detail-modal .course-detail-attributes { row-gap: 18px; }
+  .course-detail-attributes > div { padding: 0; border-bottom: 0; }
+  .course-detail-attributes .course-detail-code { grid-column: 1 / -1; }
+  .course-detail-source { margin-top: 16px; color: var(--text-secondary); font-size: 13px; }
+  .course-detail-source > summary { min-height: 44px; padding: 12px 0; cursor: pointer; }
+  .course-detail-source p { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+  .overview-timeline-copy small.overview-timeline-footer { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
+  .overview-timeline-footer > span { margin: 0; font-size: inherit; }
+  .overview-timeline-status { color: var(--text-secondary); font-size: 12px; font-style: normal; white-space: nowrap; }
+  .overview-timeline-row.is-active .overview-timeline-status { color: var(--success); font-weight: 600; }
+  .overview-timeline-row.is-next .overview-timeline-status { color: var(--brand); font-weight: 600; }
+  .overview-timeline-row.is-next .overview-timeline-marker { background: var(--brand); }
+  .overview-timeline-row.is-ended .overview-timeline-card { background: linear-gradient(135deg, rgba(var(--card-tint-rgb, 80, 153, 230), .1), transparent 85%), var(--surface-subtle); box-shadow: none; }
+  .overview-timeline-row.is-ended .overview-timeline-copy strong { color: var(--text-secondary); }
+  :is(.settings-tool-entry, .settings-group > summary, .settings-help > summary, .personal-search > summary):focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+}
+/* Keep separators inside continuous lists, with breathing room on both sides.
+   Standalone headings and already-separated cards do not need another rule. */
+@media screen {
+  .exam-list { margin-top: 16px; border-top: 0; }
+  .exam-list > .exam-card:last-child { border-bottom: 0; }
+  .ended-exams { margin-top: 24px; padding-top: 12px; }
+  .ended-exams summary { margin-bottom: 4px; }
+  .settings-group .settings-section:not(:first-child) { padding-top: 20px; }
+  .daily-schedule + .course-records-details { margin-top: 24px; }
+}
+@media screen and (max-width: 899px) {
+  .query-term-context { align-items: stretch; flex-direction: column; gap: 8px; padding: 12px; }
+  .query-term-context .button { align-self: start; min-height: 44px; }
+  .personal-controls { display: grid; gap: 10px; margin-bottom: 16px; }
+  .personal-view-toolbar { justify-content: space-between; gap: 8px; }
+  .personal-controls .schedule-display-switch .button { min-height: 38px; padding: 0 10px; font-size: 14px; }
+  .personal-week-control { flex: 0 1 130px; }
+  .personal-week-control select { width: 100%; max-width: 130px; }
+  .personal-controls .schedule-primary-actions { width: 100%; }
+  .personal-controls .schedule-tools:not([open]) { flex: 1; }
+  .personal-controls .schedule-tools > summary { display: flex; justify-content: center; }
+  .personal-controls .schedule-tools-panel .button { min-height: 44px; }
+  .gpa-coverage { gap: 4px; }
+  .gpa-summary .gpa-coverage > span { font-size: 13px; }
+  .exam-card-head { flex-wrap: wrap; gap: 4px 8px; }
+  .exam-status-text { font-size: 12px; }
+  .settings-tool-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .settings-tool-entry { min-height: 88px; gap: 8px; padding: 12px 10px; }
+  .settings-tool-entry .settings-tool-arrow { display: none; }
+  .settings-tool-entry:last-child:nth-child(odd) { grid-column: 1 / -1; min-height: 72px; }
+  .settings-tool-entry strong { font-size: 14px; }
+  .settings-tool-entry small { font-size: 12px; }
+  .settings-group .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  .settings-group .settings-actions > .button { flex: 1 1 auto; min-width: 0; white-space: normal; }
+  .course-detail-modal .detail-modal-head { margin-bottom: 16px; }
+  .course-detail-priority { padding: 16px; }
+  .course-detail-priority .course-detail-time strong { font-size: 24px; }
+}
 @media (prefers-reduced-motion: reduce) {
   [data-session-kind="loading"] .android-session-mark::before { animation: none; }
+}
+
+/* Keep the three primary actions in place while the full-width tools unfold. */
+@media screen {
+  .personal-controls .schedule-primary-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; }
+  .personal-controls .schedule-tools,
+  .personal-controls .schedule-tools[open] { grid-column: 2; grid-row: 1; min-width: 0; }
+  .personal-controls .schedule-tools > summary { display: flex; justify-content: center; width: 100%; }
+  .personal-search { grid-column: 3; grid-row: 1; }
+  .personal-search[open] { grid-column: 1 / -1; grid-row: 2; }
+  .schedule-tools-body { position: relative; left: var(--schedule-tools-offset, 0px); width: var(--schedule-tools-width, 100%); display: flow-root; }
+  .schedule-tools-body.is-expanding { overflow: clip; overflow-clip-margin: 6px; will-change: height, opacity; }
+  /* A shared canvas includes each view's real edges before the slide starts.
+     Padding restores the original day inset and the week's wider -6px margin. */
+  .personal-schedule-viewport { --schedule-motion-gutter: 24px; position: relative; display: flow-root; min-width: 0; margin-inline: calc(-1 * var(--schedule-motion-gutter)); }
+  .personal-schedule-view { display: flow-root; padding-inline: var(--schedule-motion-gutter); }
+  .personal-schedule-viewport.is-switching { overflow: hidden; overflow-clip-margin: 0; clip-path: inset(0); isolation: isolate; }
+  .personal-schedule-viewport.is-switching > .personal-schedule-view { will-change: transform; }
+  .schedule-view-departure { position: absolute; inset: 0 0 auto; pointer-events: none; }
+}
+@supports (clip-path: inset(0)) {
+  /* Clip horizontal departure content, while preserving vertical card shadows. */
+  .personal-schedule-viewport.is-switching { overflow: visible; clip-path: inset(-24px 0 -32px); }
+}
+@media screen and (max-width: 899px) {
+  .personal-schedule-viewport { --schedule-motion-gutter: 16px; }
+}
+@media screen and (min-width: 900px) {
+  .personal-controls .schedule-primary-actions { grid-template-columns: auto 180px auto; justify-content: start; }
+}
+
+@media screen and (max-width: 899px) {
+  /* The fixed dock owns its drag; vertical finger wobble must not let the
+     browser take over and send pointercancel in the middle of a slide. */
+  .mobile-bottom-nav { touch-action: none; }
+  .mobile-bottom-nav:is(.is-nav-tracking, .is-nav-dragging, .is-nav-snapping) .mobile-nav-indicator { transition: none; will-change: transform; }
+  .mobile-bottom-nav.is-nav-dragging .mobile-nav-indicator::after { transform: scale(1.035, .96); }
+  .mobile-bottom-nav.is-nav-dragging .mobile-nav-item.is-active { color: var(--text-tertiary); }
+  .mobile-bottom-nav.is-nav-dragging .mobile-nav-item.is-drag-preview { color: var(--brand); }
+  .mobile-bottom-nav.is-nav-dragging .mobile-nav-item { transform: none !important; opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mobile-nav-indicator, .mobile-nav-indicator::after { transition: none; }
+  .mobile-bottom-nav.is-nav-dragging .mobile-nav-indicator::after { transform: none; }
 }

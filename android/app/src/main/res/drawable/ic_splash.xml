@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher remains adaptive. The system splash gets its own smooth edge,
+     entirely inside Android's 192dp safe circle on a 288dp transparent canvas. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <size android:width="288dp" android:height="288dp" />
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+    <item android:width="156dp" android:height="156dp" android:gravity="center">
+        <bitmap android:src="@drawable/ic_app_foreground"
+            android:gravity="fill" android:filter="true" />
+    </item>
+    <!-- Match the splash window color outside the rounded rectangle. This keeps
+         the original bitmap intact and uses native vector antialiasing. -->
+    <item android:width="156dp" android:height="156dp" android:gravity="center"
+        android:drawable="@drawable/ic_splash_corner_mask" />
+</layer-list>

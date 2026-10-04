@@ -6,8 +6,8 @@
 
 | 端 | 当前版本写在哪 | 本稿核对值 |
 | --- | --- | --- |
-| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.129` |
-| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.110` / `110` |
+| Chrome MV3 插件 | `manifest.json` 的 `version` | `0.3.134` |
+| Android 应用 | `android/app/build.gradle.kts` 的 `versionName` / `versionCode` | `0.1.115` / `115` |
 
 `README.md`、`android/README.md` 里的版本说明可能滞后，以 `manifest.json` 和 `build.gradle.kts` 为准。
 
@@ -62,7 +62,8 @@ dashboard.html  +  dashboard.css  +  dashboard.js     ← 几乎全部业务在�
 ├── vendor/                 ← html2canvas、jsPDF（培养方案 PDF / 部分导出）
 ├── tests/
 │   ├── audit_smoke.js      ← 映射、GPA、学期、本地课表、PDF 模型等
-│   └── mobile_shell_smoke.js ← Android 校园码头 + 弹窗手势
+│   ├── mobile_shell_smoke.js ← Android 校园码头 + 弹窗手势
+│   └── ui_workflows_test.js ← 查询学期、课程配色、考试、绩点、详情与设置
 └── android/                ← 独立 Gradle 工程
     ├── README.md
     └── app/src/main/
@@ -222,6 +223,8 @@ saveImage / saveCsv
 
 APK 文件名：`执掌东大-Android-<versionName>-<buildType>.apk`。
 
+Android 12+ 启动图标由 `res/values[-night]-v31/themes.xml` 的 `windowSplashScreenAnimatedIcon` 指向 `drawable/ic_splash.xml`；复用原始袋鼠 PNG，`ic_splash_corner_mask.xml` 绘制相切圆角，遮罩与窗口共用 `native_background`。默认和夜间 `AppThemeBase` 保留应用原有系统栏与主题设置。桌面自适应图标 `ic_app` 不参与启动页裁切。
+
 原生侧还负责：Cookie 持久化、后台不可见 WebView 重登、图形/手机/设备挑战检测与可见官方 WebView 交互、可信设备选项同步、登录诊断脱敏、E 码通二维码截图、微信可见性、模态时隐藏校园码。细节以 `android/README.md` 为准。
 
 校园码默认完全收起，由顶栏按钮或主页面顶部额外下拉显示；首页保留一行功能提示。原生 `ecodePanelHidden` 与页面 `campusHeaderState` 必须保持一致，认证返回不得强制恢复可见。状态栏沉浸由 `applyCurrentSystemBarInsets()` / `syncDashboardStatusBarInset()` 和页面 `__setNativeStatusBarInset` 配合：背景覆盖状态栏，标题在工具栏内部避让，登录页仍整体留在安全区。
@@ -264,6 +267,7 @@ node tests/mobile_shell_smoke.js
 node tests/page_motion_test.js
 node tests/liquid_controls_test.js
 node tests/android_login_smoke.js
+node tests/ui_workflows_test.js
 ```
 
 这两份测试会把 `dashboard.js` 放进 stub 的 `document`/`AndroidApi` 里跑，**不断网、不打真教务**。`audit_smoke.js` 末尾会剥掉自动 `refresh()`。加映射/学期/GPA/本地课表/PDF 模型时扩 `audit_smoke.js`；动校园码头、`render()` 是否重置 header、弹窗锁手势时扩 `mobile_shell_smoke.js`。
@@ -342,3 +346,25 @@ Chrome：`chrome://extensions/` → 开发者模式 → 加载本仓库根目录
 登录恢复：`markAcademicSessionHealthy()` 在会话得到验证后同步 `ready`，清除保留 WebView 内存中的旧失败卡片；`applyAcademicResponseStatus()` 在 UI 线程检查请求代次，登录前请求不得覆盖新会话。`tests/login_recovery_test.js` 编译实际 Java 方法测试竞态，并验证网页提示与 Toast 的同步清理。
 
 校园码：滚动容器固定尺寸与位置，只改变顶部预留并按实际内容坐标进行一次垂直补偿；底部 scrollTop 裁切、快速反向、提示行与数据更新共用同一个过渡。`tests/campus_drawer_motion_test.js` 验证这些边界。
+
+### 界面查询与配色
+
+`selectPersonalQueryTerm()` 统一个人四页的学期切换，`renderPersonalQueryContext()` 显示历史查询提示。`prepareCourseColors()` 按完整课程集准备色调，`courseColorIdentity()` 优先课程号，同名且课程号唯一时兼容缺少课程号的详情行；`courseGlassToneStyle()` 向首页、日课表和周表输出相同颜色变量，本地课程保留用户选色。`settingsGroupMarkup()` 组织一个设置大卡片中的四个可展开分组。Toast 默认值在 `initialToastNotificationsEnabled()` 和 AndroidBridge `getToastNotificationsEnabled()` 两端均为关闭；存储偏好优先。实现与验收记录见 `UI_OPTIMIZATION_PLAN.md`。
+
+### 跟手弹性触感
+
+`bindLiquidControls()` 委托 Pointer / 键盘事件；`updateLiquidPressShape()` 根据触点与初始边界生成平移、缩放、倾斜目标，`wakeLiquidControlMotion()` 以 RAF 积分阻尼弹簧。`liquidControlAnimations` 仅保留活动/回弹中的控件；稳定按压暂停 RAF，回弹结束由 `clearLiquidControlMotion()` 恢复原样式。触摸滚动、周表横滑、其他指针、失焦、DOM 替换和减少动态效果由 `tests/liquid_controls_test.js` 验证；不拦截默认事件、不设置指针捕获、不接管业务点击。
+
+### 课表切换与底栏拖动
+
+今天/明天与周表使用双向横移，课表工具只对展开内容做过渡，保持主按钮行稳定。移动底栏允许拖动当前高亮，松手吸附最近导航入口并切页；保留点击路径，取消手势恢复当前入口，减少动态效果时直接落位。版本 0.3.131 / Android 0.1.112 对应本轮实现，具体行为与验证状态见 `UI_OPTIMIZATION_PLAN.md`。
+
+0.3.132 / Android 0.1.113 修复课表切换的内容裁切与 Android 底栏拖动取消路径：离场文字应限制在课表内容区内，有效触摸拖动持续跟手，松手吸附，取消后归位。针对用户反馈的验证记录追加在 `UI_OPTIMIZATION_PLAN.md`。
+
+0.3.133 / Android 0.1.114 将课表切换的动画容器边界稳定覆盖日视图与周表：保留日视图距屏幕 16px、周表 10px 的差异，周表以左右各 6px 负边距扩展；切换过程中容纳完整周表宽度，结束时解除临时裁切不再突然露出两侧内容。验证状态见 `UI_OPTIMIZATION_PLAN.md`。
+
+### Android 启动图标圆角
+
+0.3.134 / Android 0.1.115 修复启动图标边缘的尖角，保留蓝色袋鼠图案。图标资源位于 `android/app/src/main/res/`，自适应图标与旧版兼容图标的边界应分别验证；本轮图标验证与构建状态见 `UI_OPTIMIZATION_PLAN.md`。
+
+底栏 `lostpointercapture` 只接受 `event.target === nav` 且导航已无捕获的同一指针；按钮→导航的隐式捕获转移不能取消拖动。Touch 用 pointerup/pointercancel 判断接触结束，不用鼠标 buttons。课表 `.personal-schedule-viewport.is-switching` 的裁切边界不向外扩展。

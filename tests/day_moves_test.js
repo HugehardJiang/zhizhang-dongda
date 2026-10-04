@@ -96,7 +96,8 @@ for (const row of moved.filter(row => row.dayMoveDate)) {
   const markup = t.renderCourseDetailModal();
   assert.ok(markup.includes(`原上课日期：${move.from}`));
   assert.ok(markup.includes(`实际上课：${move.to}`));
-  assert.ok(markup.indexOf('class="day-move-detail"') < markup.indexOf('class="detail-grid"'));
+  assert.ok(markup.indexOf('class="course-detail-priority"') >= 0);
+  assert.ok(markup.indexOf('class="day-move-detail"') < markup.indexOf('class="course-detail-priority"'));
   assert.ok(t.courseChipMarkup(row).includes('已调课'));
   assert.ok(t.courseChipMarkup(row).includes('class="course-room"'));
 }
